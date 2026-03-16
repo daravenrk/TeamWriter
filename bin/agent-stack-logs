@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker compose -f /home/daravenrk/dragonlair/agent_stack/docker-compose.agent.yml logs -f --tail=200

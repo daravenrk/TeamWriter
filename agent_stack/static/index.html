@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dragonlair Agent Control</title>
+  <style>
+    :root { --bg:#0b1020; --panel:#121a30; --fg:#e8edf7; --muted:#9fb0d0; --ok:#2dd4bf; --warn:#f59e0b; --bad:#f87171; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:linear-gradient(160deg,#091226,#101a33); color:var(--fg); }
+    .wrap { max-width:1200px; margin:24px auto; padding:0 16px; display:grid; gap:16px; }
+    .card { background:var(--panel); border:1px solid #263252; border-radius:14px; padding:14px; }
+    h1,h2 { margin:0 0 10px 0; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    textarea,input,select { width:100%; box-sizing:border-box; border-radius:10px; border:1px solid #2a3962; background:#0d1630; color:var(--fg); padding:10px; }
+    textarea { min-height:120px; }
+    button { background:#1f3a8a; color:white; border:none; border-radius:10px; padding:10px 14px; cursor:pointer; }
+    button.secondary { background:#334155; }
+    button.danger { background:#991b1b; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; border-bottom:1px solid #243152; padding:8px; font-size:13px; }
+    .pill { padding:2px 8px; border-radius:999px; font-size:12px; }
+    .queued { background:#3f3f46; }
+    .running { background:#1d4ed8; }
+    .completed { background:#0f766e; }
+    .failed { background:#991b1b; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Dragonlair Agent Control</h1>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Steering Input</h2>
+        <label>Mode</label>
+        <select id="mode">
+          <option value="book">Book</option>
+          <option value="code">Code</option>
+        </select>
+        <label>Direction</label>
+        <textarea id="direction" placeholder="High-level steering and constraints"></textarea>
+        <label>Task Prompt</label>
+        <textarea id="prompt" placeholder="Task request"></textarea>
+        <button id="submitTask">Go</button>
+        <button id="streamTask">Stream</button>
+        <pre id="streamOut" style="white-space:pre-wrap;margin-top:10px"></pre>
+      </div>
+
+      <div class="card">
+        <h2>Subagent Health</h2>
+        <pre id="health"></pre>
+      </div>
+    </div>
+
+    <!-- Book Mode Launcher removed. All input now handled via Steering Input. -->
+
+    <div class="card">
+      <h2>Subagent Telemetry</h2>
+      <table>
+        <thead>
+          <tr><th>Agent</th><th>State</th><th>Heartbeat</th><th>Profile</th><th>Model</th><th>Task</th><th>LLM Preview</th></tr>
+        </thead>
+        <tbody id="agents"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Task Queue Status</h2>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+        <button id="refreshStatus" class="secondary">Refresh</button>
+        <button id="clearHistory" class="danger">Clear History</button>
+        <span id="clearHistoryResult" style="font-size:12px;color:var(--muted);"></span>
+      </div>
+      <div id="counts"></div>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Status</th><th>Queue</th><th>Profile</th><th>Route</th><th>Model</th><th>Error</th></tr>
+        </thead>
+        <tbody id="tasks"></tbody>
+      </table>
+    </div>
+  </div>
+
+<div id="bookModeBanner" style="display:none;background:#f59e0b;color:#222;padding:12px 18px;border-radius:10px;margin-bottom:18px;font-weight:bold;text-align:center;">
+    Book Mode Active: Book-writing workflow in progress. Coding mode is temporarily disabled.
+    <button id="cancelBookMode" style="margin-left:18px;background:#991b1b;color:#fff;">Cancel Book Mode</button>
+  </div>
+
+<div id="codingModeBanner" style="display:none;background:#1d4ed8;color:#fff;padding:12px 18px;border-radius:10px;margin-bottom:18px;font-weight:bold;text-align:center;">
+    Coding Mode Active: Coding workflow in progress. Book mode is temporarily disabled.
+    <button id="cancelCodingMode" style="margin-left:18px;background:#991b1b;color:#fff;">Cancel Coding Mode</button>
+  </div>
+
+<script>
+
+function getSelectedProfile() {
+  // Map mode to default profile
+  const mode = document.getElementById('mode').value;
+  if (mode === 'book') return 'book-writer';
+  if (mode === 'code') return 'amd-coder';
+  return null;
+}
+
+function pill(st) {
+  return `<span class="pill ${st}">${st}</span>`;
+}
+
+async function refreshStatus() {
+  let res = await fetch('/api/ui-state');
+  if (!res.ok) {
+    res = await fetch('/api/status');
+  }
+  const data = await res.json();
+  document.getElementById('health').textContent = JSON.stringify(data.health, null, 2);
+  const c = data.task_counts;
+  document.getElementById('counts').textContent = `queued=${c.queued} running=${c.running} completed=${c.completed} failed=${c.failed}`;
+
+  const tbody = document.getElementById('tasks');
+  tbody.innerHTML = '';
+  for (const t of data.tasks) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${t.id.slice(0,8)}</td><td>${pill(t.status)}</td><td>${t.queue_position||''}</td><td>${t.profile||''}</td><td>${t.route||''}</td><td>${t.model||''}</td><td>${t.error||''}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  const agentBody = document.getElementById('agents');
+  agentBody.innerHTML = '';
+  const agents = (data.health && data.health.agents) || {};
+  for (const [name, info] of Object.entries(agents)) {
+    const tr = document.createElement('tr');
+    const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '';
+    const task = (info.current_task_excerpt || '').slice(0, 90);
+    const preview = (info.last_response_preview || '').slice(0, 120);
+    tr.innerHTML = `<td>${name}</td><td>${info.state || ''}</td><td>${hb}</td><td>${info.current_profile || ''}</td><td>${info.current_model || ''}</td><td>${task}</td><td>${preview}</td>`;
+    agentBody.appendChild(tr);
+  }
+
+  // Detect if any running or queued task is book-flow
+  let bookMode = false;
+  let codingMode = false;
+  for (const t of data.tasks) {
+    if ((t.profile === 'book-flow') && (t.status === 'queued' || t.status === 'running')) {
+      bookMode = true;
+    }
+    if ((t.profile === 'amd-coder' || t.profile === 'nvidia-fast' || t.profile === 'nvidia-lowlatency') && (t.status === 'queued' || t.status === 'running')) {
+      codingMode = true;
+    }
+  }
+  setBookMode(bookMode);
+  setCodingMode(codingMode);
+  // If coding mode is active, block book mode input (future: block book-related prompts)
+  if (codingMode) {
+    // Optionally, show a warning or block book-related actions
+    // For now, just show the banner
+  }
+}
+
+async function queueTask() {
+  const payload = {
+    profile: getSelectedProfile(),
+    direction: document.getElementById('direction').value,
+    prompt: document.getElementById('prompt').value,
+  };
+  await fetch('/api/tasks', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  refreshStatus();
+}
+
+async function runStream() {
+  const out = document.getElementById('streamOut');
+  out.textContent = '';
+  const payload = {
+    profile: getSelectedProfile(),
+    direction: document.getElementById('direction').value,
+    prompt: document.getElementById('prompt').value,
+  };
+  const res = await fetch('/api/stream', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    out.textContent += decoder.decode(value, {stream:true});
+  }
+}
+
+async function clearHistory() {
+  const ok = window.confirm('Clear all visible task history and server-side run history?');
+  if (!ok) return;
+
+  const result = document.getElementById('clearHistoryResult');
+  result.textContent = 'Clearing...';
+
+  try {
+    const res = await fetch('/api/clear-history', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.textContent = `Clear failed: ${data.detail || res.status}`;
+      return;
+    }
+    result.textContent = `Cleared. logs=${data?.removed?.changes_logs || 0}, diagnostics=${data?.removed?.diagnostics || 0}`;
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Clear failed: ${err}`;
+  }
+}
+
+async function startBookFlow() {
+  const payload = {
+    title: document.getElementById('bookTitle').value,
+    premise: document.getElementById('bookPremise').value,
+    chapter_number: Number(document.getElementById('bookChapterNumber').value || 1),
+    chapter_title: document.getElementById('bookChapterTitle').value,
+    section_title: document.getElementById('bookSectionTitle').value,
+    section_goal: document.getElementById('bookSectionGoal').value,
+  };
+  const out = document.getElementById('bookFlowOut');
+  const res = await fetch('/api/book-flow', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  out.textContent = JSON.stringify(data, null, 2);
+  refreshStatus();
+}
+
+document.getElementById('submitTask').addEventListener('click', queueTask);
+document.getElementById('streamTask').addEventListener('click', runStream);
+document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
+document.getElementById('clearHistory').addEventListener('click', clearHistory);
+refreshStatus();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>

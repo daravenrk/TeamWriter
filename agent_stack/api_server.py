@@ -1,0 +1,921 @@
+import os
+import threading
+import time
+import uuid
+import glob
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import json
+from types import SimpleNamespace
+from typing import Dict, Optional, List, Any
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+
+from .book_flow import run_flow
+from .orchestrator import OrchestratorAgent
+
+
+class SteerRequest(BaseModel):
+    prompt: str
+    direction: Optional[str] = None
+    profile: Optional[str] = None
+    model: Optional[str] = None
+
+
+class StreamRequest(BaseModel):
+    prompt: str
+    direction: Optional[str] = None
+    profile: Optional[str] = None
+    model: Optional[str] = None
+
+
+class RecoverHungRequest(BaseModel):
+    force: bool = False
+
+
+class BookFlowRequest(BaseModel):
+    title: str
+    premise: str
+    chapter_number: int = 1
+    chapter_title: str
+    section_title: str
+    section_goal: str
+    genre: str = "speculative fiction"
+    audience: str = "adult"
+    tone: str = "cinematic and emotionally grounded"
+    writer_words: int = 1400
+    target_word_count: int = 125000
+    page_target: int = 450
+    max_retries: int = 2
+    merge_context_words: int = 3500
+    verbose: bool = False
+    writer_profile: str = "book-writer"
+    editor_profile: str = "book-editor"
+    publisher_profile: str = "book-publisher"
+    output_dir: str = "/home/daravenrk/dragonlair/book_project"
+
+
+class OpenClawCompatMessage(BaseModel):
+    role: str
+    content: Optional[Any] = None
+    name: Optional[str] = None
+
+
+class OpenClawCompatChatRequest(BaseModel):
+    model: str
+    messages: List[OpenClawCompatMessage]
+    stream: bool = False
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    tools: Optional[List[dict]] = None
+    tool_choice: Optional[Any] = None
+
+
+@dataclass
+class TaskRecord:
+    id: str
+    created_at: float
+    status: str
+    prompt: str
+    direction: Optional[str]
+    profile: Optional[str]
+    route: Optional[str] = None
+    model: Optional[str] = None
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    response: Optional[str] = None
+    error: Optional[str] = None
+
+
+app = FastAPI(title="Dragonlair Agent API", version="0.1.0")
+orchestrator = OrchestratorAgent()
+executor = ThreadPoolExecutor(max_workers=int(os.environ.get("AGENT_MAX_WORKERS", "2")))
+_task_lock = threading.Lock()
+_tasks: Dict[str, TaskRecord] = {}
+STRICT_ONE_MODEL_PER_ROUTE = str(os.environ.get("STRICT_ONE_MODEL_PER_ROUTE", "true")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+NVIDIA_ROUTE_NAME = str(os.environ.get("AGENT_NVIDIA_ROUTE_NAME", "ollama_nvidia")).strip() or "ollama_nvidia"
+NVIDIA_ALLOW_MIXED_TINY_MODELS = str(
+    os.environ.get("AGENT_NVIDIA_ALLOW_MIXED_TINY_MODELS", "false")
+).lower() in {"1", "true", "yes", "on"}
+NVIDIA_TINY_MAX_ACTIVE_MODELS = max(
+    1,
+    int(os.environ.get("AGENT_NVIDIA_TINY_MAX_ACTIVE_MODELS", "2")),
+)
+_nvidia_tiny_raw = str(
+    os.environ.get(
+        "AGENT_NVIDIA_TINY_MODELS",
+        "qwen3.5:4b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b",
+    )
+)
+NVIDIA_TINY_MODELS = {item.strip() for item in _nvidia_tiny_raw.split(",") if item.strip()}
+STRICT_MODE_VALIDATION = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "true")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+UI_STATE_PATH = Path(os.environ.get("AGENT_UI_STATE_PATH", "/home/daravenrk/dragonlair/book_project/webui_state.json"))
+UI_EVENTS_PATH = Path(os.environ.get("AGENT_UI_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"))
+
+
+def _ensure_parent(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _write_json_atomic(path: Path, payload: dict):
+    _ensure_parent(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _append_ui_event(event_type: str, payload: dict):
+    entry = {
+        "ts": time.time(),
+        "event": event_type,
+        "payload": payload,
+    }
+    _ensure_parent(UI_EVENTS_PATH)
+    with open(UI_EVENTS_PATH, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def _build_status_payload(records: List[TaskRecord]):
+    queue_positions = _compute_queue_positions(records)
+    tasks = [
+        _task_to_dict(v, queue_position=queue_positions.get(v.id))
+        for v in sorted(records, key=lambda t: t.created_at, reverse=True)[:50]
+    ]
+
+    counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
+    for task in tasks:
+        st = task["status"]
+        if st in counts:
+            counts[st] += 1
+
+    return {
+        "source": "flat_file",
+        "generated_at": time.time(),
+        "health": orchestrator.get_agent_health_report(),
+        "task_counts": counts,
+        "tasks": tasks,
+    }
+
+
+def _refresh_ui_state_snapshot(event_type: str = "snapshot"):
+    with _task_lock:
+        records = list(_tasks.values())
+    payload = _build_status_payload(records)
+    _write_json_atomic(UI_STATE_PATH, payload)
+    _append_ui_event(event_type, {"task_count": len(payload.get("tasks", []))})
+    return payload
+
+
+def _read_ui_state_snapshot():
+    if not UI_STATE_PATH.exists():
+        return _refresh_ui_state_snapshot(event_type="bootstrap")
+    try:
+        return json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return _refresh_ui_state_snapshot(event_type="repair")
+
+
+def _compose_prompt(direction: Optional[str], prompt: str) -> str:
+    if direction and direction.strip():
+        return f"Direction:\n{direction.strip()}\n\nTask:\n{prompt.strip()}"
+    return prompt.strip()
+
+
+def _require_openclaw_mode():
+    mode = getattr(orchestrator, "server_mode", "standard")
+    if mode not in {"openclaw-client", "openclaw"}:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenClaw-compatible endpoints are available only in openclaw-client mode",
+        )
+
+
+def _load_openclaw_model_profile_map() -> Dict[str, str]:
+    """
+    Supports either JSON or comma-delimited mapping.
+
+    JSON example:
+    OPENCLAW_MODEL_PROFILE_MAP={"openclaw-fast":"nvidia-fast","openclaw-deep":"amd-writer"}
+
+    CSV example:
+    OPENCLAW_MODEL_PROFILE_MAP=openclaw-fast=nvidia-fast,openclaw-deep=amd-writer
+    """
+    raw = str(os.environ.get("OPENCLAW_MODEL_PROFILE_MAP", "")).strip()
+    if not raw:
+        return {}
+
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items()}
+        except Exception:
+            return {}
+        return {}
+
+    mapping: Dict[str, str] = {}
+    for item in raw.split(","):
+        chunk = item.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        model_name, profile_name = chunk.split("=", 1)
+        model_name = model_name.strip()
+        profile_name = profile_name.strip()
+        if model_name and profile_name:
+            mapping[model_name] = profile_name
+    return mapping
+
+
+def _validate_openclaw_profile_config():
+    mode = getattr(orchestrator, "server_mode", "standard")
+    if mode not in {"openclaw-client", "openclaw"}:
+        return
+    if not STRICT_MODE_VALIDATION:
+        return
+
+    available_profiles = {p.get("name") for p in orchestrator.profiles}
+    fast_profile = os.environ.get("OPENCLAW_FAST_PROFILE", "nvidia-fast")
+    deep_profile = os.environ.get("OPENCLAW_DEEP_PROFILE", "amd-writer")
+    tool_profile = os.environ.get("OPENCLAW_TOOL_PROFILE", "amd-coder")
+    priority_profile = os.environ.get("OPENCLAW_PRIORITY_PROFILE", "nvidia-fast")
+
+    for profile_name in {fast_profile, deep_profile, tool_profile, priority_profile}:
+        if profile_name not in available_profiles:
+            raise RuntimeError(f"OpenClaw profile is not loaded/available: {profile_name}")
+
+    mapping = _load_openclaw_model_profile_map()
+    for model_name, profile_name in mapping.items():
+        if profile_name not in available_profiles:
+            raise RuntimeError(
+                f"OPENCLAW_MODEL_PROFILE_MAP maps '{model_name}' to unknown profile '{profile_name}'"
+            )
+
+
+def _select_openclaw_profile(req: OpenClawCompatChatRequest) -> str:
+    fast_profile = os.environ.get("OPENCLAW_FAST_PROFILE", "nvidia-fast")
+    deep_profile = os.environ.get("OPENCLAW_DEEP_PROFILE", "amd-writer")
+    tool_profile = os.environ.get("OPENCLAW_TOOL_PROFILE", "amd-coder")
+    priority_profile = os.environ.get("OPENCLAW_PRIORITY_PROFILE", "nvidia-fast")
+    priority_by_default = str(os.environ.get("OPENCLAW_PRIORITY_BY_DEFAULT", "true")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    priority_models_raw = str(
+        os.environ.get("OPENCLAW_PRIORITY_MODELS", "qwen3.5:4b,dragonlair-active:latest")
+    )
+    priority_models = {item.strip() for item in priority_models_raw.split(",") if item.strip()}
+
+    # Standard pattern: use tool-capable profile only when tools are present.
+    if req.tools:
+        return tool_profile
+
+    model_map = _load_openclaw_model_profile_map()
+    direct = model_map.get(req.model)
+    if direct and direct != tool_profile:
+        return direct
+
+    if req.model and req.model in priority_models:
+        return priority_profile
+
+    if not req.model and priority_by_default:
+        return priority_profile
+
+    model_hint = (req.model or "").lower()
+    if "fast" in model_hint or "small" in model_hint or "instruction" in model_hint:
+        return fast_profile
+    return deep_profile
+
+
+_validate_openclaw_profile_config()
+
+
+def _extract_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return str(content)
+
+
+def _messages_to_prompt(messages: List[OpenClawCompatMessage], tools: Optional[List[dict]] = None) -> str:
+    lines = []
+    for msg in messages:
+        role = (msg.role or "user").strip().lower()
+        text = _extract_text(msg.content)
+        if text:
+            lines.append(f"[{role}] {text}")
+
+    if tools:
+        lines.append("[system] Tools are available. If a tool is needed, explain tool intent clearly in output.")
+        lines.append("[system] Tool schemas: " + json.dumps(tools))
+
+    return "\n\n".join(lines).strip()
+
+
+def _openclaw_compat_now() -> int:
+    return int(time.time())
+
+
+def _openclaw_compat_response(content: str, req_model: str) -> dict:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": _openclaw_compat_now(),
+        "model": req_model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _compute_queue_positions(records):
+    # Queue position is route-local and only for queued tasks.
+    # Position starts at 1 for the next queued task behind currently running work.
+    by_route = {}
+    for rec in sorted(records, key=lambda t: t.created_at):
+        route = rec.route or "unknown"
+        route_state = by_route.setdefault(route, {"running": 0, "queued": []})
+        if rec.status == "running":
+            route_state["running"] += 1
+        elif rec.status == "queued":
+            route_state["queued"].append(rec)
+
+    positions = {}
+    for route, state in by_route.items():
+        base = state["running"]
+        for idx, rec in enumerate(state["queued"], start=1):
+            positions[rec.id] = base + idx
+    return positions
+
+
+def _task_to_dict(record: TaskRecord, queue_position=None):
+    return {
+        "id": record.id,
+        "created_at": record.created_at,
+        "status": record.status,
+        "prompt": record.prompt,
+        "direction": record.direction,
+        "profile": record.profile,
+        "route": record.route,
+        "model": record.model,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "response": record.response,
+        "error": record.error,
+        "queue_position": queue_position,
+    }
+
+
+def _find_route_model_conflict(route: Optional[str], model: Optional[str]):
+    if not route or not model:
+        return None
+
+    def _is_nvidia_tiny(candidate: Optional[str]) -> bool:
+        return bool(candidate) and route == NVIDIA_ROUTE_NAME and candidate in NVIDIA_TINY_MODELS
+
+    def _allow_nvidia_tiny_mix(requested_model: Optional[str]) -> bool:
+        if not NVIDIA_ALLOW_MIXED_TINY_MODELS:
+            return False
+        if route != NVIDIA_ROUTE_NAME:
+            return False
+        if not _is_nvidia_tiny(requested_model):
+            return False
+
+        active_models = {
+            rec.model
+            for rec in _tasks.values()
+            if rec.route == route and rec.status in {"queued", "running"} and rec.model
+        }
+        if not active_models:
+            return True
+        if requested_model in active_models:
+            return True
+        if any(model_name not in NVIDIA_TINY_MODELS for model_name in active_models):
+            return False
+        return len(active_models) < NVIDIA_TINY_MAX_ACTIVE_MODELS
+
+    for rec in _tasks.values():
+        if rec.route != route:
+            continue
+        if rec.status not in {"queued", "running"}:
+            continue
+        if rec.model and rec.model != model:
+            if _allow_nvidia_tiny_mix(model) and _is_nvidia_tiny(rec.model):
+                continue
+            return rec.model
+    return None
+
+
+def _run_task(task_id: str):
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            return
+        record.status = "running"
+        record.started_at = time.time()
+    _refresh_ui_state_snapshot(event_type="task_running")
+
+    try:
+        result = orchestrator.handle_request_with_overrides(
+            record.prompt,
+            profile_name=record.profile,
+            model_override=record.model,
+            stream_override=False,
+        )
+
+        with _task_lock:
+            record.status = "completed"
+            record.response = result
+            record.finished_at = time.time()
+        _refresh_ui_state_snapshot(event_type="task_completed")
+    except Exception as err:
+        with _task_lock:
+            record.status = "failed"
+            record.error = str(err)
+            record.finished_at = time.time()
+        _refresh_ui_state_snapshot(event_type="task_failed")
+
+
+def _run_book_task(task_id: str, req: BookFlowRequest):
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            return
+        record.status = "running"
+        record.started_at = time.time()
+        record.profile = "book-flow"
+    _refresh_ui_state_snapshot(event_type="book_task_running")
+
+    try:
+        args = SimpleNamespace(
+            title=req.title,
+            premise=req.premise,
+            chapter_number=req.chapter_number,
+            chapter_title=req.chapter_title,
+            section_title=req.section_title,
+            section_goal=req.section_goal,
+            genre=req.genre,
+            audience=req.audience,
+            tone=req.tone,
+            writer_words=req.writer_words,
+            target_word_count=req.target_word_count,
+            page_target=req.page_target,
+            max_retries=req.max_retries,
+            merge_context_words=req.merge_context_words,
+            verbose=req.verbose,
+            writer_profile=req.writer_profile,
+            editor_profile=req.editor_profile,
+            publisher_profile=req.publisher_profile,
+            output_dir=req.output_dir,
+        )
+        summary = run_flow(args)
+        with _task_lock:
+            record.status = "completed"
+            record.response = summary
+            record.finished_at = time.time()
+        _refresh_ui_state_snapshot(event_type="book_task_completed")
+    except Exception as err:
+        with _task_lock:
+            record.status = "failed"
+            record.error = str(err)
+            record.finished_at = time.time()
+        _refresh_ui_state_snapshot(event_type="book_task_failed")
+
+
+@app.get("/")
+def index():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
+
+@app.get("/api/profiles")
+def profiles():
+    return {
+        "profiles": [
+            {
+                "name": p.get("name"),
+                "route": p.get("route"),
+                "model": p.get("model"),
+                "priority": p.get("priority"),
+                "intent_keywords": p.get("intent_keywords"),
+            }
+            for p in orchestrator.profiles
+        ]
+    }
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "ok": True,
+        "time": time.time(),
+        "server_mode": getattr(orchestrator, "server_mode", "standard"),
+    }
+
+
+@app.get("/v1/models")
+def openclaw_compat_models():
+    _require_openclaw_mode()
+    models = []
+    seen = set()
+    for p in orchestrator.profiles:
+        model = p.get("model")
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        models.append({"id": model, "object": "model", "owned_by": "dragonlair"})
+    return {"object": "list", "data": models}
+
+
+@app.post("/v1/chat/completions")
+def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
+    _require_openclaw_mode()
+    prompt = _messages_to_prompt(req.messages, tools=req.tools)
+    if not prompt:
+        raise HTTPException(status_code=400, detail="messages are required")
+
+    profile_name = _select_openclaw_profile(req)
+
+    if not req.stream:
+        result = orchestrator.handle_request_with_overrides(
+            prompt,
+            profile_name=profile_name,
+            stream_override=False,
+        )
+        return _openclaw_compat_response(result, req.model)
+
+    def stream_generator():
+        tokens: List[str] = []
+        done = False
+        err = None
+
+        def callback(token, _chunk):
+            if token:
+                tokens.append(token)
+
+        def runner():
+            nonlocal done, err
+            try:
+                orchestrator.handle_request_with_overrides(
+                    prompt,
+                    profile_name=profile_name,
+                    stream_override=True,
+                    on_stream=callback,
+                )
+            except Exception as exc:
+                err = str(exc)
+            finally:
+                done = True
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+
+        offset = 0
+        while True:
+            while offset < len(tokens):
+                token = tokens[offset]
+                offset += 1
+                chunk = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex}",
+                    "object": "chat.completion.chunk",
+                    "created": _openclaw_compat_now(),
+                    "model": req.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": token},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield "data: " + json.dumps(chunk) + "\n\n"
+            if done:
+                break
+            time.sleep(0.05)
+
+        if err:
+            err_chunk = {
+                "id": f"chatcmpl-{uuid.uuid4().hex}",
+                "object": "chat.completion.chunk",
+                "created": _openclaw_compat_now(),
+                "model": req.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": ""},
+                        "finish_reason": "error",
+                    }
+                ],
+                "error": err,
+            }
+            yield "data: " + json.dumps(err_chunk) + "\n\n"
+
+        final_chunk = {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion.chunk",
+            "created": _openclaw_compat_now(),
+            "model": req.model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        yield "data: " + json.dumps(final_chunk) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/status")
+def status():
+    return _refresh_ui_state_snapshot(event_type="status_refresh")
+
+
+@app.get("/api/ui-state")
+def ui_state():
+    return _read_ui_state_snapshot()
+
+
+@app.post("/api/recover-hung")
+def recover_hung(req: RecoverHungRequest):
+    with _task_lock:
+        running = [t.id for t in _tasks.values() if t.status == "running"]
+    if running and not req.force:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "cannot recover while tasks are running; retry with force=true if you intend to reset anyway"
+            ),
+        )
+
+    result = orchestrator.recover_hung_agents(force=req.force)
+    payload = _refresh_ui_state_snapshot(event_type="agents_recovered")
+    return {
+        "status": "ok",
+        "running_tasks": running,
+        "recovery": result,
+        "state": payload,
+    }
+
+
+@app.post("/api/clear-history")
+def clear_history(_request: Request):
+    with _task_lock:
+        _tasks.clear()
+
+    project_root = "/home/daravenrk/dragonlair/book_project"
+    removed = {"changes_logs": 0, "diagnostics": 0}
+
+    for log_path in glob.glob(f"{project_root}/**/changes.log", recursive=True):
+        try:
+            os.remove(log_path)
+            removed["changes_logs"] += 1
+        except Exception:
+            continue
+
+    for diag_path in glob.glob(f"{project_root}/**/diagnostics/agent_diagnostics.jsonl", recursive=True):
+        try:
+            os.remove(diag_path)
+            removed["diagnostics"] += 1
+        except Exception:
+            continue
+    payload = _refresh_ui_state_snapshot(event_type="history_cleared")
+    return {"status": "cleared", "removed": removed, "state": payload}
+
+
+@app.post("/api/tasks")
+def create_task(req: SteerRequest):
+    merged_prompt = _compose_prompt(req.direction, req.prompt)
+    if not merged_prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    # Backend mutual exclusion: block coding if book mode active
+    with _task_lock:
+        for t in _tasks.values():
+            if t.profile == "book-flow" and t.status in {"queued", "running"}:
+                raise HTTPException(status_code=409, detail="Book mode is active. Coding tasks are blocked until book mode completes or is cancelled.")
+
+    plan = orchestrator.plan_request(merged_prompt, profile_name=req.profile, model_override=req.model)
+
+    # Detect if this is a coding task (profile is coder or nvidia-fast/lowlatency)
+    coding_profiles = {"amd-coder", "nvidia-fast", "nvidia-lowlatency"}
+    if (plan.get("profile") and plan["profile"].get("name") in coding_profiles):
+        # Block coding if book mode is active (already checked above)
+        pass
+
+    task_id = str(uuid.uuid4())
+    record = TaskRecord(
+        id=task_id,
+        created_at=time.time(),
+        status="queued",
+        prompt=merged_prompt,
+        direction=req.direction,
+        profile=req.profile,
+        route=plan.get("route"),
+        model=plan.get("model"),
+    )
+
+    with _task_lock:
+        if STRICT_ONE_MODEL_PER_ROUTE:
+            conflict_model = _find_route_model_conflict(record.route, record.model)
+            if conflict_model:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"route {record.route} is busy with model {conflict_model}; "
+                        f"requested model {record.model} is blocked until queue drains"
+                    ),
+                )
+        _tasks[task_id] = record
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        position = queue_positions.get(task_id)
+
+    _refresh_ui_state_snapshot(event_type="task_queued")
+
+    executor.submit(_run_task, task_id)
+    return {"task_id": task_id, "status": "queued", "queue_position": position, "route": record.route, "model": record.model}
+
+
+@app.post("/api/book-flow")
+def create_book_flow(req: BookFlowRequest):
+    # Backend mutual exclusion: block book mode if coding is active
+    with _task_lock:
+        for t in _tasks.values():
+            if t.profile in {"amd-coder", "nvidia-fast", "nvidia-lowlatency"} and t.status in {"queued", "running"}:
+                raise HTTPException(status_code=409, detail="Coding mode is active. Book mode is blocked until coding tasks complete or are cancelled.")
+
+    task_id = str(uuid.uuid4())
+    label = f"book-flow: ch{req.chapter_number} {req.chapter_title} / {req.section_title}"
+    record = TaskRecord(
+        id=task_id,
+        created_at=time.time(),
+        status="queued",
+        prompt=label,
+        direction="book-mode",
+        profile="book-flow",
+    )
+
+    with _task_lock:
+        _tasks[task_id] = record
+
+    _refresh_ui_state_snapshot(event_type="book_task_queued")
+
+    executor.submit(_run_book_task, task_id, req)
+    return {"task_id": task_id, "status": "queued", "task_type": "book-flow"}
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str):
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        return _task_to_dict(record, queue_position=queue_positions.get(record.id))
+
+
+@app.post("/api/stream")
+def stream(req: StreamRequest):
+    merged_prompt = _compose_prompt(req.direction, req.prompt)
+    plan = orchestrator.plan_request(
+        merged_prompt,
+        profile_name=req.profile,
+        stream_override=True,
+        model_override=req.model,
+    )
+
+    with _task_lock:
+        if STRICT_ONE_MODEL_PER_ROUTE:
+            conflict_model = _find_route_model_conflict(plan.get("route"), plan.get("model"))
+            if conflict_model:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"route {plan.get('route')} is busy with model {conflict_model}; "
+                        f"requested model {plan.get('model')} is blocked until queue drains"
+                    ),
+                )
+
+    def token_stream():
+        def callback(token, _chunk):
+            lines.append(token)
+
+        lines = []
+        done = False
+        error = None
+
+        def runner():
+            nonlocal done, error
+            try:
+                orchestrator.handle_request_with_overrides(
+                    merged_prompt,
+                    profile_name=req.profile,
+                    model_override=req.model,
+                    stream_override=True,
+                    on_stream=callback,
+                )
+            except Exception as err:
+                error = str(err)
+            finally:
+                done = True
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+
+        offset = 0
+        while True:
+            while offset < len(lines):
+                token = lines[offset]
+                offset += 1
+                yield token
+            if done:
+                break
+            time.sleep(0.05)
+
+        if error:
+            yield f"\n[error] {error}\n"
+
+    return StreamingResponse(token_stream(), media_type="text/plain")
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+def cancel_task(task_id: str):
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+        if record.status in {"completed", "failed", "cancelled"}:
+            return {"task_id": task_id, "status": record.status}
+        # Soft cancel: write out tracking log/summary before cancelling
+        try:
+            # For book mode, write to book_runs/<book>/cancelled.md and update book docs
+            if record.profile == "book-flow":
+                import datetime
+                import json
+                # Try to extract book run dir from prompt or response
+                run_dir = None
+                summary = None
+                if record.response:
+                    try:
+                        summary = json.loads(record.response)
+                        run_dir = summary.get('run_dir')
+                    except Exception:
+                        pass
+                if not run_dir:
+                    run_dir = "/home/daravenrk/dragonlair/book_runs/cancelled_runs"
+                Path(run_dir).mkdir(parents=True, exist_ok=True)
+                log_path = Path(run_dir) / "cancelled.md"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"# Book Mode Cancelled\nCancelled at: {datetime.datetime.now().isoformat()}\nTask ID: {task_id}\nPrompt: {record.prompt}\nStatus: {record.status}\n\n")
+                # Also update overview.md and section/chapter files with cancellation note
+                try:
+                    overview_path = Path(run_dir) / "overview.md"
+                    with open(overview_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n---\nBook workflow was cancelled at {datetime.datetime.now().isoformat()} (Task ID: {task_id})\n")
+                    # If summary has section_title, update that section file
+                    if summary and summary.get('section_title'):
+                        section_slug = summary['section_title'].strip().lower().replace(' ', '_')
+                        section_path = Path(run_dir) / f"sections/{section_slug}.md"
+                        section_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(section_path, "a", encoding="utf-8") as f:
+                            f.write(f"\n---\nSection interrupted and cancelled at {datetime.datetime.now().isoformat()} (Task ID: {task_id})\n")
+                except Exception as docerr:
+                    record.error = f"Cancelled by user (log/doc error: {docerr})"
+            # For coding mode, write to dragonlair/coding_cancelled.md
+            elif record.profile in {"amd-coder", "nvidia-fast", "nvidia-lowlatency"}:
+                log_path = Path("/home/daravenrk/dragonlair/coding_cancelled.md")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    import datetime
+                    f.write(f"# Coding Task Cancelled\nCancelled at: {datetime.datetime.now().isoformat()}\nTask ID: {task_id}\nPrompt: {record.prompt}\nStatus: {record.status}\n\n")
+        except Exception as logerr:
+            record.error = f"Cancelled by user (log error: {logerr})"
+        else:
+            record.error = "Cancelled by user (soft cancel)"
+        record.status = "cancelled"
+        record.finished_at = time.time()
+        # Optionally, notify producer/creator here (not implemented)
+    _refresh_ui_state_snapshot(event_type="task_cancelled")
+    return {"task_id": task_id, "status": "cancelled"}

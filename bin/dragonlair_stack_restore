@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Restore Dragonlair stack from remote backup created by dragonlair_stack_backup
+
+SRC="daravenrk@192.168.86.34:/backups/dragonlair"
+WITH_MODELS=0
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --src)
+      SRC="$2"
+      shift 2
+      ;;
+    --with-models)
+      WITH_MODELS=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: dragonlair_stack_restore [--src user@host:/path] [--with-models] [--dry-run]
+
+Defaults:
+  --src daravenrk@192.168.86.34:/backups/dragonlair
+  model data excluded unless --with-models is set
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+RSYNC_FLAGS=(--archive --verbose --compress --human-readable)
+if [[ $DRY_RUN -eq 1 ]]; then
+  RSYNC_FLAGS+=(--dry-run)
+fi
+
+RESTORE_PATHS=(
+  "opt/ai-stack/"
+  "home/daravenrk/dragonlair/"
+)
+
+if [[ $WITH_MODELS -eq 1 ]]; then
+  RESTORE_PATHS+=(
+    "ai/ollama-amd/"
+    "ai/ollama-nvidia/"
+  )
+fi
+
+echo "[restore] source: $SRC"
+echo "[restore] with_models: $WITH_MODELS dry_run: $DRY_RUN"
+
+for rel in "${RESTORE_PATHS[@]}"; do
+  dst="/${rel}"
+  src_path="${SRC%/}/${rel}"
+  echo "[restore] $src_path -> $dst"
+  src_host="${SRC%%:*}"
+  src_root="${SRC#*:}"
+  remote_check_path="${src_root%/}/${rel}"
+  if ! ssh "$src_host" "test -d '$remote_check_path'"; then
+    echo "[restore] skip missing remote path: $remote_check_path"
+    continue
+  fi
+  mkdir -p "$dst"
+  rsync "${RSYNC_FLAGS[@]}" "$src_path" "$dst"
+done
+
+echo "[restore] complete."
+echo "[restore] next steps:"
+echo "  1) Start ollama services from /opt/ai-stack as needed"
+echo "  2) Start agent stack: /home/daravenrk/dragonlair/bin/agent-stack-up"

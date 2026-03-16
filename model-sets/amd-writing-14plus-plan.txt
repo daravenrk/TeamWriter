@@ -1,0 +1,10 @@
+# AMD writing/general plan: 14B+ class
+# Keep what already works for long context
+qwen3.5:27b
+
+# 14B-ish writing/instruct candidates
+qwen2.5:14b-instruct
+
+# Larger writing options (optional, storage-heavy)
+qwen2.5:32b-instruct
+gemma2:27b

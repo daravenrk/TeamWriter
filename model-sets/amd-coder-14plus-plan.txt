@@ -1,0 +1,10 @@
+# AMD coder plan: 13B-16B class
+# Stage 1 (baseline)
+qwen2.5-coder:14b
+
+# Stage 2 (alternatives at similar scale)
+codellama:13b
+starcoder2:15b
+
+# Stage 3 (larger coder candidate)
+deepseek-coder-v2:16b

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PYTHONPATH=/home/daravenrk/dragonlair python3 -m agent_stack.cli "$@"

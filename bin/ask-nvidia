@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 \"your prompt\"" >&2
+  exit 1
+fi
+curl -sS http://127.0.0.1:11434/api/generate \
+  -H "Content-Type: application/json" \
+  -d "$(jq -cn --arg prompt "$*" '{model:"dragonlair-active:latest",prompt:$prompt,stream:false}')" \
+  | jq -r '.response'

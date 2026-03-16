@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$HOME/dragonlair/bin/pull-models" --env nvidia --file "$HOME/dragonlair/model-sets/nvidia-coder.txt" "$@"

@@ -1,0 +1,8 @@
+# NVIDIA writing/general balanced set (single GPU-friendly)
+qwen3.5:9b
+qwen3.5:4b
+llama3.2:3b
+
+# Optional alternatives
+qwen2.5:7b-instruct
+mistral:7b

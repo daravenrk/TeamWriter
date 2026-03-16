@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Backup Dragonlair stack (Ollama configs + agent stack + optionally model data)
+# Default: no model blobs (faster, smaller, preferred for config/state backup)
+
+DEST="daravenrk@192.168.86.34:/backups/dragonlair"
+WITH_MODELS=0
+DRY_RUN=0
+LOGFILE="/tmp/dragonlair_stack_backup.log"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dest)
+      DEST="$2"
+      shift 2
+      ;;
+    --with-models)
+      WITH_MODELS=1
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: dragonlair_stack_backup [--dest user@host:/path] [--with-models] [--dry-run]
+
+Defaults:
+  --dest daravenrk@192.168.86.34:/backups/dragonlair
+  model data excluded unless --with-models is set
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+RSYNC_FLAGS=(--archive --verbose --compress --delete --human-readable --relative)
+if [[ $DRY_RUN -eq 1 ]]; then
+  RSYNC_FLAGS+=(--dry-run)
+fi
+
+EXCLUDES=(
+  --exclude="__pycache__/"
+  --exclude="*.pyc"
+  --exclude=".pytest_cache/"
+)
+
+SRC_PATHS=(
+  "/./opt/ai-stack"
+  "/./home/daravenrk/dragonlair"
+)
+
+if [[ $WITH_MODELS -eq 1 ]]; then
+  SRC_PATHS+=(
+    "/./ai/ollama-amd"
+    "/./ai/ollama-nvidia"
+  )
+fi
+
+echo "[backup] destination: $DEST" | tee "$LOGFILE"
+echo "[backup] with_models: $WITH_MODELS dry_run: $DRY_RUN" | tee -a "$LOGFILE"
+
+echo "[backup] syncing paths:" | tee -a "$LOGFILE"
+for p in "${SRC_PATHS[@]}"; do
+  echo " - $p" | tee -a "$LOGFILE"
+done
+
+rsync "${RSYNC_FLAGS[@]}" "${EXCLUDES[@]}" "${SRC_PATHS[@]}" "$DEST" | tee -a "$LOGFILE"
+
+echo "[backup] complete. log: $LOGFILE"

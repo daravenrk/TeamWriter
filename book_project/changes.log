@@ -1,0 +1,2 @@
+# Shared changes log for all agents
+# Each entry: {"timestamp": ..., "agent": ..., "action": ..., "details": ...}

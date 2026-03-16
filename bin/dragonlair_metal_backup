@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEST="daravenrk@192.168.86.34:/backups/dragonlair-metal"
+WITH_ROOTFS=1
+DRY_RUN=0
+HOST="$(hostname -s)"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+REMOTE_BASE="${DEST%/}/${HOST}/${STAMP}"
+LOGFILE="/tmp/dragonlair_metal_backup_${STAMP}.log"
+
+usage() {
+  cat <<'EOF'
+Usage: dragonlair_metal_backup [--dest user@host:/path] [--metadata-only] [--dry-run]
+
+Defaults:
+  --dest daravenrk@192.168.86.34:/backups/dragonlair-metal
+  includes root filesystem + /boot + /boot/efi snapshots
+
+Options:
+  --metadata-only  capture system metadata only (no filesystem snapshot)
+  --dry-run        show what would be transferred
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dest)
+      DEST="$2"
+      shift 2
+      ;;
+    --metadata-only)
+      WITH_ROOTFS=0
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+REMOTE_BASE="${DEST%/}/${HOST}/${STAMP}"
+
+echo "[metal-backup] host=$HOST stamp=$STAMP" | tee "$LOGFILE"
+echo "[metal-backup] destination=$REMOTE_BASE" | tee -a "$LOGFILE"
+echo "[metal-backup] with_rootfs=$WITH_ROOTFS dry_run=$DRY_RUN" | tee -a "$LOGFILE"
+
+DEST_HOST="${DEST%%:*}"
+DEST_ROOT="${DEST#*:}"
+if [[ $DRY_RUN -eq 0 ]]; then
+  ssh "$DEST_HOST" "mkdir -p '${DEST_ROOT%/}/${HOST}/${STAMP}/metadata'"
+fi
+
+WORKDIR="/tmp/dragonlair_metal_meta_${STAMP}"
+mkdir -p "$WORKDIR"
+
+run_capture() {
+  local out="$1"
+  shift
+  if "$@" >"$out" 2>&1; then
+    :
+  else
+    echo "[warn] capture failed: $*" >>"$out"
+  fi
+}
+
+# Core system metadata for hardware replacement recovery
+run_capture "$WORKDIR/uname.txt" uname -a
+run_capture "$WORKDIR/os-release.txt" cat /etc/os-release
+run_capture "$WORKDIR/lsblk.txt" lsblk -f
+run_capture "$WORKDIR/blkid.txt" blkid
+run_capture "$WORKDIR/fdisk.txt" fdisk -l
+run_capture "$WORKDIR/ip-address.txt" ip address
+run_capture "$WORKDIR/ip-route.txt" ip route
+run_capture "$WORKDIR/apt-manual.txt" apt-mark showmanual
+run_capture "$WORKDIR/dpkg-selections.txt" dpkg --get-selections
+run_capture "$WORKDIR/snap-list.txt" snap list
+run_capture "$WORKDIR/docker-ps.txt" docker ps -a
+run_capture "$WORKDIR/docker-images.txt" docker images
+run_capture "$WORKDIR/dkms-status.txt" dkms status
+run_capture "$WORKDIR/nvidia-smi.txt" nvidia-smi
+run_capture "$WORKDIR/rocm-smi.txt" rocm-smi --showproductname --showdriverversion --showfwinfo --showuse --showmemuse
+
+# Partition table dumps per disk (critical for bare-metal restore)
+while read -r disk; do
+  [[ -n "$disk" ]] || continue
+  run_capture "$WORKDIR/sfdisk-${disk}.txt" sfdisk -d "/dev/${disk}"
+  run_capture "$WORKDIR/parted-${disk}.txt" parted -s "/dev/${disk}" unit s print
+  run_capture "$WORKDIR/sgdisk-${disk}.txt" sgdisk -p "/dev/${disk}"
+done < <(lsblk -dn -o NAME,TYPE | awk '$2=="disk" {print $1}')
+
+# Copy critical config trees
+mkdir -p "$WORKDIR/etc"
+cp -a /etc/fstab "$WORKDIR/etc/fstab" 2>/dev/null || true
+cp -a /etc/crypttab "$WORKDIR/etc/crypttab" 2>/dev/null || true
+cp -a /etc/default/grub "$WORKDIR/etc/grub.default" 2>/dev/null || true
+cp -a /etc/netplan "$WORKDIR/etc/netplan" 2>/dev/null || true
+cp -a /etc/docker "$WORKDIR/etc/docker" 2>/dev/null || true
+cp -a /opt/ai-stack "$WORKDIR/opt-ai-stack" 2>/dev/null || true
+cp -a /home/daravenrk/dragonlair "$WORKDIR/dragonlair" 2>/dev/null || true
+
+RSYNC_META_FLAGS=(--archive --verbose --compress --human-readable)
+if [[ $DRY_RUN -eq 1 ]]; then
+  RSYNC_META_FLAGS+=(--dry-run)
+fi
+
+echo "[metal-backup] uploading metadata bundle" | tee -a "$LOGFILE"
+rsync "${RSYNC_META_FLAGS[@]}" "$WORKDIR/" "${REMOTE_BASE}/metadata/" | tee -a "$LOGFILE"
+
+if [[ $WITH_ROOTFS -eq 1 ]]; then
+  RSYNC_FS_FLAGS=(--archive --acls --xattrs --hard-links --numeric-ids --human-readable --delete --one-file-system)
+  if [[ $DRY_RUN -eq 1 ]]; then
+    RSYNC_FS_FLAGS+=(--dry-run)
+  fi
+
+  EXCLUDES=(
+    --exclude=/proc/*
+    --exclude=/sys/*
+    --exclude=/dev/*
+    --exclude=/run/*
+    --exclude=/tmp/*
+    --exclude=/mnt/*
+    --exclude=/media/*
+    --exclude=/lost+found
+    --exclude=/swapfile
+    --exclude=/var/tmp/*
+  )
+
+  echo "[metal-backup] uploading root filesystem snapshot" | tee -a "$LOGFILE"
+  sudo rsync "${RSYNC_FS_FLAGS[@]}" "${EXCLUDES[@]}" / "${REMOTE_BASE}/rootfs/" | tee -a "$LOGFILE"
+
+  if [[ -d /boot ]]; then
+    echo "[metal-backup] uploading /boot snapshot" | tee -a "$LOGFILE"
+    sudo rsync "${RSYNC_FS_FLAGS[@]}" /boot/ "${REMOTE_BASE}/boot/" | tee -a "$LOGFILE"
+  fi
+
+  if [[ -d /boot/efi ]]; then
+    echo "[metal-backup] uploading /boot/efi snapshot" | tee -a "$LOGFILE"
+    sudo rsync "${RSYNC_FS_FLAGS[@]}" /boot/efi/ "${REMOTE_BASE}/boot-efi/" | tee -a "$LOGFILE"
+  fi
+fi
+
+echo "[metal-backup] complete. log=$LOGFILE"
+echo "[metal-backup] restore runbook: /home/daravenrk/dragonlair/BARE_METAL_RECOVERY.md"

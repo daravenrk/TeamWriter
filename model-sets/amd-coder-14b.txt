@@ -1,0 +1,5 @@
+# AMD coder models around 14B class
+qwen2.5-coder:14b
+starcoder2:15b
+codellama:13b
+deepseek-coder-v2:16b

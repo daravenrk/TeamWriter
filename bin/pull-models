@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="$HOME/dragonlair/model-sets/pull-models.env"
+TARGET_ENV=""
+MODEL_FILE=""
+SKIP_EXISTING="1"
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ~/dragonlair/bin/pull-models [--env amd|nvidia] [--file ~/dragonlair/model-sets/<file>.txt] [--no-skip-existing] [--dry-run]
+
+Examples:
+  ~/dragonlair/bin/pull-models
+  ~/dragonlair/bin/pull-models --env amd --file ~/dragonlair/model-sets/amd-coder-14b.txt
+  ~/dragonlair/bin/pull-models --env nvidia --file ~/dragonlair/model-sets/nvidia-coder.txt
+EOF
+}
+
+log() { echo "[pull-models] $*"; }
+die() { echo "[pull-models] ERROR: $*" >&2; exit 1; }
+
+require_cmds() {
+  command -v docker >/dev/null 2>&1 || die "docker is required"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+  TARGET_ENV="${TARGET_ENV:-}"
+  MODEL_FILE="${MODEL_FILE:-}"
+  SKIP_EXISTING="${SKIP_EXISTING:-1}"
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --env)
+        [[ $# -ge 2 ]] || die "--env requires a value"
+        TARGET_ENV="$2"
+        shift 2
+        ;;
+      --file)
+        [[ $# -ge 2 ]] || die "--file requires a value"
+        MODEL_FILE="$2"
+        shift 2
+        ;;
+      --no-skip-existing)
+        SKIP_EXISTING="0"
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+  done
+}
+
+normalize_inputs() {
+  [[ -n "$TARGET_ENV" ]] || die "target environment is empty (set in config or pass --env)"
+  case "$TARGET_ENV" in
+    amd)
+      CONTAINER_NAME="ollama_amd"
+      ENDPOINT="http://127.0.0.1:11435"
+      ;;
+    nvidia)
+      CONTAINER_NAME="ollama_nvidia"
+      ENDPOINT="http://127.0.0.1:11434"
+      ;;
+    *)
+      die "unsupported env '$TARGET_ENV' (use amd or nvidia)"
+      ;;
+  esac
+
+  [[ -n "$MODEL_FILE" ]] || die "model file is empty (set in config or pass --file)"
+  MODEL_FILE="${MODEL_FILE/#\~/$HOME}"
+  [[ -f "$MODEL_FILE" ]] || die "model file not found: $MODEL_FILE"
+}
+
+check_target_ready() {
+  docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME" || die "container not running: $CONTAINER_NAME"
+  curl -fsS "$ENDPOINT/api/version" >/dev/null || die "endpoint not reachable: $ENDPOINT"
+}
+
+read_models() {
+  mapfile -t MODELS < <(sed -e 's/[[:space:]]*$//' "$MODEL_FILE" | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$' || true)
+  [[ ${#MODELS[@]} -gt 0 ]] || die "no models found in $MODEL_FILE"
+}
+
+fetch_existing() {
+  if [[ "$SKIP_EXISTING" != "1" ]]; then
+    return 0
+  fi
+  mapfile -t EXISTING_MODELS < <(curl -sS "$ENDPOINT/api/tags" | jq -r '.models[].name' 2>/dev/null || true)
+}
+
+model_exists() {
+  local needle="$1"
+  local m
+  for m in "${EXISTING_MODELS[@]:-}"; do
+    if [[ "$m" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+pull_models() {
+  local pulled=0
+  local skipped=0
+  local model
+
+  for model in "${MODELS[@]}"; do
+    if [[ "$SKIP_EXISTING" == "1" ]] && model_exists "$model"; then
+      log "skip (already present): $model"
+      ((skipped+=1))
+      continue
+    fi
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+      log "DRY-RUN pull on $TARGET_ENV ($CONTAINER_NAME): $model"
+      ((pulled+=1))
+      continue
+    fi
+
+    log "pulling on $TARGET_ENV ($CONTAINER_NAME): $model"
+    docker exec "$CONTAINER_NAME" ollama pull "$model"
+    ((pulled+=1))
+  done
+
+  log "done. requested=${#MODELS[@]} pulled=$pulled skipped=$skipped"
+}
+
+main() {
+  require_cmds
+  load_config
+  parse_args "$@"
+  normalize_inputs
+  check_target_ready
+  read_models
+  fetch_existing
+
+  log "env=$TARGET_ENV container=$CONTAINER_NAME endpoint=$ENDPOINT"
+  log "model_file=$MODEL_FILE skip_existing=$SKIP_EXISTING dry_run=$DRY_RUN"
+  pull_models
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    log "current models on $TARGET_ENV:"
+    curl -sS "$ENDPOINT/api/tags" | jq -r '.models[].name' | sort
+  fi
+}
+
+main "$@"

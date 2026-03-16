@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker compose -f /home/daravenrk/dragonlair/agent_stack/docker-compose.agent.yml up -d --build
+
+LAN_IP="$(hostname -I | awk '{print $1}')"
+
+echo "Agent stack is up."
+echo "Frontend: http://127.0.0.1:11888"
+if [[ -n "$LAN_IP" ]]; then
+	echo "Frontend (LAN): http://$LAN_IP:11888"
+fi

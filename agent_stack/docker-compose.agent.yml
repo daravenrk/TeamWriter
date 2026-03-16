@@ -1,0 +1,44 @@
+services:
+  dragonlair_agent_stack:
+    build:
+      context: /home/daravenrk/dragonlair/agent_stack
+    container_name: dragonlair_agent_stack
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:11888:11888"
+    environment:
+      OLLAMA_AMD_ENDPOINT: "http://host.docker.internal:11435"
+      OLLAMA_NVIDIA_ENDPOINT: "http://host.docker.internal:11434"
+      AGENT_SERVER_MODE: "openclaw-client"
+      AGENT_STRICT_MODE_VALIDATION: "true"
+      DRAGONLAIR_LOCK_ROOT: "/tmp/dragonlair_agent_stack"
+      AGENT_MAX_WORKERS: "2"
+      STRICT_ONE_MODEL_PER_ROUTE: "true"
+      AGENT_CALL_TIMEOUT_SECONDS: "180"
+      AGENT_CALL_TIMEOUT_SECONDS_AMD: "1800"
+      AGENT_CALL_TIMEOUT_SECONDS_NVIDIA: "180"
+      AGENT_ROUTE_MAX_INFLIGHT_AMD: "1"
+      AGENT_ROUTE_MAX_INFLIGHT_NVIDIA: "2"
+      AGENT_ENDPOINT_MAX_INFLIGHT_AMD: "1"
+      AGENT_ENDPOINT_MAX_INFLIGHT_NVIDIA: "2"
+      AGENT_NVIDIA_ROUTE_NAME: "ollama_nvidia"
+      AGENT_NVIDIA_ALLOW_MIXED_TINY_MODELS: "true"
+      AGENT_NVIDIA_TINY_MAX_ACTIVE_MODELS: "2"
+      AGENT_NVIDIA_TINY_MODELS: "qwen3.5:4b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b"
+      AGENT_DEFAULT_MODEL_OLLAMA_AMD: "qwen3.5:27b"
+      AGENT_DEFAULT_MODEL_OLLAMA_NVIDIA: "qwen3.5:4b"
+      AGENT_AMD_EPHEMERAL_OVERRIDE_ENABLED: "true"
+      AGENT_AMD_EPHEMERAL_OVERRIDE_MODELS: "qwen2.5-coder:14b,qwen3.5:9b"
+      AGENT_ENABLE_CROSS_ROUTE_FALLBACK: "false"
+      OPENCLAW_FAST_PROFILE: "nvidia-fast"
+      OPENCLAW_DEEP_PROFILE: "amd-writer"
+      OPENCLAW_TOOL_PROFILE: "nvidia-lowlatency"
+      OPENCLAW_PRIORITY_PROFILE: "nvidia-fast"
+      OPENCLAW_PRIORITY_BY_DEFAULT: "true"
+      OPENCLAW_PRIORITY_MODELS: "qwen3.5:4b,dragonlair-active:latest"
+      OPENCLAW_MODEL_PROFILE_MAP: "{\"qwen3.5:4b\":\"nvidia-fast\",\"qwen2.5-coder:3b\":\"nvidia-lowlatency\",\"qwen3.5:27b\":\"amd-writer\",\"qwen2.5-coder:14b\":\"amd-longctx\",\"qwen3.5:9b\":\"amd-qwen35-9b-highctx\"}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /home/daravenrk/dragonlair/agent_stack/agent_profiles:/app/agent_stack/agent_profiles:rw
+      - /home/daravenrk/dragonlair/agent_stack/static:/app/agent_stack/static:rw
