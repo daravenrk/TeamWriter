@@ -146,6 +146,25 @@ class AgentLockManager:
             finally:
                 flock(lock_handle.fileno(), LOCK_UN)
 
+    def get_endpoint_runtime(self, endpoint: Optional[str] = None):
+        """
+        Read current endpoint runtime bookkeeping.
+
+        - endpoint=None: returns all endpoint state entries
+        - endpoint=<url>: returns a single endpoint state entry
+        """
+        endpoint_key = self._endpoint_key(endpoint) if endpoint else None
+        with open(self.state_lock_path, "a+", encoding="utf-8") as lock_handle:
+            flock(lock_handle.fileno(), LOCK_EX)
+            try:
+                state = self._load_state()
+                endpoints = state.get("endpoints", {})
+                if endpoint_key is None:
+                    return dict(endpoints)
+                return dict(endpoints.get(endpoint_key, {}))
+            finally:
+                flock(lock_handle.fileno(), LOCK_UN)
+
     @contextmanager
     def endpoint_slot(self, endpoint, policy=None, timeout_seconds=30.0, poll_seconds=0.1):
         """

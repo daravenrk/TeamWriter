@@ -56,6 +56,8 @@ class BookFlowRequest(BaseModel):
     editor_profile: str = "book-editor"
     publisher_profile: str = "book-publisher"
     output_dir: str = "/home/daravenrk/dragonlair/book_project"
+    resource_tracker_path: Optional[str] = None
+    resource_events_path: Optional[str] = None
 
 
 class OpenClawCompatMessage(BaseModel):
@@ -124,6 +126,37 @@ STRICT_MODE_VALIDATION = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "tru
 }
 UI_STATE_PATH = Path(os.environ.get("AGENT_UI_STATE_PATH", "/home/daravenrk/dragonlair/book_project/webui_state.json"))
 UI_EVENTS_PATH = Path(os.environ.get("AGENT_UI_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"))
+RESOURCE_TRACKER_PATH = Path(
+    os.environ.get("AGENT_RESOURCE_TRACKER_PATH", "/home/daravenrk/dragonlair/book_project/resource_tracker.json")
+)
+RESOURCE_EVENTS_PATH = Path(
+    os.environ.get("AGENT_RESOURCE_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/resource_events.jsonl")
+)
+PRESSURE_ENABLED = str(os.environ.get("AGENT_PRESSURE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
+PRESSURE_THRESHOLD = max(1, int(os.environ.get("AGENT_PRESSURE_QUEUE_THRESHOLD", "3")))
+PRESSURE_HYSTERESIS_CLEAR = max(0, int(os.environ.get("AGENT_PRESSURE_QUEUE_CLEAR", "2")))
+PRESSURE_MODELS = {
+    item.strip()
+    for item in str(os.environ.get("AGENT_PRESSURE_MODELS", "qwen3.5:9b,qwen3.5:4b")).split(",")
+    if item.strip()
+}
+PRESSURE_PAUSE_PROFILES = {
+    item.strip()
+    for item in str(
+        os.environ.get(
+            "AGENT_PRESSURE_PAUSE_PROFILES",
+            "book-publisher,book-continuity,book-canon,orchestrator,book-flow",
+        )
+    ).split(",")
+    if item.strip()
+}
+PRESSURE_WRITER_PROFILES = {
+    item.strip()
+    for item in str(os.environ.get("AGENT_PRESSURE_WRITER_PROFILES", "book-writer")).split(",")
+    if item.strip()
+}
+_pressure_mode = {"active": False, "last_depth": 0, "last_update": 0.0}
+_resource_switch_state = {"mode": "normal", "last_switch_at": 0.0}
 
 
 def _ensure_parent(path: Path):
@@ -148,6 +181,109 @@ def _append_ui_event(event_type: str, payload: dict):
         handle.write(json.dumps(entry) + "\n")
 
 
+def _append_resource_event(event_type: str, payload: dict):
+    entry = {
+        "ts": time.time(),
+        "event": event_type,
+        "payload": payload,
+    }
+    _ensure_parent(RESOURCE_EVENTS_PATH)
+    with open(RESOURCE_EVENTS_PATH, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def _agent_health_summary(health_report: dict) -> dict:
+    agents = (health_report or {}).get("agents") or {}
+    summary = {"idle": 0, "running": 0, "healthy": 0, "hung": 0, "failed": 0, "quarantined": 0}
+    now = time.time()
+    for data in agents.values():
+        state = str((data or {}).get("state") or "idle")
+        if state in summary:
+            summary[state] += 1
+        quarantined_until = float((data or {}).get("quarantined_until") or 0.0)
+        if quarantined_until > now:
+            summary["quarantined"] += 1
+    summary["total_agents"] = len(agents)
+    return summary
+
+
+def _resource_switch_event_locked(mode: str, reason: str, depth: int):
+    now = time.time()
+    previous_mode = _resource_switch_state.get("mode", "normal")
+    if previous_mode == mode:
+        return
+
+    _resource_switch_state["mode"] = mode
+    _resource_switch_state["last_switch_at"] = now
+    payload = {
+        "from": previous_mode,
+        "to": mode,
+        "reason": reason,
+        "nvidia_depth": depth,
+        "at": now,
+    }
+    _append_ui_event("resource_switch", payload)
+    _append_resource_event("resource_switch", payload)
+
+
+def _build_resource_tracker_payload_locked(reason: str) -> dict:
+    now = time.time()
+    records = list(_tasks.values())
+    status_counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
+    route_counts: Dict[str, int] = {}
+    model_counts: Dict[str, int] = {}
+
+    for rec in records:
+        if rec.status in status_counts:
+            status_counts[rec.status] += 1
+        if rec.status not in {"queued", "running"}:
+            continue
+        route = rec.route or "unknown"
+        route_counts[route] = route_counts.get(route, 0) + 1
+        if rec.model:
+            model_counts[rec.model] = model_counts.get(rec.model, 0) + 1
+
+    health_report = orchestrator.get_agent_health_report()
+    pressure = dict(_pressure_mode)
+    pressure["mode"] = "pressure" if pressure.get("active") else "normal"
+
+    return {
+        "generated_at": now,
+        "reason": reason,
+        "mode": _resource_switch_state.get("mode", "normal"),
+        "switch": dict(_resource_switch_state),
+        "pressure_mode": pressure,
+        "queue": {
+            "status_counts": status_counts,
+            "route_active_counts": route_counts,
+            "model_active_counts": model_counts,
+            "nvidia_depth": _nvidia_pressure_depth(),
+        },
+        "agents": {
+            "summary": _agent_health_summary(health_report),
+            "health": health_report,
+        },
+        "references": {
+            "resource_tracker": str(RESOURCE_TRACKER_PATH),
+            "resource_events": str(RESOURCE_EVENTS_PATH),
+            "ui_state": str(UI_STATE_PATH),
+            "ui_events": str(UI_EVENTS_PATH),
+        },
+    }
+
+
+def _write_resource_tracker_locked(reason: str) -> dict:
+    payload = _build_resource_tracker_payload_locked(reason=reason)
+    _write_json_atomic(RESOURCE_TRACKER_PATH, payload)
+    _append_resource_event("resource_check", {"reason": reason, "mode": payload.get("mode")})
+    return payload
+
+
+def _resource_snapshot(reason: str = "snapshot") -> dict:
+    with _task_lock:
+        return _write_resource_tracker_locked(reason=reason)
+
+
 def _build_status_payload(records: List[TaskRecord]):
     queue_positions = _compute_queue_positions(records)
     tasks = [
@@ -164,6 +300,8 @@ def _build_status_payload(records: List[TaskRecord]):
     return {
         "source": "flat_file",
         "generated_at": time.time(),
+        "pressure_mode": dict(_pressure_mode),
+        "resource_tracker": _resource_snapshot(reason="status_payload"),
         "health": orchestrator.get_agent_health_report(),
         "task_counts": counts,
         "tasks": tasks,
@@ -433,6 +571,76 @@ def _find_route_model_conflict(route: Optional[str], model: Optional[str]):
     return None
 
 
+def _nvidia_pressure_depth() -> int:
+    depth = 0
+    for rec in _tasks.values():
+        if rec.route != NVIDIA_ROUTE_NAME:
+            continue
+        if rec.status not in {"queued", "running"}:
+            continue
+        if not rec.model or rec.model not in PRESSURE_MODELS:
+            continue
+        depth += 1
+    return depth
+
+
+def _update_pressure_state_locked() -> dict:
+    now = time.time()
+    if not PRESSURE_ENABLED:
+        _pressure_mode["active"] = False
+        _pressure_mode["last_depth"] = 0
+        _pressure_mode["last_update"] = now
+        _resource_switch_event_locked(mode="normal", reason="pressure_disabled", depth=0)
+        _write_resource_tracker_locked(reason="pressure_disabled")
+        return dict(_pressure_mode)
+
+    depth = _nvidia_pressure_depth()
+    previous_active = bool(_pressure_mode.get("active"))
+    if _pressure_mode["active"]:
+        if depth <= PRESSURE_HYSTERESIS_CLEAR:
+            _pressure_mode["active"] = False
+    else:
+        if depth > PRESSURE_THRESHOLD:
+            _pressure_mode["active"] = True
+
+    _pressure_mode["last_depth"] = depth
+    _pressure_mode["last_update"] = now
+    if previous_active != bool(_pressure_mode["active"]):
+        mode = "pressure" if _pressure_mode["active"] else "normal"
+        _resource_switch_event_locked(mode=mode, reason="pressure_transition", depth=depth)
+    _write_resource_tracker_locked(reason="pressure_update")
+    return dict(_pressure_mode)
+
+
+def _pressure_snapshot() -> dict:
+    with _task_lock:
+        return _update_pressure_state_locked()
+
+
+def _pressure_guard(profile_name: Optional[str], context: str) -> None:
+    snap = _pressure_snapshot()
+    if not snap.get("active"):
+        return
+
+    # In pressure mode, always perform watchdog scan before deciding admission.
+    watchdog = orchestrator.scan_unresponsive_agents()
+    if watchdog.get("count"):
+        _append_ui_event("pressure_watchdog_recovery", {"context": context, "watchdog": watchdog})
+
+    pname = (profile_name or "").strip()
+    if pname in PRESSURE_WRITER_PROFILES:
+        return
+    if pname in PRESSURE_PAUSE_PROFILES or pname == "":
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"pressure-mode active (nvidia_depth={snap.get('last_depth')}); "
+                f"spawning paused for profile '{pname or 'auto'}' in {context}. "
+                "Writer tasks remain prioritized."
+            ),
+        )
+
+
 def _run_task(task_id: str):
     with _task_lock:
         record = _tasks.get(task_id)
@@ -440,6 +648,7 @@ def _run_task(task_id: str):
             return
         record.status = "running"
         record.started_at = time.time()
+        _write_resource_tracker_locked(reason="task_running")
     _refresh_ui_state_snapshot(event_type="task_running")
 
     try:
@@ -454,12 +663,16 @@ def _run_task(task_id: str):
             record.status = "completed"
             record.response = result
             record.finished_at = time.time()
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="task_completed")
         _refresh_ui_state_snapshot(event_type="task_completed")
     except Exception as err:
         with _task_lock:
             record.status = "failed"
             record.error = str(err)
             record.finished_at = time.time()
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="task_failed")
         _refresh_ui_state_snapshot(event_type="task_failed")
 
 
@@ -471,6 +684,7 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
         record.status = "running"
         record.started_at = time.time()
         record.profile = "book-flow"
+        _write_resource_tracker_locked(reason="book_task_running")
     _refresh_ui_state_snapshot(event_type="book_task_running")
 
     try:
@@ -494,18 +708,24 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
             editor_profile=req.editor_profile,
             publisher_profile=req.publisher_profile,
             output_dir=req.output_dir,
+            resource_tracker_path=req.resource_tracker_path or str(RESOURCE_TRACKER_PATH),
+            resource_events_path=req.resource_events_path or str(RESOURCE_EVENTS_PATH),
         )
         summary = run_flow(args)
         with _task_lock:
             record.status = "completed"
             record.response = summary
             record.finished_at = time.time()
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="book_task_completed")
         _refresh_ui_state_snapshot(event_type="book_task_completed")
     except Exception as err:
         with _task_lock:
             record.status = "failed"
             record.error = str(err)
             record.finished_at = time.time()
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="book_task_failed")
         _refresh_ui_state_snapshot(event_type="book_task_failed")
 
 
@@ -532,11 +752,21 @@ def profiles():
 
 @app.get("/api/health")
 def health():
+    _pressure_snapshot()
+    resource = _resource_snapshot(reason="health_check")
     return {
         "ok": True,
         "time": time.time(),
         "server_mode": getattr(orchestrator, "server_mode", "standard"),
+        "pressure_mode": dict(_pressure_mode),
+        "resource_mode": _resource_switch_state.get("mode", "normal"),
+        "resource_tracker": resource,
     }
+
+
+@app.get("/api/resource-tracker")
+def resource_tracker():
+    return _resource_snapshot(reason="resource_tracker_api")
 
 
 @app.get("/v1/models")
@@ -561,6 +791,7 @@ def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
         raise HTTPException(status_code=400, detail="messages are required")
 
     profile_name = _select_openclaw_profile(req)
+    _pressure_guard(profile_name, context="/v1/chat/completions")
 
     if not req.stream:
         result = orchestrator.handle_request_with_overrides(
@@ -651,6 +882,7 @@ def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
 
 @app.get("/api/status")
 def status():
+    _pressure_snapshot()
     return _refresh_ui_state_snapshot(event_type="status_refresh")
 
 
@@ -719,6 +951,8 @@ def create_task(req: SteerRequest):
                 raise HTTPException(status_code=409, detail="Book mode is active. Coding tasks are blocked until book mode completes or is cancelled.")
 
     plan = orchestrator.plan_request(merged_prompt, profile_name=req.profile, model_override=req.model)
+    resolved_profile_name = (plan.get("profile") or {}).get("name")
+    _pressure_guard(resolved_profile_name, context="/api/tasks")
 
     # Detect if this is a coding task (profile is coder or nvidia-fast/lowlatency)
     coding_profiles = {"amd-coder", "nvidia-fast", "nvidia-lowlatency"}
@@ -750,6 +984,8 @@ def create_task(req: SteerRequest):
                     ),
                 )
         _tasks[task_id] = record
+        _update_pressure_state_locked()
+        _write_resource_tracker_locked(reason="task_queued")
         queue_positions = _compute_queue_positions(list(_tasks.values()))
         position = queue_positions.get(task_id)
 
@@ -761,6 +997,7 @@ def create_task(req: SteerRequest):
 
 @app.post("/api/book-flow")
 def create_book_flow(req: BookFlowRequest):
+    _pressure_guard("book-flow", context="/api/book-flow")
     # Backend mutual exclusion: block book mode if coding is active
     with _task_lock:
         for t in _tasks.values():
@@ -780,6 +1017,8 @@ def create_book_flow(req: BookFlowRequest):
 
     with _task_lock:
         _tasks[task_id] = record
+        _update_pressure_state_locked()
+        _write_resource_tracker_locked(reason="book_task_queued")
 
     _refresh_ui_state_snapshot(event_type="book_task_queued")
 
@@ -806,6 +1045,8 @@ def stream(req: StreamRequest):
         stream_override=True,
         model_override=req.model,
     )
+    resolved_profile_name = (plan.get("profile") or {}).get("name")
+    _pressure_guard(resolved_profile_name, context="/api/stream")
 
     with _task_lock:
         if STRICT_ONE_MODEL_PER_ROUTE:
@@ -818,6 +1059,8 @@ def stream(req: StreamRequest):
                         f"requested model {plan.get('model')} is blocked until queue drains"
                     ),
                 )
+        _update_pressure_state_locked()
+        _write_resource_tracker_locked(reason="stream_admission")
 
     def token_stream():
         def callback(token, _chunk):
@@ -869,6 +1112,19 @@ def cancel_task(task_id: str):
             raise HTTPException(status_code=404, detail="task not found")
         if record.status in {"completed", "failed", "cancelled"}:
             return {"task_id": task_id, "status": record.status}
+
+        if record.status == "running" and (record.route or "").startswith("ollama_"):
+            if not orchestrator.is_route_call_active(record.route):
+                started_at = float(record.started_at or 0.0)
+                transition_age = time.time() - started_at if started_at > 0 else 0.0
+                if transition_age < 15.0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "cancel rejected: no active Ollama run detected yet for this task route; "
+                            "retry in a few seconds if the task remains running"
+                        ),
+                    )
         # Soft cancel: write out tracking log/summary before cancelling
         try:
             # For book mode, write to book_runs/<book>/cancelled.md and update book docs
@@ -916,6 +1172,8 @@ def cancel_task(task_id: str):
             record.error = "Cancelled by user (soft cancel)"
         record.status = "cancelled"
         record.finished_at = time.time()
+        _update_pressure_state_locked()
+        _write_resource_tracker_locked(reason="task_cancelled")
         # Optionally, notify producer/creator here (not implemented)
     _refresh_ui_state_snapshot(event_type="task_cancelled")
     return {"task_id": task_id, "status": "cancelled"}

@@ -24,6 +24,11 @@
     .running { background:#1d4ed8; }
     .completed { background:#0f766e; }
     .failed { background:#991b1b; }
+    .muted { color:var(--muted); font-size:12px; }
+    .alert { margin-top:10px; border:1px solid #6b1f1f; background:#3a1313; color:#ffd4d4; border-radius:10px; padding:10px; font-size:13px; }
+    details { border:1px solid #263252; border-radius:10px; padding:8px 10px; background:#0f1832; }
+    details summary { cursor:pointer; color:#c6d4f5; font-size:13px; }
+    details > pre { margin-top:10px; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -49,8 +54,13 @@
       </div>
 
       <div class="card">
-        <h2>Subagent Health</h2>
-        <pre id="health"></pre>
+        <h2>System Snapshot</h2>
+        <div id="healthSummary" class="muted">Loading status...</div>
+        <div id="healthAlert" class="alert" style="display:none"></div>
+        <details id="healthDetails">
+          <summary>Show full health JSON</summary>
+          <pre id="health"></pre>
+        </details>
       </div>
     </div>
 
@@ -58,12 +68,15 @@
 
     <div class="card">
       <h2>Subagent Telemetry</h2>
-      <table>
-        <thead>
-          <tr><th>Agent</th><th>State</th><th>Heartbeat</th><th>Profile</th><th>Model</th><th>Task</th><th>LLM Preview</th></tr>
-        </thead>
-        <tbody id="agents"></tbody>
-      </table>
+      <details id="telemetryDetails">
+        <summary>Show telemetry table</summary>
+        <table>
+          <thead>
+            <tr><th>Agent</th><th>State</th><th>Heartbeat</th><th>Profile</th><th>Model</th><th>Task</th><th>LLM Preview</th></tr>
+          </thead>
+          <tbody id="agents"></tbody>
+        </table>
+      </details>
     </div>
 
     <div class="card">
@@ -114,6 +127,15 @@ async function refreshStatus() {
   }
   const data = await res.json();
   document.getElementById('health').textContent = JSON.stringify(data.health, null, 2);
+  const summary = ((data.resource_tracker || {}).agents || {}).summary || {};
+  const summaryParts = [
+    `agents=${summary.total_agents || 0}`,
+    `healthy=${summary.healthy || 0}`,
+    `running=${summary.running || 0}`,
+    `hung=${summary.hung || 0}`,
+    `failed=${summary.failed || 0}`,
+  ];
+  document.getElementById('healthSummary').textContent = summaryParts.join('  ');
   const c = data.task_counts;
   document.getElementById('counts').textContent = `queued=${c.queued} running=${c.running} completed=${c.completed} failed=${c.failed}`;
 
@@ -128,13 +150,26 @@ async function refreshStatus() {
   const agentBody = document.getElementById('agents');
   agentBody.innerHTML = '';
   const agents = (data.health && data.health.agents) || {};
+  const alertEl = document.getElementById('healthAlert');
+  const unhealthyAgents = [];
   for (const [name, info] of Object.entries(agents)) {
+    if ((info.state === 'hung') || (info.state === 'failed') || (info.state === 'quarantined')) {
+      unhealthyAgents.push(`${name}:${info.state}`);
+    }
     const tr = document.createElement('tr');
     const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '';
     const task = (info.current_task_excerpt || '').slice(0, 90);
     const preview = (info.last_response_preview || '').slice(0, 120);
     tr.innerHTML = `<td>${name}</td><td>${info.state || ''}</td><td>${hb}</td><td>${info.current_profile || ''}</td><td>${info.current_model || ''}</td><td>${task}</td><td>${preview}</td>`;
     agentBody.appendChild(tr);
+  }
+
+  if (unhealthyAgents.length > 0) {
+    alertEl.style.display = 'block';
+    alertEl.textContent = `Attention: ${unhealthyAgents.join(', ')}`;
+  } else {
+    alertEl.style.display = 'none';
+    alertEl.textContent = '';
   }
 
   // Detect if any running or queued task is book-flow

@@ -1,6 +1,7 @@
 # agent_stack/ollama_subagent.py
 
 import json
+import os
 from urllib import request
 
 from .lock_manager import AgentLockManager, EndpointPolicy
@@ -15,6 +16,8 @@ class OllamaSubagent:
         self.endpoint = endpoint.rstrip("/")
         self.lock_manager = lock_manager or AgentLockManager()
         self.policy = policy or EndpointPolicy(min_interval_seconds=1.5, max_inflight=1)
+        # Keep per-request socket timeout configurable for slower long-form runs.
+        self.http_timeout_seconds = float(os.environ.get("AGENT_OLLAMA_HTTP_TIMEOUT_SECONDS", "420"))
 
     def run(
         self,
@@ -47,7 +50,7 @@ class OllamaSubagent:
         )
 
         with self.lock_manager.endpoint_slot(self.endpoint, policy=self.policy):
-            with request.urlopen(req, timeout=180) as resp:
+            with request.urlopen(req, timeout=self.http_timeout_seconds) as resp:
                 if not stream:
                     raw = resp.read().decode("utf-8")
                 else:

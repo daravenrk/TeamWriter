@@ -69,6 +69,18 @@ def read_text(path: Path, default: str = "") -> str:
         return path.read_text(encoding="utf-8")
 
 
+def read_json(path: Path, default=None):
+    if default is None:
+        default = {}
+    raw = read_text(path, "")
+    if not raw.strip():
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
 def write_json(path: Path, payload):
     write_text(path, json.dumps(payload, indent=2))
 
@@ -111,6 +123,35 @@ def build_contract(role: str, objective: str, constraints, inputs, output_format
         f"OUTPUT FORMAT:\n{output_format}\n\n"
         f"FAILURE CONDITIONS:\n{failures_block}\n"
     ).strip()
+
+
+def build_resource_reference_block(context_store: dict) -> str:
+    refs = context_store.get("_resource_refs") if isinstance(context_store, dict) else None
+    snapshot = context_store.get("_resource_snapshot") if isinstance(context_store, dict) else None
+    if not refs:
+        return ""
+
+    lines = [
+        "RESOURCE REFERENCES:",
+        "- These files are shared state for publisher + agents.",
+        f"- tracker_json: {refs.get('resource_tracker', '')}",
+        f"- events_jsonl: {refs.get('resource_events', '')}",
+        f"- ui_state_json: {refs.get('ui_state', '')}",
+        f"- ui_events_jsonl: {refs.get('ui_events', '')}",
+        "- If you cite resource state, reference these paths explicitly in your output.",
+    ]
+
+    if isinstance(snapshot, dict) and snapshot:
+        compact = {
+            "mode": snapshot.get("mode"),
+            "pressure_mode": snapshot.get("pressure_mode"),
+            "queue": (snapshot.get("queue") or {}).get("status_counts"),
+            "agents": ((snapshot.get("agents") or {}).get("summary") or {}),
+        }
+        lines.append("- Current snapshot:")
+        lines.append(json.dumps(compact, indent=2))
+
+    return "\n".join(lines)
 
 
 def gate_chapter_spec(spec):
@@ -530,15 +571,18 @@ def run_stage(
             {"stage": stage_id, "attempt": attempt},
         )
 
+        resource_block = build_resource_reference_block(context_store)
+        prompt_with_feedback = prompt
+        if resource_block:
+            prompt_with_feedback = prompt_with_feedback + "\n\n" + resource_block
+
         if last_error:
             prompt_with_feedback = (
-                prompt
+                prompt_with_feedback
                 + "\n\nPREVIOUS ATTEMPT FAILED QUALITY GATE:\n"
                 + last_error
                 + "\nRevise output to satisfy all constraints and output format."
             )
-        else:
-            prompt_with_feedback = prompt
 
         raw = orchestrator.handle_request_with_overrides(
             prompt_with_feedback,
@@ -687,14 +731,19 @@ def run_flow(args):
             "input_goal": getattr(args, 'section_goal', None),
         },
     }
-    run_dir = Path(args.output_dir).expanduser() / (slugify(args.title) if hasattr(args, 'title') else "book-error")
-    changes_log = run_dir / "changes.log"
-    ensure_dir(changes_log.parent)
-    append_jsonl(changes_log, parent_log)
+    output_root = Path(args.output_dir).expanduser()
+    book_slug = slugify(args.title) if hasattr(args, "title") else "book-error"
+    book_root = output_root / book_slug
+    runs_root = book_root / "runs"
+    ensure_dir(runs_root)
+
+    # Stable per-book history log for all requests tied to the same title.
+    book_history_log = book_root / "book_history.jsonl"
+    append_jsonl(book_history_log, parent_log)
 
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    run_name = f"{stamp}-{slugify(args.title)}-ch{args.chapter_number:02d}-{slugify(args.section_title)}"
-    run_dir = Path(args.output_dir).expanduser() / run_name
+    run_name = f"{stamp}-ch{args.chapter_number:02d}-{slugify(args.section_title)}"
+    run_dir = runs_root / run_name
 
     dirs = {
         "brief": run_dir / "00_brief",
@@ -737,6 +786,38 @@ def run_flow(args):
         },
     }
     context_store["_handoff_dir"] = str(dirs["handoff"])
+
+    resource_tracker_path = Path(
+        str(
+            getattr(
+                args,
+                "resource_tracker_path",
+                "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+            )
+        )
+    )
+    resource_events_path = Path(
+        str(
+            getattr(
+                args,
+                "resource_events_path",
+                "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+            )
+        )
+    )
+    ui_state_path = Path("/home/daravenrk/dragonlair/book_project/webui_state.json")
+    ui_events_path = Path("/home/daravenrk/dragonlair/book_project/webui_events.jsonl")
+    context_store["_resource_refs"] = {
+        "resource_tracker": str(resource_tracker_path),
+        "resource_events": str(resource_events_path),
+        "ui_state": str(ui_state_path),
+        "ui_events": str(ui_events_path),
+    }
+    context_store["_resource_snapshot"] = read_json(resource_tracker_path, default={})
+    write_json(dirs["handoff"] / "resource_references.json", {
+        "refs": context_store["_resource_refs"],
+        "snapshot": context_store["_resource_snapshot"],
+    })
 
     # 1) Publisher brief
     publisher_contract = build_contract(
@@ -1391,6 +1472,8 @@ def run_flow(args):
     validation = validate_required_artifacts(run_dir, expected_section_count=len(chapter_sections))
     summary = {
         "run_dir": str(run_dir),
+        "book_root": str(book_root),
+        "runs_root": str(runs_root),
         "title": args.title,
         "chapter_number": args.chapter_number,
         "chapter_title": args.chapter_title,

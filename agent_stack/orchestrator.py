@@ -89,6 +89,7 @@ class OrchestratorAgent:
                 os.environ.get("AGENT_CALL_TIMEOUT_SECONDS_NVIDIA", str(self.call_timeout_seconds))
             ),
         }
+        default_heartbeat_timeout = max(120.0, max(self.route_call_timeouts.values()) * 1.25)
         self.default_route_models = {
             "ollama_amd": os.environ.get("AGENT_DEFAULT_MODEL_OLLAMA_AMD", "qwen3.5:27b"),
             "ollama_nvidia": os.environ.get("AGENT_DEFAULT_MODEL_OLLAMA_NVIDIA", "qwen3.5:4b"),
@@ -107,6 +108,9 @@ class OrchestratorAgent:
             os.environ.get("AGENT_ENABLE_CROSS_ROUTE_FALLBACK", "false")
         ).lower() in {"1", "true", "yes", "on"}
         self.quarantine_seconds = 60
+        self.heartbeat_timeout_seconds = float(
+            os.environ.get("AGENT_HEARTBEAT_TIMEOUT_SECONDS", str(default_heartbeat_timeout))
+        )
         self.route_semaphores = {
             route: threading.BoundedSemaphore(value=limit)
             for route, limit in self.route_max_inflight.items()
@@ -338,12 +342,54 @@ class OrchestratorAgent:
         return {
             "server_mode": self.server_mode,
             "timeout_seconds": self.call_timeout_seconds,
+            "heartbeat_timeout_seconds": self.heartbeat_timeout_seconds,
             "route_timeout_seconds": self.route_call_timeouts,
             "route_max_inflight": self.route_max_inflight,
             "endpoint_max_inflight": self.endpoint_max_inflight,
             "enable_cross_route_fallback": self.enable_cross_route_fallback,
             "quarantine_seconds": self.quarantine_seconds,
             "agents": self.agent_health,
+        }
+
+    def scan_unresponsive_agents(self):
+        """Mark long-running agents without heartbeat updates as hung and recover endpoint state."""
+        now = time.time()
+        stale = {}
+        with self.lock_manager.edit_lock(name="orchestrator_watchdog"):
+            for agent_name, health in self.agent_health.items():
+                if str(health.get("state") or "") != "running":
+                    continue
+
+                started_at = float(health.get("last_started_at") or 0.0)
+                last_heartbeat_at = float(health.get("last_heartbeat_at") or 0.0)
+                ref = max(started_at, last_heartbeat_at)
+                if ref <= 0:
+                    continue
+                elapsed = now - ref
+                if elapsed <= self.heartbeat_timeout_seconds:
+                    continue
+
+                health["state"] = "hung"
+                health["hung_count"] = int(health.get("hung_count", 0)) + 1
+                health["last_error"] = "heartbeat-timeout/unresponsive"
+                health["last_duration_seconds"] = now - started_at if started_at > 0 else elapsed
+                health["quarantined_until"] = now + self.quarantine_seconds
+                self._heartbeat(agent_name)
+                stale[agent_name] = {
+                    "elapsed_seconds": elapsed,
+                    "last_started_at": started_at,
+                    "last_heartbeat_at": last_heartbeat_at,
+                }
+
+            if stale:
+                # Clear stale endpoint slot counters after watchdog marks.
+                self.lock_manager.reset_endpoint_state()
+
+        return {
+            "count": len(stale),
+            "agents": stale,
+            "at": now,
+            "timeout_seconds": self.heartbeat_timeout_seconds,
         }
 
     def recover_hung_agents(self, force=False):
@@ -385,6 +431,23 @@ class OrchestratorAgent:
             "forced": bool(force),
             "at": now,
         }
+
+    def is_route_call_active(self, route_name):
+        """Best-effort check whether a route currently has an active in-flight Ollama call."""
+        route = self._resolve_route(route_name)
+        agent = self.subagents.get(route)
+        if not agent:
+            return False
+
+        endpoint = getattr(agent, "endpoint", None)
+        inflight = 0
+        if endpoint:
+            runtime = self.lock_manager.get_endpoint_runtime(endpoint)
+            inflight = int((runtime or {}).get("inflight", 0) or 0)
+
+        health = self.agent_health.get(route) or {}
+        state_running = str(health.get("state") or "") == "running"
+        return bool(inflight > 0 or state_running)
 
     def plan_request(self, user_input, profile_name=None, stream_override=None, model_override=None):
         with self.lock_manager.edit_lock(name="orchestrator_route"):
