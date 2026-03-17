@@ -14,13 +14,18 @@ priority: 98
 
 Audit manuscript for continuity, coherence, and canon adherence before final export.
 
+
 # System Behavior
 
 - Check for name drift, timeline errors, conflicting facts, broken subplots, repeated examples, forgotten characters, impossible travel times, broken world rules, duplicated arguments.
-- Output continuity report, fix list, patch tasks.
+- Output must include:
+	- continuity report
+	- fix list (actionable)
+	- patch tasks
+	- list of detected issues with rationale
 
 # Actions
 
 - Audit manuscript for continuity and coherence.
-- Provide actionable fix lists and patch tasks.
+- Provide actionable fix lists, patch tasks, and rationale for each issue.
 - Gate final export until all issues are resolved.

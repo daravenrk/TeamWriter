@@ -17,43 +17,63 @@ from .ollama_subagent import OllamaSubagent
 from .profile_loader import load_agent_profiles
 
 class OrchestratorAgent:
-                # Analytics: track process runtime, actions, prompts, and results
-                self.analytics_log = []
-                self.analytics_run_start = None
-                self.analytics_run_end = None
-
-            def analytics_start_run(self):
-                self.analytics_run_start = time.time()
-                self.analytics_log.clear()
-                self.reset_analytics_counters()
-
-            def analytics_end_run(self):
-                self.analytics_run_end = time.time()
-
-            def analytics_log_event(self, event_type, details=None):
-                entry = {
-                    "timestamp": time.time(),
-                    "event": event_type,
-                    "details": details or {},
-                }
-                self.analytics_log.append(entry)
-
-            def analytics_save(self, path):
-                analytics = {
-                    "run_start": self.analytics_run_start,
-                    "run_end": self.analytics_run_end,
-                    "duration": (self.analytics_run_end or 0) - (self.analytics_run_start or 0),
-                    "events": self.analytics_log,
-                    "unique_agents": list(self.analytics_total_agents_used),
-                    "total_agents": self.get_total_agents_used(),
-                    "active_agents": list(self.active_agents),
-                }
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(analytics, f, indent=2)
+    def __init__(self):
+        # Analytics: track process runtime, actions, prompts, and results
+        self.analytics_log = []
+        self.analytics_run_start = None
+        self.analytics_run_end = None
         # Analytics: track total unique agents used per run
         self.analytics_total_agents_used = set()
         # Track currently active agents
         self.active_agents = set()
+        self.lock_manager = AgentLockManager()
+        self.server_mode = str(os.environ.get("AGENT_SERVER_MODE", "standard")).strip().lower()
+        self.strict_mode_validation = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "true")).lower() in {"1", "true", "yes", "on"}
+        self.profile_dir = str(Path(__file__).parent / "agent_profiles")
+        self.profiles = load_agent_profiles(self.profile_dir)
+        self._profile_stamp = self._compute_profile_stamp()
+        amd_endpoint = os.environ.get("OLLAMA_AMD_ENDPOINT", "http://127.0.0.1:11435")
+        nvidia_endpoint = os.environ.get("OLLAMA_NVIDIA_ENDPOINT", "http://127.0.0.1:11434")
+        self.route_max_inflight = {
+            "ollama_amd": max(1, int(os.environ.get("AGENT_ROUTE_MAX_INFLIGHT_AMD", "1"))),
+            "ollama_nvidia": max(1, int(os.environ.get("AGENT_ROUTE_MAX_INFLIGHT_NVIDIA", "1"))),
+        }
+        self.endpoint_max_inflight = {
+            "ollama_amd": max(1, int(os.environ.get("AGENT_ENDPOINT_MAX_INFLIGHT_AMD", "1"))),
+            "ollama_nvidia": max(1, int(os.environ.get("AGENT_ENDPOINT_MAX_INFLIGHT_NVIDIA", "1"))),
+        }
+        openclaw_mode_enabled = self.server_mode in {"openclaw-client", "openclaw"}
+        if openclaw_mode_enabled and self.strict_mode_validation and not self.profiles:
+            raise RuntimeError("No agent profiles loaded for openclaw-client mode")
+
+    def analytics_start_run(self):
+        self.analytics_run_start = time.time()
+        self.analytics_log.clear()
+        self.reset_analytics_counters()
+
+    def analytics_end_run(self):
+        self.analytics_run_end = time.time()
+
+    def analytics_log_event(self, event_type, details=None):
+        entry = {
+            "timestamp": time.time(),
+            "event": event_type,
+            "details": details or {},
+        }
+        self.analytics_log.append(entry)
+
+    def analytics_save(self, path):
+        analytics = {
+            "run_start": self.analytics_run_start,
+            "run_end": self.analytics_run_end,
+            "duration": (self.analytics_run_end or 0) - (self.analytics_run_start or 0),
+            "events": self.analytics_log,
+            "unique_agents": list(self.analytics_total_agents_used),
+            "total_agents": self.get_total_agents_used(),
+            "active_agents": list(self.active_agents),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(analytics, f, indent=2)
     """
     Main entry point for agent stack. Routes tasks to subagents based on input and context.
     Only internal and LLM (Ollama) calls are handled; external tools are not invoked until all internal logic is complete.

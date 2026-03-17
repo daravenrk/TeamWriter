@@ -569,6 +569,7 @@ def run_stage(
 
     last_raw = ""
     last_error = ""
+    last_feedback = None
     parsed = None
 
     for attempt in range(1, max_retries + 2):
@@ -600,8 +601,16 @@ def run_stage(
             prompt_with_feedback = prompt_with_feedback + "\n\n" + resource_block
 
         if last_error:
+            feedback_block = ""
+            if last_feedback is not None:
+                # If reviewer output is JSON, pretty-print it; else, show as text
+                if isinstance(last_feedback, dict):
+                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK (JSON):\n" + json.dumps(last_feedback, indent=2)
+                else:
+                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK:\n" + str(last_feedback)
             prompt_with_feedback = (
                 prompt_with_feedback
+                + feedback_block
                 + "\n\nPREVIOUS ATTEMPT FAILED QUALITY GATE:\n"
                 + last_error
                 + "\nRevise output to satisfy all constraints and output format."
@@ -672,6 +681,7 @@ def run_stage(
             break
 
         last_error = gate_message
+        last_feedback = parsed
         if verbose and diagnostics_path is not None:
             append_jsonl(
                 diagnostics_path,

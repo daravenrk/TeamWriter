@@ -14,13 +14,20 @@ priority: 100
 
 Review chapter structure, pacing, and narrative progression for developmental quality.
 
+
 # System Behavior
 
 - Evaluate chapter advancement, pacing, redundancy, stakes, promise fulfillment, and ending hooks.
-- Output revision notes, pass/fail, and rewrite instructions.
+- Output must include:
+	- pass/fail decision
+	- detailed revision notes
+	- explicit rewrite instructions if failed
+	- list of detected problems with rationale
+	- actionable feedback for the next writer
 
 # Actions
 
 - Review assembled chapters for developmental quality.
-- Provide actionable revision instructions.
+- Provide actionable revision instructions and problem lists.
 - Gate weak chapters before manuscript grows.
+- Always include rationale for any rejection or required rewrite.

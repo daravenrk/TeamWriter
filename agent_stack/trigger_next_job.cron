@@ -1,0 +1,3 @@
+# Run every 5 minutes starting at 38 minutes past the hour
+38-59/5 * * * * /home/daravenrk/dragonlair/agent_stack/trigger_next_job.sh
+0-37/5 * * * * /home/daravenrk/dragonlair/agent_stack/trigger_next_job.sh
