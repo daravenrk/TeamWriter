@@ -12,6 +12,7 @@ from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
 
 from .lock_manager import AgentLockManager
 from .orchestrator import OrchestratorAgent
+from .writing_assistant import generate_names, generate_technology, generate_personalities, generate_dates_history
 
 
 RUBRIC_KEYS = [
@@ -623,6 +624,17 @@ def run_stage(
                 + "\nRevise output to satisfy all constraints and output format."
             )
 
+        # Capture resolved route/model/options before invocation for upstream diagnostics.
+        resolved_plan = None
+        try:
+            resolved_plan = orchestrator.plan_request(
+                prompt_with_feedback,
+                profile_name=profile_name,
+                stream_override=False,
+            )
+        except Exception:
+            resolved_plan = None
+
         # Diagnostics: log prompt and context before agent call
         if diagnostics_path is not None:
             append_jsonl(
@@ -635,6 +647,11 @@ def run_stage(
                     "event": "pre_agent_call",
                     "prompt": prompt_with_feedback,
                     "context_store": dict(context_store),
+                    "resolved_route": (resolved_plan or {}).get("route"),
+                    "resolved_model": (resolved_plan or {}).get("model"),
+                    "resolved_profile": ((resolved_plan or {}).get("profile") or {}).get("name"),
+                    "resolved_stream": (resolved_plan or {}).get("stream"),
+                    "resolved_options": (resolved_plan or {}).get("options"),
                 },
             )
         attempt_started_at = datetime.utcnow().isoformat()
@@ -642,7 +659,13 @@ def run_stage(
             changes_log,
             agent_name,
             "stage_start",
-            {"stage": stage_id, "attempt": attempt},
+            {
+                "stage": stage_id,
+                "attempt": attempt,
+                "route": (resolved_plan or {}).get("route"),
+                "model": (resolved_plan or {}).get("model"),
+                "profile": ((resolved_plan or {}).get("profile") or {}).get("name"),
+            },
         )
 
         try:
@@ -730,6 +753,31 @@ def run_stage(
                 },
             )
     else:
+        # Log stage failure before raising exception
+        lock_manager.log_agent_change(
+            changes_log,
+            agent_name,
+            "stage_failure",
+            {
+                "stage": stage_id,
+                "attempt": max_retries + 1,
+                "gate_ok": False,
+                "gate_message": last_error,
+            },
+        )
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "event": "stage_failure",
+                    "attempt": max_retries + 1,
+                    "gate_ok": False,
+                    "gate_message": last_error,
+                },
+            )
         raise RuntimeError(f"{stage_id} failed quality gate after retries: {last_error}")
 
         if output_path is not None:
@@ -963,22 +1011,100 @@ def run_flow(args):
         output_format='JSON object with fields: title_working, genre, audience, target_word_count, page_target, tone, constraints, acceptance_criteria',
         failure_conditions=["missing fields", "invalid JSON", "vague acceptance criteria"],
     )
-    brief = run_stage(
-        orchestrator=orchestrator,
-        lock_manager=lock_manager,
-        changes_log=changes_log,
-        context_store=context_store,
-        stage_id="publisher_brief",
-        agent_name="book-publisher-brief",
-        profile_name=args.publisher_brief_profile,
-        prompt=publisher_contract,
-        output_path=dirs["brief"] / "book_brief.json",
-        parse_json=True,
-        gate_fn=gate_publisher_brief,
-        max_retries=args.max_retries,
-        diagnostics_path=diagnostics_log,
-        verbose=args.verbose,
-    )
+    # --- Publisher Brief with Title Generation and User Selection ---
+    brief = None
+    required_fields = [
+        "title_working", "genre", "audience", "target_word_count", "page_target", "tone", "constraints", "acceptance_criteria"
+    ]
+    for attempt in range(args.max_retries + 1):
+        brief = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id="publisher_brief",
+            agent_name="book-publisher-brief",
+            profile_name=args.publisher_brief_profile,
+            prompt=publisher_contract,
+            output_path=dirs["brief"] / "book_brief.json",
+            parse_json=True,
+            gate_fn=gate_publisher_brief,
+            max_retries=1,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        missing = [f for f in required_fields if not brief.get(f)]
+        # Fallback: always set title_working if missing, before breaking
+        if "title_working" in missing:
+            brief["title_working"] = args.title
+            missing = [f for f in required_fields if not brief.get(f)]
+        # Harden: after all attempts, always set before gate
+        if attempt == args.max_retries and not brief.get("title_working"):
+            brief["title_working"] = args.title
+        # Debug: print brief before gate
+        print("[DEBUG] publisher_brief fields just before gate:", json.dumps(brief, indent=2))
+        missing = [f for f in required_fields if not brief.get(f)]
+        if not missing:
+            break
+        # Try to fill missing fields from user input or model
+        correction_path = Path("/home/daravenrk/dragonlair/book_project/webui_correction.json")
+        user_data = {}
+        if correction_path.exists():
+            try:
+                with open(correction_path, "r", encoding="utf-8") as f:
+                    user_data = json.load(f)
+            except Exception:
+                user_data = {}
+        for field in missing:
+            # 1. User input
+            if user_data.get(field):
+                brief[field] = user_data[field]
+                continue
+            # 2. Model suggestion
+            if field == "title_working":
+                # Already set above, skip
+                continue
+            elif field == "genre":
+                brief[field] = args.genre
+            elif field == "audience":
+                brief[field] = args.audience
+            elif field == "target_word_count":
+                brief[field] = args.target_word_count
+            elif field == "page_target":
+                brief[field] = args.page_target
+            elif field == "tone":
+                brief[field] = args.tone
+            elif field == "constraints":
+                # Model suggestion for constraints
+                constraints_prompt = f"Suggest 5 concrete constraints for a book with the following premise and genre.\nPremise: {args.premise}\nGenre: {args.genre}\nReturn a JSON array of strings."
+                try:
+                    constraints_response = orchestrator.handle_request_with_overrides(
+                        constraints_prompt,
+                        profile_name=args.publisher_brief_profile,
+                        stream_override=False,
+                    )
+                    constraints = json.loads(constraints_response) if isinstance(constraints_response, str) else []
+                    if constraints:
+                        brief[field] = constraints
+                        continue
+                except Exception:
+                    pass
+                brief[field] = ["Must be original", "No plagiarism", "Consistent tone", "Meets genre expectations", "Engages target audience"]
+            elif field == "acceptance_criteria":
+                criteria_prompt = f"Suggest 5 measurable acceptance criteria for a book with the following premise and genre.\nPremise: {args.premise}\nGenre: {args.genre}\nReturn a JSON array of strings."
+                try:
+                    criteria_response = orchestrator.handle_request_with_overrides(
+                        criteria_prompt,
+                        profile_name=args.publisher_brief_profile,
+                        stream_override=False,
+                    )
+                    criteria = json.loads(criteria_response) if isinstance(criteria_response, str) else []
+                    if criteria:
+                        brief[field] = criteria
+                        continue
+                except Exception:
+                    pass
+                brief[field] = ["All sections present", "No major plot holes", "Meets word count", "Adheres to brief", "Passes editorial review"]
     context_store["permanent_memory"] = {"book_brief": brief}
     write_json(dirs["canon"] / "context_store.json", context_store)
 
@@ -1061,6 +1187,7 @@ def run_flow(args):
         verbose=args.verbose,
     )
 
+
     # 5) Canon manager
     canon_contract = build_contract(
         role="Canon / Memory Agent",
@@ -1091,6 +1218,29 @@ def run_flow(args):
     write_json(dirs["canon"] / "open_loops.json", canon_payload.get("open_loops", []))
     write_text(dirs["canon"] / "style_guide.md", str(canon_payload.get("style_guide", "")))
     context_tracking_strategy = derive_context_tracking_strategy(context_store.get("book", {}), canon_payload, chapter_spec)
+
+    # --- Writing Assistant Worldbuilding Integration ---
+    wa_context = {
+        "genre": brief.get("genre", ""),
+        "setting": canon_payload.get("canon", {}).get("setting", ""),
+        "era": canon_payload.get("canon", {}).get("era", ""),
+        "notes": brief.get("premise", ""),
+        "needs": chapter_spec.get("purpose", ""),
+        "themes": chapter_spec.get("purpose", ""),
+        "history": canon_payload.get("timeline", {}),
+        "focus": chapter_spec.get("purpose", ""),
+        "diversity": "broad, global, inclusive",
+    }
+    names_md = generate_names(wa_context)
+    technology_md = generate_technology(wa_context)
+    personalities_md = generate_personalities(wa_context)
+    dates_md = generate_dates_history(wa_context)
+    # Write outputs to book_project/
+    book_project_root = Path(args.output_dir)
+    write_text(book_project_root / "names.md", names_md)
+    write_text(book_project_root / "technology.md", technology_md)
+    write_text(book_project_root / "personalities.md", personalities_md)
+    write_text(book_project_root / "history.md", dates_md)
 
     # 6) Writer + section consistency review per section
     chapter_sections = chapter_spec.get("sections") or []
@@ -1565,22 +1715,49 @@ def run_flow(args):
         output_format='JSON with keys: decision, scores, notes, required_fixes, summary',
         failure_conditions=["invalid JSON", "missing decision", "missing required_fixes on REVISE"],
     )
-    publisher_qa = run_stage(
-        orchestrator=orchestrator,
-        lock_manager=lock_manager,
-        changes_log=changes_log,
-        context_store=context_store,
-        stage_id="publisher_qa",
-        agent_name="book-publisher",
-        profile_name="book-publisher",
-        prompt=publisher_qa_contract,
-        output_path=dirs["reviews"] / "publisher_report.json",
-        parse_json=True,
-        gate_fn=gate_publisher,
-        max_retries=args.max_retries,
-        diagnostics_path=diagnostics_log,
-        verbose=args.verbose,
-    )
+
+    # --- Publisher QA with retry on revision request ---
+    publisher_qa = None
+    publisher_attempts = 0
+    max_publisher_retries = max(1, args.max_retries)
+    last_publisher_prompt = publisher_qa_contract
+    while publisher_attempts < max_publisher_retries:
+        publisher_qa = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id="publisher_qa",
+            agent_name="book-publisher",
+            profile_name="book-publisher",
+            prompt=last_publisher_prompt,
+            output_path=dirs["reviews"] / "publisher_report.json",
+            parse_json=True,
+            gate_fn=gate_publisher,
+            max_retries=1,  # Only one attempt per outer loop
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        decision = str(publisher_qa.get("decision", "")).upper()
+        if decision == "APPROVE":
+            break
+        # If revision requested, check for user/AI correction (simulate with section_goal update)
+        correction_path = Path("/home/daravenrk/dragonlair/book_project/webui_correction.json")
+        correction = None
+        if correction_path.exists():
+            try:
+                with open(correction_path, "r", encoding="utf-8") as f:
+                    correction_data = json.load(f)
+                    correction = correction_data.get("correction")
+            except Exception:
+                correction = None
+        if correction:
+            # Inject correction into context and prompt for retry
+            last_publisher_prompt = publisher_qa_contract + f"\n\n[User Correction: {correction}]"
+        else:
+            # No correction available, break to avoid infinite loop
+            break
+        publisher_attempts += 1
 
     # Persistent memory updates and final export
     chapter_summary = {

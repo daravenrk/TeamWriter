@@ -10,7 +10,7 @@ import json
 from types import SimpleNamespace
 from typing import Dict, Optional, List, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -30,6 +30,10 @@ class StreamRequest(BaseModel):
     direction: Optional[str] = None
     profile: Optional[str] = None
     model: Optional[str] = None
+
+
+class SpawnControlRequest(BaseModel):
+    action: str
 
 
 class RecoverHungRequest(BaseModel):
@@ -101,6 +105,8 @@ class TaskRecord:
     hold: bool = False
     next_retry_at: Optional[float] = None
     production_status: Optional[dict] = None
+    spawn_release_at: Optional[float] = None
+    spawn_requested_at: Optional[float] = None
 
 
 app = FastAPI(title="Dragonlair Agent API", version="0.1.0")
@@ -182,6 +188,10 @@ BOOK_AUTO_RESUME_BACKOFF_SECONDS = max(
 BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS = max(
     BOOK_AUTO_RESUME_BACKOFF_SECONDS,
     int(os.environ.get("BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS", "600")),
+)
+SPAWN_PRE_CREATE_DELAY_SECONDS = max(
+    0.0,
+    float(os.environ.get("AGENT_SPAWN_PRECREATE_DELAY_SECONDS", "10")),
 )
 
 
@@ -323,6 +333,51 @@ def _build_status_payload(records: List[TaskRecord]):
         if st in counts:
             counts[st] += 1
 
+    pending_spawn_groups = _build_pending_spawn_groups(records)
+
+    # Find latest actionable stage event and gate failure from changes.log for book-flow tasks.
+    latest_failure = None
+    latest_stage_event = None
+    for rec in records:
+        if getattr(rec, "profile", None) == "book-flow" and getattr(rec, "book_request", None):
+            req = BookFlowRequest(**rec.book_request)
+            run_dir = _latest_book_run_dir(req.output_dir, req.title)
+            if run_dir:
+                changes_log = run_dir / "changes.log"
+                if changes_log.exists():
+                    for line in reversed(changes_log.read_text(encoding="utf-8").splitlines()):
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        action = str(obj.get("action") or "")
+                        details = obj.get("details") or {}
+                        if latest_stage_event is None and action in {"stage_start", "stage_result", "stage_complete", "stage_failure"}:
+                            latest_stage_event = {
+                                "action": action,
+                                "stage": details.get("stage"),
+                                "agent": obj.get("agent"),
+                                "profile": obj.get("profile"),
+                                "attempt": details.get("attempt"),
+                                "gate_ok": details.get("gate_ok"),
+                                "gate_message": details.get("gate_message"),
+                                "ts": obj.get("timestamp"),
+                            }
+
+                        if action == "stage_failure" and latest_failure is None:
+                            latest_failure = {
+                                "stage": details.get("stage"),
+                                "agent": obj.get("agent"),
+                                "profile": obj.get("profile"),
+                                "gate_message": details.get("gate_message"),
+                                "attempt": details.get("attempt"),
+                                "ts": obj.get("timestamp"),
+                            }
+                        if latest_failure is not None and latest_stage_event is not None:
+                            break
+            if latest_failure is not None or latest_stage_event is not None:
+                break
+
     return {
         "source": "flat_file",
         "generated_at": time.time(),
@@ -331,7 +386,82 @@ def _build_status_payload(records: List[TaskRecord]):
         "health": orchestrator.get_agent_health_report(),
         "task_counts": counts,
         "tasks": tasks,
+        "pending_spawn_groups": pending_spawn_groups,
+        "latest_gate_failure": latest_failure,
+        "latest_stage_event": latest_stage_event,
+        "crontab_next_execution": _calculate_next_crontab_execution(),
     }
+
+
+def _build_pending_spawn_groups(records: List[TaskRecord]) -> List[dict]:
+    now = time.time()
+    groups: Dict[str, dict] = {}
+
+    for rec in sorted(records, key=lambda t: t.created_at):
+        release_at = float(rec.spawn_release_at or 0.0)
+        if rec.status != "queued" or release_at <= now:
+            continue
+
+        group_name = rec.profile or "auto"
+        group = groups.setdefault(
+            group_name,
+            {
+                "group": group_name,
+                "count": 0,
+                "agents": [],
+            },
+        )
+
+        prompt = (rec.prompt or "").strip().replace("\n", " ")
+        purpose = prompt[:140]
+        if len(prompt) > 140:
+            purpose += "..."
+
+        group["count"] += 1
+        group["agents"].append(
+            {
+                "task_id": rec.id,
+                "name": rec.profile or "auto",
+                "purpose": purpose,
+                "run": rec.id[:8],
+                "remaining_seconds": max(0, int(round(release_at - now))),
+                "release_at": release_at,
+            }
+        )
+
+    return sorted(groups.values(), key=lambda item: item["group"])
+
+
+def _set_spawn_release_locked(record: TaskRecord, delay_seconds: float = SPAWN_PRE_CREATE_DELAY_SECONDS) -> None:
+    now = time.time()
+    record.spawn_requested_at = now
+    record.spawn_release_at = now + max(0.0, float(delay_seconds))
+
+
+def _schedule_spawn(task_id: str, runner, *runner_args):
+    def delayed_spawn():
+        while True:
+            with _task_lock:
+                record = _tasks.get(task_id)
+                if not record:
+                    return
+                if record.status != "queued":
+                    return
+                release_at = float(record.spawn_release_at or 0.0)
+
+            if release_at <= time.time():
+                break
+            time.sleep(min(0.5, release_at - time.time()))
+
+        with _task_lock:
+            record = _tasks.get(task_id)
+            if not record or record.status != "queued":
+                return
+            record.spawn_release_at = None
+
+        executor.submit(runner, task_id, *runner_args)
+
+    threading.Thread(target=delayed_spawn, daemon=True).start()
 
 
 def _refresh_ui_state_snapshot(event_type: str = "snapshot"):
@@ -350,6 +480,96 @@ def _read_ui_state_snapshot():
         return json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
         return _refresh_ui_state_snapshot(event_type="repair")
+
+
+# Store the latest correction in memory for now (could be persisted if needed)
+_latest_correction = {"text": None, "ts": 0.0}
+
+
+def _calculate_next_crontab_execution() -> dict:
+    """
+    Calculate the next scheduled crontab execution time.
+    Crontab runs every 5 minutes: 38-59/5 * * * * and 0-37/5 * * * *
+    This simplifies to: runs at 0, 5, 10, 15, 20, 25, 30, 35, 38, 43, 48, 53, 58 of each hour.
+    """
+    import datetime
+    now = datetime.datetime.now()
+    current_minute = now.minute
+    
+    # Define all valid minutes in the hour when cron runs
+    valid_minutes = [0, 5, 10, 15, 20, 25, 30, 35, 38, 43, 48, 53, 58]
+    
+    # Find next execution minute
+    next_minute = None
+    for vm in valid_minutes:
+        if vm > current_minute:
+            next_minute = vm
+            break
+    
+    if next_minute is None:
+        # Next execution is in the next hour
+        next_minute = valid_minutes[0]
+        next_hour = (now.hour + 1) % 24
+        next_exec = now.replace(hour=next_hour, minute=next_minute, second=0, microsecond=0)
+    else:
+        next_exec = now.replace(minute=next_minute, second=0, microsecond=0)
+    
+    time_until = (next_exec - now).total_seconds()
+    return {
+        "next_execution_ts": next_exec.timestamp(),
+        "next_execution_iso": next_exec.isoformat(),
+        "seconds_until": max(0, time_until),
+        "next_execution_minute": next_minute,
+    }
+
+
+def _find_latest_failed_book_task():
+    with _task_lock:
+        failed = [record for record in _tasks.values() if record.profile == "book-flow" and record.status == "failed"]
+        if not failed:
+            return None
+        return max(failed, key=lambda record: record.finished_at or 0)
+
+
+@app.post("/api/submit-correction")
+def submit_correction(payload: dict = Body(...)):
+    correction = (payload or {}).get("correction", "").strip()
+    if not correction:
+        raise HTTPException(status_code=400, detail="Correction text required.")
+
+    _latest_correction["text"] = correction
+    _latest_correction["ts"] = time.time()
+
+    record = _find_latest_failed_book_task()
+    if not record:
+        raise HTTPException(status_code=404, detail="No failed book-flow task to retry.")
+
+    req_dict = dict(record.book_request or {})
+    if not req_dict:
+        raise HTTPException(status_code=500, detail="No book request found for failed task.")
+
+    req_dict["section_goal"] = f"{req_dict.get('section_goal', '')}\n[Correction: {correction}]"
+    new_req = BookFlowRequest(**req_dict)
+    new_id = uuid.uuid4().hex
+    new_record = TaskRecord(
+        id=new_id,
+        created_at=time.time(),
+        status="queued",
+        prompt=record.prompt,
+        direction=record.direction,
+        profile="book-flow",
+        route=record.route,
+        model=record.model,
+        book_request=req_dict,
+        retry_count=0,
+        max_auto_retries=record.max_auto_retries,
+    )
+    with _task_lock:
+        _set_spawn_release_locked(new_record)
+        _tasks[new_id] = new_record
+    _schedule_spawn(new_id, _run_book_task, new_req)
+    _refresh_ui_state_snapshot(event_type="user_correction_submitted")
+    return {"ok": True, "message": "Correction submitted and retry started."}
 
 
 def _compose_prompt(direction: Optional[str], prompt: str) -> str:
@@ -559,6 +779,8 @@ def _task_to_dict(record: TaskRecord, queue_position=None):
         "next_retry_at": record.next_retry_at,
         "production_status": record.production_status,
         "queue_position": queue_position,
+        "spawn_release_at": record.spawn_release_at,
+        "spawn_requested_at": record.spawn_requested_at,
     }
 
 
@@ -928,7 +1150,8 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
                     if retry_record.status != "queued":
                         return
                     retry_record.next_retry_at = None
-                executor.submit(_run_book_task, task_id, req)
+                    _set_spawn_release_locked(retry_record)
+                _schedule_spawn(task_id, _run_book_task, req)
 
             threading.Thread(target=delayed_retry, daemon=True).start()
 
@@ -1188,6 +1411,7 @@ def create_task(req: SteerRequest):
                     ),
                 )
         _tasks[task_id] = record
+        _set_spawn_release_locked(record)
         _update_pressure_state_locked()
         _write_resource_tracker_locked(reason="task_queued")
         queue_positions = _compute_queue_positions(list(_tasks.values()))
@@ -1195,7 +1419,7 @@ def create_task(req: SteerRequest):
 
     _refresh_ui_state_snapshot(event_type="task_queued")
 
-    executor.submit(_run_task, task_id)
+    _schedule_spawn(task_id, _run_task)
     return {"task_id": task_id, "status": "queued", "queue_position": position, "route": record.route, "model": record.model}
 
 
@@ -1225,12 +1449,13 @@ def create_book_flow(req: BookFlowRequest):
 
     with _task_lock:
         _tasks[task_id] = record
+        _set_spawn_release_locked(record)
         _update_pressure_state_locked()
         _write_resource_tracker_locked(reason="book_task_queued")
 
     _refresh_ui_state_snapshot(event_type="book_task_queued")
 
-    executor.submit(_run_book_task, task_id, req)
+    _schedule_spawn(task_id, _run_book_task, req)
     return {"task_id": task_id, "status": "queued", "task_type": "book-flow"}
 
 
@@ -1273,7 +1498,11 @@ def hold_book_task(task_id: str, req: BookHoldRequest):
     _refresh_ui_state_snapshot(event_type="book_task_hold_update")
 
     if trigger_resume and book_req is not None:
-        executor.submit(_run_book_task, task_id, book_req)
+        with _task_lock:
+            record = _tasks.get(task_id)
+            if record and record.status == "queued":
+                _set_spawn_release_locked(record)
+        _schedule_spawn(task_id, _run_book_task, book_req)
 
     return {"status": "ok", "task": payload}
 
@@ -1322,8 +1551,9 @@ def reconcile_book_jobs():
 
             record.status = "queued"
             record.next_retry_at = None
+            _set_spawn_release_locked(record)
             resumed.append({"task_id": task_id, "retry_count": record.retry_count})
-            executor.submit(_run_book_task, task_id, req)
+            _schedule_spawn(task_id, _run_book_task, req)
 
         _write_resource_tracker_locked(reason="book_jobs_reconciled")
         _update_pressure_state_locked()
@@ -1361,6 +1591,73 @@ def get_book_task_production_status(task_id: str):
         "retry_count": record.retry_count,
         "max_auto_retries": record.max_auto_retries,
         "production_status": status_payload,
+    }
+
+
+@app.post("/api/tasks/{task_id}/spawn-control")
+def spawn_control(task_id: str, req: SpawnControlRequest):
+    action = (req.action or "").strip().lower()
+    if action not in {"go", "stop", "pause"}:
+        raise HTTPException(status_code=400, detail="action must be one of: go, stop, pause")
+
+    delegate_cancel = False
+    detail = ""
+    payload = None
+
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+
+        if action == "go":
+            if record.status != "queued":
+                raise HTTPException(status_code=409, detail="go is only valid for queued tasks")
+            record.spawn_release_at = time.time()
+            detail = "Task released for immediate spawn."
+
+        elif action == "pause":
+            if record.status != "queued":
+                raise HTTPException(status_code=409, detail="pause is only valid for queued tasks")
+            _set_spawn_release_locked(record, delay_seconds=SPAWN_PRE_CREATE_DELAY_SECONDS)
+            detail = f"Task spawn paused for {int(SPAWN_PRE_CREATE_DELAY_SECONDS)} seconds."
+
+        elif action == "stop":
+            if record.status == "running":
+                delegate_cancel = True
+            elif record.status == "queued":
+                record.status = "cancelled"
+                record.error = "Cancelled by user via spawn-control stop"
+                record.finished_at = time.time()
+                record.spawn_release_at = None
+                record.next_retry_at = None
+                _update_pressure_state_locked()
+                _write_resource_tracker_locked(reason="task_cancelled")
+                detail = "Queued task cancelled before spawn."
+            else:
+                detail = f"Task already in terminal state: {record.status}."
+
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        payload = _task_to_dict(record, queue_position=queue_positions.get(record.id))
+
+    if delegate_cancel:
+        cancelled = cancel_task(task_id)
+        _append_ui_event("spawn_control_action", {"task_id": task_id, "action": action, "delegate": "cancel"})
+        return {
+            "status": "ok",
+            "task_id": task_id,
+            "action": action,
+            "detail": "Running task cancellation requested via spawn-control stop.",
+            "task": cancelled,
+        }
+
+    _append_ui_event("spawn_control_action", {"task_id": task_id, "action": action})
+    _refresh_ui_state_snapshot(event_type="spawn_control_action")
+    return {
+        "status": "ok",
+        "task_id": task_id,
+        "action": action,
+        "detail": detail,
+        "task": payload,
     }
 
 
