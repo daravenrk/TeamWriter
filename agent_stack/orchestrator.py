@@ -1,3 +1,7 @@
+# TODO: Agent Lifecycle Logging Improvements
+# - Add log entries for agent start, return, and error
+# - Ensure all agent actions and state changes are logged to changes.log
+# - Log agent handoffs and inter-agent communication
 # agent_stack/orchestrator.py
 
 import time
@@ -13,6 +17,43 @@ from .ollama_subagent import OllamaSubagent
 from .profile_loader import load_agent_profiles
 
 class OrchestratorAgent:
+                # Analytics: track process runtime, actions, prompts, and results
+                self.analytics_log = []
+                self.analytics_run_start = None
+                self.analytics_run_end = None
+
+            def analytics_start_run(self):
+                self.analytics_run_start = time.time()
+                self.analytics_log.clear()
+                self.reset_analytics_counters()
+
+            def analytics_end_run(self):
+                self.analytics_run_end = time.time()
+
+            def analytics_log_event(self, event_type, details=None):
+                entry = {
+                    "timestamp": time.time(),
+                    "event": event_type,
+                    "details": details or {},
+                }
+                self.analytics_log.append(entry)
+
+            def analytics_save(self, path):
+                analytics = {
+                    "run_start": self.analytics_run_start,
+                    "run_end": self.analytics_run_end,
+                    "duration": (self.analytics_run_end or 0) - (self.analytics_run_start or 0),
+                    "events": self.analytics_log,
+                    "unique_agents": list(self.analytics_total_agents_used),
+                    "total_agents": self.get_total_agents_used(),
+                    "active_agents": list(self.active_agents),
+                }
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(analytics, f, indent=2)
+        # Analytics: track total unique agents used per run
+        self.analytics_total_agents_used = set()
+        # Track currently active agents
+        self.active_agents = set()
     """
     Main entry point for agent stack. Routes tasks to subagents based on input and context.
     Only internal and LLM (Ollama) calls are handled; external tools are not invoked until all internal logic is complete.
@@ -273,6 +314,8 @@ class OrchestratorAgent:
         health["state"] = "running"
         started_at = time.time()
         health["last_started_at"] = started_at
+        self.active_agents.add(agent_name)
+        self.analytics_total_agents_used.add(agent_name)
         self._heartbeat(
             agent_name,
             state="running",
@@ -308,31 +351,94 @@ class OrchestratorAgent:
         is_support_profile = bool(profile_name and profile_name in self.support_profiles)
         gate = nullcontext() if is_support_profile else self._route_gate(agent_name)
         call_timeout_seconds = float(self.route_call_timeouts.get(agent_name, self.call_timeout_seconds))
-        with gate:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    self.subagents[agent_name].run,
-                    user_input,
-                    model=model,
-                    stream=stream,
-                    system_prompt=system_prompt,
-                    options=request_options,
-                    keep_alive=request_keep_alive,
-                    on_stream=wrapped_stream_callback,
-                )
-                try:
-                    result = future.result(timeout=call_timeout_seconds)
-                except FutureTimeoutError:
-                    self._triage_mark_hung(agent_name, started_at)
-                    raise RuntimeError(f"Agent {agent_name} hung and was quarantined")
-                except Exception as err:
-                    self._triage_mark_failed(agent_name, err, started_at)
-                    raise
+        self.analytics_log_event("agent_start", {"agent": agent_name, "profile": profile_name, "prompt": user_input, "model": model})
+        # Diagnostics: log agent invocation and parameters
+        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+            try:
+                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "event": "orchestrator_agent_invoke",
+                        "agent": agent_name,
+                        "profile": profile_name,
+                        "prompt": user_input,
+                        "model": model,
+                        "timestamp": time.time(),
+                    }) + "\n")
+            except Exception:
+                pass
+        try:
+            with gate:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        self.subagents[agent_name].run,
+                        user_input,
+                        model=model,
+                        stream=stream,
+                        system_prompt=system_prompt,
+                        options=request_options,
+                        keep_alive=request_keep_alive,
+                        on_stream=wrapped_stream_callback,
+                    )
+                    try:
+                        result = future.result(timeout=call_timeout_seconds)
+                        self.analytics_log_event("agent_success", {"agent": agent_name, "result": str(result)[:400]})
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_success",
+                                    "agent": agent_name,
+                                    "profile": profile_name,
+                                    "result": str(result)[:400],
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                    except FutureTimeoutError:
+                        self._triage_mark_hung(agent_name, started_at)
+                        self.analytics_log_event("agent_hung", {"agent": agent_name})
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_hung",
+                                    "agent": agent_name,
+                                    "profile": profile_name,
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                        raise RuntimeError(f"Agent {agent_name} hung and was quarantined")
+                    except Exception as err:
+                        self._triage_mark_failed(agent_name, err, started_at)
+                        self.analytics_log_event("agent_error", {"agent": agent_name, "error": str(err)})
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_error",
+                                    "agent": agent_name,
+                                    "profile": profile_name,
+                                    "error": str(err),
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                        raise
 
-        self._triage_mark_success(agent_name, started_at)
-        if isinstance(result, str):
-            self._heartbeat(agent_name, last_response_preview=result[:400])
-        return result
+            self._triage_mark_success(agent_name, started_at)
+            if isinstance(result, str):
+                self._heartbeat(agent_name, last_response_preview=result[:400])
+            return result
+        finally:
+            # Remove from active agents set
+            self.active_agents.discard(agent_name)
+            # Optionally, reset endpoint state after every run for robustness
+            self.lock_manager.reset_endpoint_state()
+            self.analytics_log_event("agent_end", {"agent": agent_name})
+    def get_active_agent_count(self):
+        """Return the number of currently active agents."""
+        return len(self.active_agents)
+
+    def get_total_agents_used(self):
+        """Return the number of unique agents used in this run (analytics)."""
+        return len(self.analytics_total_agents_used)
+
+    def reset_analytics_counters(self):
+        """Reset analytics counters for a new run."""
+        self.analytics_total_agents_used.clear()
+        self.active_agents.clear()
 
     def _fallback_agent(self, preferred):
         candidates = [name for name in self.subagents if name != preferred and self._is_available(name)]

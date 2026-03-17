@@ -1,7 +1,7 @@
 ---
 name: book-assembler
-route: ollama_amd
-model: qwen3.5:27b
+route: ollama_nvidia
+model: qwen3.5:4b
 default_stream: false
 num_ctx: 49152
 num_predict: 1800

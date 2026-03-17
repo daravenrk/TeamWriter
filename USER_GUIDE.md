@@ -172,6 +172,11 @@ The planner outputs `SUGGESTED_NUM_CTX`, which you can place in profile frontmat
 
 ## Dockerized Agent Stack
 
+### Research Agent Update (March 2026)
+- The book-researcher agent now uses qwen3.5:14b (128k context window).
+- Research agent pulls from news, Wikipedia, and the internet for up-to-date facts.
+- Research output is more data-driven and includes structured dossiers and fact cards.
+
 Start backend + frontend:
 
 ```sh

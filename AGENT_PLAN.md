@@ -43,6 +43,9 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [ ] Version and freeze profile bundles per release
 
 ## Operator CLI Deliverables
+
+## March 2026: Research Agent Update
+- book-researcher: qwen3.5:14b, 128k context, internet/news/Wikipedia research, structured output
 - [x] `agentctl profiles`
 - [x] `agentctl plan "..."`
 - [x] `agentctl once "..."`

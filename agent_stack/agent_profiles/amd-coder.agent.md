@@ -1,9 +1,9 @@
 ---
 name: amd-coder
 route: ollama_amd
-model: deepseek-coder-v2:16b
+model: qwen3.5:9b
 default_stream: false
-num_ctx: 32768
+num_ctx: 192000
 num_predict: 512
 temperature: 0.2
 intent_keywords: code,coder,python,bash,debug,refactor,test

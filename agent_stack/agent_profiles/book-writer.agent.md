@@ -1,9 +1,9 @@
 ---
 name: book-writer
 route: ollama_amd
-model: qwen3.5:27b
+model: qwen3.5:9b
 default_stream: false
-num_ctx: 49152
+num_ctx: 192000
 num_predict: 2200
 temperature: 0.7
 intent_keywords: book,chapter,scene,novel,story,manuscript,writer

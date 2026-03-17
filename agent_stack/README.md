@@ -62,6 +62,11 @@ agentctl server-submit "reply with ok" --profile nvidia-fast
 
 ## Markdown Agent Profiles
 
+### March 2026: Research Agent Update
+- book-researcher now uses qwen3.5:14b (128k context window)
+- Internet, news, and Wikipedia research is now standard for research agent
+- Research output is structured and data-driven
+
 Agents are now behavior-defined via markdown profile files under:
 
 - `agent_profiles/*.agent.md`

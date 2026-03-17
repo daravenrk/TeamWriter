@@ -1,3 +1,6 @@
+# TODO: Agent Work and Response Logging
+# - Add detailed logging for agent work, responses, and lifecycle events
+# - Log all major stage transitions, returns, and errors
 import argparse
 import json
 import re
@@ -83,6 +86,12 @@ def read_json(path: Path, default=None):
 
 def write_json(path: Path, payload):
     write_text(path, json.dumps(payload, indent=2))
+
+def append_analytics(path: Path, event: dict):
+    ensure_dir(path.parent)
+    with file_lock(path):
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
 
 
 def append_jsonl(path: Path, payload):
@@ -563,6 +572,20 @@ def run_stage(
     parsed = None
 
     for attempt in range(1, max_retries + 2):
+        # Diagnostics: log prompt and context before agent call
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": attempt,
+                    "event": "pre_agent_call",
+                    "prompt": prompt_with_feedback,
+                    "context_store": dict(context_store),
+                },
+            )
         attempt_started_at = datetime.utcnow().isoformat()
         lock_manager.log_agent_change(
             changes_log,
@@ -584,11 +607,28 @@ def run_stage(
                 + "\nRevise output to satisfy all constraints and output format."
             )
 
-        raw = orchestrator.handle_request_with_overrides(
-            prompt_with_feedback,
-            profile_name=profile_name,
-            stream_override=False,
-        )
+        try:
+            raw = orchestrator.handle_request_with_overrides(
+                prompt_with_feedback,
+                profile_name=profile_name,
+                stream_override=False,
+            )
+        except Exception as e:
+            if diagnostics_path is not None:
+                append_jsonl(
+                    diagnostics_path,
+                    {
+                        "stage": stage_id,
+                        "agent": agent_name,
+                        "profile": profile_name,
+                        "attempt": attempt,
+                        "event": "agent_call_error",
+                        "error": str(e),
+                        "prompt": prompt_with_feedback,
+                        "context_store": dict(context_store),
+                    },
+                )
+            raise
         attempt_completed_at = datetime.utcnow().isoformat()
         last_raw = raw
         parsed = parse_json_block(raw, fallback={}) if parse_json else raw
@@ -653,19 +693,71 @@ def run_stage(
     else:
         raise RuntimeError(f"{stage_id} failed quality gate after retries: {last_error}")
 
-    if output_path is not None:
-        with lock_manager.edit_lock(name="publisher_store"):
-            if parse_json:
-                write_json(output_path, parsed)
-            else:
-                write_text(output_path, str(parsed))
+        if output_path is not None:
+            try:
+                with lock_manager.edit_lock(name="publisher_store"):
+                    if parse_json:
+                        write_json(output_path, parsed)
+                    else:
+                        write_text(output_path, str(parsed))
+                if diagnostics_path is not None:
+                    append_jsonl(
+                        diagnostics_path,
+                        {
+                            "stage": stage_id,
+                            "agent": agent_name,
+                            "profile": profile_name,
+                            "event": "output_saved",
+                            "output_path": str(output_path),
+                            "parsed": parsed if parse_json else None,
+                        },
+                    )
+            except Exception as e:
+                if diagnostics_path is not None:
+                    append_jsonl(
+                        diagnostics_path,
+                        {
+                            "stage": stage_id,
+                            "agent": agent_name,
+                            "profile": profile_name,
+                            "event": "output_save_error",
+                            "output_path": str(output_path),
+                            "error": str(e),
+                        },
+                    )
+                raise
 
-    context_store[stage_id] = {
-        "agent": agent_name,
-        "profile": profile_name,
-        "output_path": str(output_path) if output_path else None,
-        "lock_after": lock_manager.get_lock_status(name="changes_log"),
-    }
+    try:
+        context_store[stage_id] = {
+            "agent": agent_name,
+            "profile": profile_name,
+            "output_path": str(output_path) if output_path else None,
+            "lock_after": lock_manager.get_lock_status(name="changes_log"),
+        }
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "event": "context_store_update",
+                    "context_store": dict(context_store),
+                },
+            )
+    except Exception as e:
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "event": "context_store_update_error",
+                    "error": str(e),
+                },
+            )
+        raise
 
     handoff_dir = context_store.get("_handoff_dir")
     if handoff_dir:
@@ -1504,6 +1596,44 @@ def run_flow(args):
             "summary_keys": list(summary.keys()) if isinstance(summary, dict) else [],
         },
     }
+
+    # --- Post-processing: Archive and export completed book run ---
+    try:
+        import subprocess
+        from datetime import datetime
+        archive_name = f"{book_slug}_run_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.tar.gz"
+        archive_path = str(runs_root / archive_name)
+        # Create tar.gz of the run_dir
+        subprocess.run([
+            "tar", "-czf", archive_path, "-C", str(runs_root), run_name
+        ], check=True)
+        # SCP to remote server
+        remote_path = f"192.168.86.34:/media/daravenrk/The_Device/WrittenBooks/{archive_name}"
+        scp_result = subprocess.run([
+            "scp", archive_path, remote_path
+        ], capture_output=True, text=True)
+        export_log = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": "book-flow-parent",
+            "action": "export_book_run",
+            "details": {
+                "archive": archive_path,
+                "remote": remote_path,
+                "scp_returncode": scp_result.returncode,
+                "scp_stdout": scp_result.stdout,
+                "scp_stderr": scp_result.stderr,
+            },
+        }
+        append_jsonl(changes_log, export_log)
+    except Exception as export_err:
+        error_log = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": "book-flow-parent",
+            "action": "export_error",
+            "details": {"error": str(export_err)},
+        }
+        append_jsonl(changes_log, error_log)
+
     append_jsonl(changes_log, parent_log_success)
     print(json.dumps(summary, indent=2))
     return json.dumps(summary, indent=2)

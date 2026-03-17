@@ -1,3 +1,6 @@
+# TODO: Subagent Interaction Logging
+# - Log all subagent requests, responses, and errors
+# - Ensure handoffs and interactions are recorded in changes.log
 # agent_stack/ollama_subagent.py
 
 import json

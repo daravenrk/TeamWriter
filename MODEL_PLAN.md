@@ -45,8 +45,8 @@ Recommended context ladder per model:
 - 65536
 - 81920 (only if 65536 is stable)
 
-Notes:
 - qwen3.5:27b is already present and is your strongest long-context writing option now.
+- book-researcher now uses qwen3.5:14b (128k context) for research, with internet/news/Wikipedia as standard sources.
 - Some listed models are optional and may pull slower or fail depending on registry availability.
 
 ## Track C: NVIDIA Writing Balanced

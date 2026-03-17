@@ -3,7 +3,7 @@ name: amd-qwen35-9b-highctx
 route: ollama_amd
 model: qwen3.5:9b
 default_stream: false
-num_ctx: 262144
+num_ctx: 192000
 num_predict: 1800
 temperature: 0.4
 intent_keywords: qwen35-9b,9b longctx,long-context,extended memory,high context

@@ -43,6 +43,7 @@ curl -sS http://192.168.86.36:11435/api/generate -d '{"model":"qwen2.5-coder:14b
 - `agent_stack/agent_profiles/amd-coder.agent.md`
 - `agent_stack/agent_profiles/amd-writer.agent.md`
 - `agent_stack/agent_profiles/nvidia-fast.agent.md`
+- `agent_stack/agent_profiles/book-researcher.agent.md` (now uses qwen3.5:14b, 128k context, internet/news/Wikipedia research)
 
 ### Design
 - Behavior is defined in markdown profiles.
@@ -51,6 +52,11 @@ curl -sS http://192.168.86.36:11435/api/generate -d '{"model":"qwen2.5-coder:14b
 - Orchestrator hot-reloads profile files automatically.
 
 ## 3) Locking, Anti-Spam, And Triage
+
+## 7) March 2026 Update: Research Agent
+- book-researcher now uses qwen3.5:14b (128k context)
+- Internet, news, and Wikipedia research is now standard for research agent
+- Research output is structured and data-driven
 
 ### Locks
 - Edit lock prevents volatile concurrent routing edits.
