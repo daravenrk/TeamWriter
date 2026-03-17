@@ -6,6 +6,7 @@ default_stream: false
 num_ctx: 192000
 num_predict: 2200
 temperature: 0.7
+num_gpus: 2
 intent_keywords: book,chapter,scene,novel,story,manuscript,writer
 priority: 110
 ---

@@ -6,6 +6,7 @@ default_stream: false
 num_ctx: 192000
 num_predict: 512
 temperature: 0.2
+num_gpus: 2
 intent_keywords: code,coder,python,bash,debug,refactor,test
 priority: 100
 ---

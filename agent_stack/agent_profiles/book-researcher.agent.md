@@ -6,6 +6,7 @@ default_stream: false
 num_ctx: 128000
 num_predict: 1800
 temperature: 0.3
+num_gpus: 2
 intent_keywords: research,facts,worldbuilding,source,reference,dossier
 priority: 105
 ---

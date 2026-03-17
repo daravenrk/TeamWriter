@@ -7,6 +7,7 @@
 import time
 import os
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import nullcontext, contextmanager
 from glob import glob
@@ -79,6 +80,12 @@ class OrchestratorAgent:
     Only internal and LLM (Ollama) calls are handled; external tools are not invoked until all internal logic is complete.
     """
     def __init__(self):
+        # Analytics/runtime state used across request lifecycle.
+        self.analytics_log = []
+        self.analytics_run_start = None
+        self.analytics_run_end = None
+        self.analytics_total_agents_used = set()
+        self.active_agents = set()
         self.lock_manager = AgentLockManager()
         self.server_mode = str(os.environ.get("AGENT_SERVER_MODE", "standard")).strip().lower()
         self.strict_mode_validation = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "true")).lower() in {"1", "true", "yes", "on"}

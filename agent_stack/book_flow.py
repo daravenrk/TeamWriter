@@ -198,6 +198,35 @@ def gate_publisher(report):
     return False, "publisher requested revision"
 
 
+def gate_publisher_brief(report):
+    if not isinstance(report, dict):
+        return False, "invalid brief payload"
+
+    required_scalars = [
+        "title_working",
+        "genre",
+        "audience",
+        "target_word_count",
+        "page_target",
+        "tone",
+    ]
+    for key in required_scalars:
+        if key not in report:
+            return False, f"missing field: {key}"
+        value = report.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return False, f"empty field: {key}"
+
+    constraints = report.get("constraints")
+    acceptance = report.get("acceptance_criteria")
+    if not isinstance(constraints, list) or len(constraints) < 5:
+        return False, "constraints must be a list with at least 5 items"
+    if not isinstance(acceptance, list) or len(acceptance) < 5:
+        return False, "acceptance_criteria must be a list with at least 5 items"
+
+    return True, "ok"
+
+
 def gate_rubric_report(report):
     if not isinstance(report, dict):
         return False, "invalid rubric report"
@@ -573,6 +602,27 @@ def run_stage(
     parsed = None
 
     for attempt in range(1, max_retries + 2):
+        resource_block = build_resource_reference_block(context_store)
+        prompt_with_feedback = prompt
+        if resource_block:
+            prompt_with_feedback = prompt_with_feedback + "\n\n" + resource_block
+
+        if last_error:
+            feedback_block = ""
+            if last_feedback is not None:
+                # If reviewer output is JSON, pretty-print it; else, show as text
+                if isinstance(last_feedback, dict):
+                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK (JSON):\n" + json.dumps(last_feedback, indent=2)
+                else:
+                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK:\n" + str(last_feedback)
+            prompt_with_feedback = (
+                prompt_with_feedback
+                + feedback_block
+                + "\n\nPREVIOUS ATTEMPT FAILED QUALITY GATE:\n"
+                + last_error
+                + "\nRevise output to satisfy all constraints and output format."
+            )
+
         # Diagnostics: log prompt and context before agent call
         if diagnostics_path is not None:
             append_jsonl(
@@ -594,27 +644,6 @@ def run_stage(
             "stage_start",
             {"stage": stage_id, "attempt": attempt},
         )
-
-        resource_block = build_resource_reference_block(context_store)
-        prompt_with_feedback = prompt
-        if resource_block:
-            prompt_with_feedback = prompt_with_feedback + "\n\n" + resource_block
-
-        if last_error:
-            feedback_block = ""
-            if last_feedback is not None:
-                # If reviewer output is JSON, pretty-print it; else, show as text
-                if isinstance(last_feedback, dict):
-                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK (JSON):\n" + json.dumps(last_feedback, indent=2)
-                else:
-                    feedback_block = "\n\nPREVIOUS REVIEWER FEEDBACK:\n" + str(last_feedback)
-            prompt_with_feedback = (
-                prompt_with_feedback
-                + feedback_block
-                + "\n\nPREVIOUS ATTEMPT FAILED QUALITY GATE:\n"
-                + last_error
-                + "\nRevise output to satisfy all constraints and output format."
-            )
 
         try:
             raw = orchestrator.handle_request_with_overrides(
@@ -940,12 +969,12 @@ def run_flow(args):
         changes_log=changes_log,
         context_store=context_store,
         stage_id="publisher_brief",
-        agent_name="book-publisher",
-        profile_name="book-publisher",
+        agent_name="book-publisher-brief",
+        profile_name=args.publisher_brief_profile,
         prompt=publisher_contract,
         output_path=dirs["brief"] / "book_brief.json",
         parse_json=True,
-        gate_fn=lambda obj: (bool(obj.get("constraints")) and bool(obj.get("acceptance_criteria")), "missing constraints or acceptance criteria"),
+        gate_fn=gate_publisher_brief,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -1657,22 +1686,23 @@ def build_parser():
     p.add_argument("--tone", default="cinematic and emotionally grounded")
     p.add_argument("--premise", required=True)
 
-    p.add_argument("--chapter-number", type=int, default=1)
-    p.add_argument("--chapter-title", required=True)
-    p.add_argument("--section-title", required=True)
-    p.add_argument("--section-goal", required=True)
-    p.add_argument("--writer-words", type=int, default=1400)
-    p.add_argument("--target-word-count", type=int, default=125000)
-    p.add_argument("--page-target", type=int, default=450)
-    p.add_argument("--max-retries", type=int, default=2)
-    p.add_argument("--merge-context-words", type=int, default=3500)
+    p.add_argument("--chapter-number", "--chapter_number", dest="chapter_number", type=int, default=1)
+    p.add_argument("--chapter-title", "--chapter_title", dest="chapter_title", required=True)
+    p.add_argument("--section-title", "--section_title", dest="section_title", required=True)
+    p.add_argument("--section-goal", "--section_goal", dest="section_goal", required=True)
+    p.add_argument("--writer-words", "--writer_words", dest="writer_words", type=int, default=1400)
+    p.add_argument("--target-word-count", "--target_word_count", dest="target_word_count", type=int, default=125000)
+    p.add_argument("--page-target", "--page_target", dest="page_target", type=int, default=450)
+    p.add_argument("--max-retries", "--max_retries", dest="max_retries", type=int, default=2)
+    p.add_argument("--merge-context-words", "--merge_context_words", dest="merge_context_words", type=int, default=3500)
     p.add_argument("-v", "--verbose", action="store_true", help="Enable detailed diagnostics logging")
 
-    p.add_argument("--writer-profile", default="book-writer")
-    p.add_argument("--editor-profile", default="book-editor")
-    p.add_argument("--publisher-profile", default="book-publisher")
+    p.add_argument("--writer-profile", "--writer_profile", dest="writer_profile", default="book-writer")
+    p.add_argument("--editor-profile", "--editor_profile", dest="editor_profile", default="book-editor")
+    p.add_argument("--publisher-brief-profile", "--publisher_brief_profile", dest="publisher_brief_profile", default="book-publisher-brief")
+    p.add_argument("--publisher-profile", "--publisher_profile", dest="publisher_profile", default="book-publisher")
 
-    p.add_argument("--output-dir", default="/home/daravenrk/dragonlair/book_project")
+    p.add_argument("--output-dir", "--output_dir", dest="output_dir", default="/home/daravenrk/dragonlair/book_project")
     return p
 
 

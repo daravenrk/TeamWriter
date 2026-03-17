@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-/home/daravenrk/dragonlair/book_project}"
+BOOK_SLUG="${2:-the-new-dawn}"
+
+RUN_DIR=$(ls -1dt "$ROOT/$BOOK_SLUG/runs"/* 2>/dev/null | head -n 1 || true)
+if [[ -z "${RUN_DIR}" ]]; then
+  echo "No run directory found under: $ROOT/$BOOK_SLUG/runs"
+  exit 1
+fi
+
+echo "RUN_DIR=$RUN_DIR"
+CHANGES="$RUN_DIR/changes.log"
+DIAG="$RUN_DIR/diagnostics/agent_diagnostics.jsonl"
+
+python3 - "$CHANGES" "$DIAG" <<'PY'
+import json
+import sys
+from collections import Counter
+
+changes_path = sys.argv[1]
+diag_path = sys.argv[2]
+
+stage_start = Counter()
+stage_complete = Counter()
+stage_result = {}
+errors = []
+
+try:
+    with open(changes_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            action = obj.get("action")
+            details = obj.get("details") or {}
+            stage = details.get("stage")
+            if action == "stage_start" and stage:
+                stage_start[stage] += 1
+            if action == "stage_complete" and stage:
+                stage_complete[stage] += 1
+            if action == "stage_result" and stage:
+                stage_result[stage] = {
+                    "gate_ok": details.get("gate_ok"),
+                    "gate_message": details.get("gate_message"),
+                    "attempt": details.get("attempt"),
+                }
+except FileNotFoundError:
+    print("changes.log not found")
+    sys.exit(2)
+
+try:
+    with open(diag_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("event") == "agent_call_error":
+                errors.append({
+                    "stage": obj.get("stage"),
+                    "agent": obj.get("agent"),
+                    "profile": obj.get("profile"),
+                    "error": obj.get("error"),
+                })
+except FileNotFoundError:
+    pass
+
+print("\nSTAGE_START_COUNTS")
+for s, n in stage_start.items():
+    print(f"- {s}: {n}")
+
+print("\nSTAGE_COMPLETE_COUNTS")
+for s, n in stage_complete.items():
+    print(f"- {s}: {n}")
+
+print("\nLAST_STAGE_RESULTS")
+for s, data in stage_result.items():
+    print(f"- {s}: gate_ok={data.get('gate_ok')} attempt={data.get('attempt')} msg={data.get('gate_message')}")
+
+incomplete = [s for s in stage_start if stage_complete.get(s, 0) < stage_start[s]]
+print("\nINCOMPLETE_STAGES")
+if incomplete:
+    for s in incomplete:
+        print(f"- {s}")
+else:
+    print("- none")
+
+print("\nAGENT_CALL_ERRORS")
+if errors:
+    for e in errors[-8:]:
+        print(f"- stage={e['stage']} agent={e['agent']} profile={e['profile']} error={e['error']}")
+else:
+    print("- none")
+PY

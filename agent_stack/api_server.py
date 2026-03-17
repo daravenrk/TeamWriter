@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .book_flow import run_flow
+from .book_flow import run_flow, slugify
 from .orchestrator import OrchestratorAgent
 
 
@@ -36,6 +36,10 @@ class RecoverHungRequest(BaseModel):
     force: bool = False
 
 
+class BookHoldRequest(BaseModel):
+    hold: bool = True
+
+
 class BookFlowRequest(BaseModel):
     title: str
     premise: str
@@ -54,6 +58,7 @@ class BookFlowRequest(BaseModel):
     verbose: bool = False
     writer_profile: str = "book-writer"
     editor_profile: str = "book-editor"
+    publisher_brief_profile: str = "book-publisher-brief"
     publisher_profile: str = "book-publisher"
     output_dir: str = "/home/daravenrk/dragonlair/book_project"
     resource_tracker_path: Optional[str] = None
@@ -90,6 +95,12 @@ class TaskRecord:
     finished_at: Optional[float] = None
     response: Optional[str] = None
     error: Optional[str] = None
+    book_request: Optional[dict] = None
+    retry_count: int = 0
+    max_auto_retries: int = 0
+    hold: bool = False
+    next_retry_at: Optional[float] = None
+    production_status: Optional[dict] = None
 
 
 app = FastAPI(title="Dragonlair Agent API", version="0.1.0")
@@ -157,6 +168,21 @@ PRESSURE_WRITER_PROFILES = {
 }
 _pressure_mode = {"active": False, "last_depth": 0, "last_update": 0.0}
 _resource_switch_state = {"mode": "normal", "last_switch_at": 0.0}
+BOOK_AUTO_RESUME_ENABLED = str(os.environ.get("BOOK_AUTO_RESUME_ENABLED", "true")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+BOOK_AUTO_RESUME_MAX_RETRIES = max(0, int(os.environ.get("BOOK_AUTO_RESUME_MAX_RETRIES", "6")))
+BOOK_AUTO_RESUME_BACKOFF_SECONDS = max(
+    5,
+    int(os.environ.get("BOOK_AUTO_RESUME_BACKOFF_SECONDS", "45")),
+)
+BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS = max(
+    BOOK_AUTO_RESUME_BACKOFF_SECONDS,
+    int(os.environ.get("BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS", "600")),
+)
 
 
 def _ensure_parent(path: Path):
@@ -527,6 +553,11 @@ def _task_to_dict(record: TaskRecord, queue_position=None):
         "finished_at": record.finished_at,
         "response": record.response,
         "error": record.error,
+        "retry_count": record.retry_count,
+        "max_auto_retries": record.max_auto_retries,
+        "hold": record.hold,
+        "next_retry_at": record.next_retry_at,
+        "production_status": record.production_status,
         "queue_position": queue_position,
     }
 
@@ -569,6 +600,134 @@ def _find_route_model_conflict(route: Optional[str], model: Optional[str]):
                 continue
             return rec.model
     return None
+
+
+def _latest_book_run_dir(output_dir: str, title: str) -> Optional[Path]:
+    base = Path(output_dir).expanduser() / slugify(title) / "runs"
+    runs = sorted(base.glob("*"), key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    return runs[0] if runs else None
+
+
+def _read_jsonl(path: Path) -> List[dict]:
+    rows: List[dict] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            rows.append(json.loads(raw))
+        except Exception:
+            continue
+    return rows
+
+
+def _analyze_book_production(req: BookFlowRequest) -> dict:
+    run_dir = _latest_book_run_dir(req.output_dir, req.title)
+    if not run_dir:
+        return {
+            "run_dir": None,
+            "status": "not-started",
+            "checkpoint_score": {"completed": 0, "total": 10},
+            "next_checkpoint": "publisher_brief",
+            "checkpoints": [],
+            "stage_attempts": {},
+            "last_error": None,
+        }
+
+    changes_log = run_dir / "changes.log"
+    rows = _read_jsonl(changes_log)
+    stage_start = {}
+    stage_complete = {}
+    stage_result = {}
+    last_error = None
+
+    for item in rows:
+        action = str(item.get("action") or "")
+        details = item.get("details") or {}
+        stage = str(details.get("stage") or "")
+        if action == "stage_start" and stage:
+            stage_start[stage] = int(stage_start.get(stage, 0)) + 1
+        elif action == "stage_complete" and stage:
+            stage_complete[stage] = int(stage_complete.get(stage, 0)) + 1
+        elif action == "stage_result" and stage:
+            stage_result[stage] = {
+                "gate_ok": details.get("gate_ok"),
+                "gate_message": details.get("gate_message"),
+                "attempt": details.get("attempt"),
+            }
+
+    diag = run_dir / "diagnostics" / "agent_diagnostics.jsonl"
+    for item in _read_jsonl(diag):
+        if str(item.get("event") or "") == "agent_call_error":
+            last_error = str(item.get("error") or "")
+
+    checkpoint_specs = [
+        ("publisher_brief", [run_dir / "00_brief" / "book_brief.json"]),
+        ("research", [run_dir / "01_research" / "research_dossier.md"]),
+        ("architect_outline", [run_dir / "02_outline" / "master_outline.md", run_dir / "02_outline" / "book_structure.json"]),
+        ("chapter_planner", [run_dir / "02_outline" / "chapter_specs" / "chapter_01.json"]),
+        ("canon", [run_dir / "03_canon" / "canon.json"]),
+        ("sections_written", [run_dir / "04_drafts" / "chapter_01"]),
+        ("section_reviews", [run_dir / "05_reviews" / "section_reviews"]),
+        ("assembly", [run_dir / "04_drafts" / "chapter_01" / "assembled.md"]),
+        ("quality_gates", [run_dir / "05_reviews" / "developmental_report.json", run_dir / "05_reviews" / "rubric_report.json", run_dir / "05_reviews" / "continuity_report.json", run_dir / "05_reviews" / "publisher_report.json"]),
+        ("final_export", [run_dir / "06_final" / "manuscript_v1.md"]),
+    ]
+
+    checkpoints = []
+    completed_count = 0
+    next_checkpoint = None
+
+    for checkpoint_name, artifacts in checkpoint_specs:
+        artifact_ok = True
+        for ap in artifacts:
+            if ap.is_dir():
+                has_any = any(ap.iterdir()) if ap.exists() else False
+                artifact_ok = artifact_ok and has_any
+            else:
+                artifact_ok = artifact_ok and ap.exists()
+
+        stage_ok = bool(stage_complete.get(checkpoint_name, 0) > 0)
+        if checkpoint_name in {"sections_written", "section_reviews", "quality_gates", "final_export"}:
+            # Derived checkpoints rely mainly on artifacts.
+            stage_ok = artifact_ok
+
+        done = bool(stage_ok and artifact_ok)
+        if done:
+            completed_count += 1
+        elif next_checkpoint is None:
+            next_checkpoint = checkpoint_name
+
+        checkpoints.append(
+            {
+                "name": checkpoint_name,
+                "completed": done,
+                "artifact_ok": artifact_ok,
+                "stage_attempts": int(stage_start.get(checkpoint_name, 0)),
+                "last_stage_result": stage_result.get(checkpoint_name),
+            }
+        )
+
+    if completed_count == len(checkpoint_specs):
+        status = "complete"
+        next_checkpoint = None
+    elif completed_count == 0:
+        status = "started"
+    else:
+        status = "in-progress"
+
+    return {
+        "run_dir": str(run_dir),
+        "status": status,
+        "checkpoint_score": {"completed": completed_count, "total": len(checkpoint_specs)},
+        "next_checkpoint": next_checkpoint,
+        "checkpoints": checkpoints,
+        "stage_attempts": stage_start,
+        "last_error": last_error,
+        "evaluated_at": time.time(),
+    }
 
 
 def _nvidia_pressure_depth() -> int:
@@ -684,6 +843,7 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
         record.status = "running"
         record.started_at = time.time()
         record.profile = "book-flow"
+        record.production_status = _analyze_book_production(req)
         _write_resource_tracker_locked(reason="book_task_running")
     _refresh_ui_state_snapshot(event_type="book_task_running")
 
@@ -706,6 +866,7 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
             verbose=req.verbose,
             writer_profile=req.writer_profile,
             editor_profile=req.editor_profile,
+            publisher_brief_profile=req.publisher_brief_profile,
             publisher_profile=req.publisher_profile,
             output_dir=req.output_dir,
             resource_tracker_path=req.resource_tracker_path or str(RESOURCE_TRACKER_PATH),
@@ -716,17 +877,60 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
             record.status = "completed"
             record.response = summary
             record.finished_at = time.time()
+            record.production_status = _analyze_book_production(req)
             _update_pressure_state_locked()
             _write_resource_tracker_locked(reason="book_task_completed")
         _refresh_ui_state_snapshot(event_type="book_task_completed")
     except Exception as err:
+        should_retry = False
+        retry_delay = BOOK_AUTO_RESUME_BACKOFF_SECONDS
         with _task_lock:
-            record.status = "failed"
             record.error = str(err)
             record.finished_at = time.time()
+            record.production_status = _analyze_book_production(req)
+
+            can_retry = (
+                BOOK_AUTO_RESUME_ENABLED
+                and not record.hold
+                and record.retry_count < record.max_auto_retries
+            )
+
+            if can_retry:
+                record.retry_count += 1
+                retry_delay = min(
+                    BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS,
+                    BOOK_AUTO_RESUME_BACKOFF_SECONDS * (2 ** max(0, record.retry_count - 1)),
+                )
+                record.next_retry_at = time.time() + retry_delay
+                record.status = "queued"
+                should_retry = True
+                _write_resource_tracker_locked(reason="book_task_retry_scheduled")
+            else:
+                record.status = "failed"
+                record.next_retry_at = None
+                _write_resource_tracker_locked(reason="book_task_failed")
+
             _update_pressure_state_locked()
-            _write_resource_tracker_locked(reason="book_task_failed")
-        _refresh_ui_state_snapshot(event_type="book_task_failed")
+
+        _refresh_ui_state_snapshot(
+            event_type="book_task_retry_scheduled" if should_retry else "book_task_failed"
+        )
+
+        if should_retry:
+            def delayed_retry():
+                time.sleep(retry_delay)
+                with _task_lock:
+                    retry_record = _tasks.get(task_id)
+                    if not retry_record:
+                        return
+                    if retry_record.hold:
+                        return
+                    if retry_record.status != "queued":
+                        return
+                    retry_record.next_retry_at = None
+                executor.submit(_run_book_task, task_id, req)
+
+            threading.Thread(target=delayed_retry, daemon=True).start()
 
 
 @app.get("/")
@@ -1013,6 +1217,10 @@ def create_book_flow(req: BookFlowRequest):
         prompt=label,
         direction="book-mode",
         profile="book-flow",
+        book_request=req.model_dump(),
+        retry_count=0,
+        max_auto_retries=BOOK_AUTO_RESUME_MAX_RETRIES,
+        hold=False,
     )
 
     with _task_lock:
@@ -1034,6 +1242,126 @@ def get_task(task_id: str):
             raise HTTPException(status_code=404, detail="task not found")
         queue_positions = _compute_queue_positions(list(_tasks.values()))
         return _task_to_dict(record, queue_position=queue_positions.get(record.id))
+
+
+@app.post("/api/tasks/{task_id}/hold")
+def hold_book_task(task_id: str, req: BookHoldRequest):
+    trigger_resume = False
+    book_req = None
+
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+        if record.profile != "book-flow":
+            raise HTTPException(status_code=400, detail="hold control is only supported for book-flow tasks")
+
+        record.hold = bool(req.hold)
+        if record.hold:
+            record.next_retry_at = None
+        else:
+            if record.status in {"failed", "queued"} and record.book_request:
+                trigger_resume = True
+                book_req = BookFlowRequest(**record.book_request)
+                record.production_status = _analyze_book_production(book_req)
+
+        _write_resource_tracker_locked(reason="book_task_hold_update")
+        _update_pressure_state_locked()
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        payload = _task_to_dict(record, queue_position=queue_positions.get(record.id))
+
+    _refresh_ui_state_snapshot(event_type="book_task_hold_update")
+
+    if trigger_resume and book_req is not None:
+        executor.submit(_run_book_task, task_id, book_req)
+
+    return {"status": "ok", "task": payload}
+
+
+@app.post("/api/book-jobs/reconcile")
+def reconcile_book_jobs():
+    resumed = []
+    skipped = []
+
+    with _task_lock:
+        for task_id, record in _tasks.items():
+            if record.profile != "book-flow":
+                continue
+
+            if record.hold:
+                skipped.append({"task_id": task_id, "reason": "hold"})
+                continue
+
+            if record.status == "running":
+                skipped.append({"task_id": task_id, "reason": "running"})
+                continue
+
+            if not record.book_request:
+                skipped.append({"task_id": task_id, "reason": "missing_request_payload"})
+                continue
+
+            if record.retry_count >= record.max_auto_retries:
+                skipped.append({"task_id": task_id, "reason": "retry_limit_reached"})
+                continue
+
+            if record.status not in {"failed", "queued"}:
+                skipped.append({"task_id": task_id, "reason": f"status={record.status}"})
+                continue
+
+            if record.next_retry_at and record.next_retry_at > time.time():
+                skipped.append({"task_id": task_id, "reason": "backoff_pending"})
+                continue
+
+            try:
+                req = BookFlowRequest(**record.book_request)
+            except Exception:
+                skipped.append({"task_id": task_id, "reason": "invalid_request_payload"})
+                continue
+
+            record.production_status = _analyze_book_production(req)
+
+            record.status = "queued"
+            record.next_retry_at = None
+            resumed.append({"task_id": task_id, "retry_count": record.retry_count})
+            executor.submit(_run_book_task, task_id, req)
+
+        _write_resource_tracker_locked(reason="book_jobs_reconciled")
+        _update_pressure_state_locked()
+
+    _refresh_ui_state_snapshot(event_type="book_jobs_reconciled")
+    return {
+        "status": "ok",
+        "resumed": resumed,
+        "skipped": skipped,
+        "resumed_count": len(resumed),
+    }
+
+
+@app.get("/api/tasks/{task_id}/production-status")
+def get_book_task_production_status(task_id: str):
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+        if record.profile != "book-flow":
+            raise HTTPException(status_code=400, detail="production status is only supported for book-flow tasks")
+        if not record.book_request:
+            raise HTTPException(status_code=404, detail="book request payload not found")
+
+        req = BookFlowRequest(**record.book_request)
+        status_payload = _analyze_book_production(req)
+        record.production_status = status_payload
+        _write_resource_tracker_locked(reason="book_task_production_status")
+
+    _refresh_ui_state_snapshot(event_type="book_task_production_status")
+    return {
+        "task_id": task_id,
+        "status": record.status,
+        "hold": record.hold,
+        "retry_count": record.retry_count,
+        "max_auto_retries": record.max_auto_retries,
+        "production_status": status_payload,
+    }
 
 
 @app.post("/api/stream")
