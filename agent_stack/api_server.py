@@ -578,12 +578,43 @@ def _build_status_payload(records: List[TaskRecord]):
             if latest_failure is not None or latest_stage_event is not None:
                 break
 
+    health_report = orchestrator.get_agent_health_report()
+
+    # Synthesize inflight running state from task queue route counts.
+    # When a route has active (queued/running) tasks but the agent health shows idle,
+    # the agent is actually busy waiting for or executing an LLM call — the health
+    # dict only reflects in-RPC state which is momentarily idle between book-flow stages.
+    route_active: Dict[str, List[str]] = {}
+    for rec in records:
+        if rec.status in {"queued", "running"} and rec.route:
+            route_active.setdefault(rec.route, []).append(rec.id)
+    # Also collect model per task-id for richer status_detail
+    task_by_id: Dict[str, TaskRecord] = {rec.id: rec for rec in records}
+    agents_health = (health_report or {}).get("agents") or {}
+    for agent_name, info in agents_health.items():
+        active_task_ids = route_active.get(agent_name, [])
+        if not active_task_ids:
+            continue
+        current_display = str(info.get("display_state") or info.get("state") or "idle")
+        if current_display in {"idle", ""}:
+            # At least one task is active on this route — promote to running
+            sample_task = task_by_id.get(active_task_ids[0])
+            detail = f"inflight via task queue ({len(active_task_ids)} active)"
+            if sample_task and sample_task.model:
+                detail += f" model={sample_task.model}"
+            if sample_task and sample_task.status == "running":
+                detail += f" task={active_task_ids[0][:8]}"
+            info["display_state"] = "running"
+            info["status_detail"] = detail
+            info["route_inflight"] = len(active_task_ids)
+
+    resource_tracker = _resource_snapshot(reason="status_payload")
     return {
         "source": "flat_file",
         "generated_at": time.time(),
         "pressure_mode": dict(_pressure_mode),
-        "resource_tracker": _resource_snapshot(reason="status_payload"),
-        "health": orchestrator.get_agent_health_report(),
+        "resource_tracker": resource_tracker,
+        "health": health_report,
         "task_counts": counts,
         "tasks": tasks,
         "pending_spawn_groups": pending_spawn_groups,
@@ -1842,7 +1873,13 @@ def status():
 
 @app.get("/api/ui-state")
 def ui_state():
-    return _read_ui_state_snapshot()
+    # Build a fresh payload on every poll so agent health reflects live task-queue
+    # route activity (inflight synthesis). This avoids showing agents as idle while
+    # Ollama is actively processing — the cached snapshot goes stale during long
+    # LLM calls because no event fires to refresh it.
+    with _task_lock:
+        records = list(_tasks.values())
+    return _build_status_payload(records)
 
 
 @app.post("/api/recover-hung")

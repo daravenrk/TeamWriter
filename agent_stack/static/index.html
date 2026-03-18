@@ -539,14 +539,26 @@ function renderAgentVoyeur(data) {
     };
   });
 
+  const routeActive = ((data.resource_tracker || {}).queue || {}).route_active_counts || {};
+
   const agentNodes = Object.entries(agents).map(([name, info]) => {
     const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '-';
     const displayState = agentDisplayState(info);
-    const synthesized = bookTask && bookTask.status === 'running' && latestStage && displayState === 'idle';
+    // Synthesize running state when the task queue shows active tasks on this route
+    // but the agent health (which only reflects in-RPC state) still shows idle.
+    const routeInflight = routeActive[name] || 0;
+    const routeSynthesized = routeInflight > 0 && displayState === 'idle';
+    const effectiveState = routeSynthesized ? 'running' : displayState;
+    const sourceLabel = info.route_inflight
+      ? `route-health (${info.route_inflight} inflight via task queue)`
+      : routeSynthesized
+        ? `route-health (${routeInflight} inflight — queue-derived)`
+        : 'route-health';
+    const statusDetail = info.status_detail || (routeSynthesized ? `inflight via task queue (${routeInflight} active)` : '');
     return {
       name: `${name}.agent`,
-      status: synthesized ? 'queued' : displayState,
-      body: `state=${agentStatusLabel(info)}\nprofile=${info.current_profile || '-'}\ntokens=${info.profile_tokens ?? '-'}\nmodel=${info.current_model || '-'}\nheartbeat=${hb}\n${(info.current_task_excerpt || '-').slice(0, 80)}\nsource=${synthesized ? 'route-health (task active via stage log)' : 'route-health'}`,
+      status: effectiveState,
+      body: `state=${agentStatusLabel(info)}\nprofile=${info.current_profile || '-'}\ntokens=${info.profile_tokens ?? '-'}\nmodel=${info.current_model || '-'}\nheartbeat=${hb}\n${(info.current_task_excerpt || '-').slice(0, 80)}\n${statusDetail ? 'detail=' + statusDetail + '\n' : ''}source=${sourceLabel}`,
     };
   });
 
