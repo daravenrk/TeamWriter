@@ -17,6 +17,7 @@ from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, 
 from .orchestrator import OrchestratorAgent
 from .output_schemas import validate_stage_payload
 from .writing_assistant import generate_names, generate_technology, generate_personalities, generate_dates_history
+from .living_skeleton import run_living_skeleton_update, load_law_context, get_future_frame
 
 
 RUBRIC_KEYS = [
@@ -2042,6 +2043,14 @@ def run_flow(args):
         fallback={},
     )
 
+    # -- Law context + living skeleton frame for writer guidance --
+    # Canonical law (Tier 1) comes from immutable past chapter canonical records.
+    # Writers MUST respect every law_item and continuity_constraint listed there.
+    # The living skeleton frame (Tier 2) provides the current prediction for this
+    # chapter so the writer knows what they are expected to accomplish next.
+    _law_context_block = load_law_context(framework_root, for_chapter_number=args.chapter_number)
+    _skeleton_frame_for_writer = get_future_frame(framework_root, args.chapter_number)
+
     for idx, section_item in enumerate(chapter_sections, start=1):
         section_title = ""
         section_goal = ""
@@ -2069,17 +2078,27 @@ def run_flow(args):
             "relevant_notes": relevant_notes_packet,
             "section_title": section_title,
             "section_goal": section_goal,
+            # Two-tier doc system: past law (immutable) + current skeleton frame (predictive)
+            "canonical_law": _law_context_block or "(no prior accepted chapters — first chapter run)",
+            "skeleton_guidance_frame": _skeleton_frame_for_writer or "(no skeleton frame — run skeleton_flow first)",
         }
+        _writer_constraints = [
+            "Return markdown only",
+            f"Target words around {args.writer_words}",
+            "Respect canon and style guide",
+            "Use chapter notes only if relevant to this section goal",
+            "Follow provided context tracking strategy for continuity",
+        ]
+        if _law_context_block:
+            _writer_constraints.insert(0,
+                "CRITICAL: Respect every item in canonical_law — these are locked facts from "
+                "accepted chapters. Contradicting any law_item or continuity_constraint is an "
+                "automatic quality gate failure."
+            )
         writer_contract = build_contract(
             role="Section Writer Agent",
             objective=f"Draft section {idx:02d} for the chapter.",
-            constraints=[
-                "Return markdown only",
-                f"Target words around {args.writer_words}",
-                "Respect canon and style guide",
-                "Use chapter notes only if relevant to this section goal",
-                "Follow provided context tracking strategy for continuity",
-            ],
+            constraints=_writer_constraints,
             inputs=local_task_memory,
             output_format="Markdown with heading, coherent section body, and transition sentence",
             failure_conditions=["canon contradiction", "missing transition", "off-topic section"],
@@ -2781,6 +2800,36 @@ def run_flow(args):
     progress_index["last_updated"] = datetime.utcnow().isoformat()
     write_json(progress_index_path, progress_index)
 
+    # Living skeleton: post-acceptance documentation update (two-tier system)
+    # Writes the immutable canonical record and updates the predictive living
+    # skeleton.  Errors here never block the chapter from completing — the
+    # chapter is already accepted; we log and continue.
+    living_skeleton_result = run_living_skeleton_update(
+        framework_root=framework_root,
+        book_root=book_root,
+        chapter_number=args.chapter_number,
+        chapter_title=args.chapter_title,
+        section_title=args.section_title,
+        accepted_manuscript=current_manuscript,
+        arc_tracker=arc_tracker,
+        canon_payload=canon_payload,
+        next_writer_notes=next_writer_notes,
+        rubric_report=rubric_report,
+        run_dir=run_dir,
+        orchestrator=orchestrator,
+        verbose=getattr(args, "verbose", False),
+    )
+    append_run_event(
+        run_journal,
+        "living_skeleton_updated",
+        {
+            "chapter_number": args.chapter_number,
+            "extraction_succeeded": living_skeleton_result.get("extraction_succeeded"),
+            "canonical_record_path": living_skeleton_result.get("canonical_record_path"),
+            "error": living_skeleton_result.get("error"),
+        },
+    )
+
     write_agent_context_status(
         agent_context_status_path,
         {
@@ -2829,6 +2878,13 @@ def run_flow(args):
             "quality_failures_log": str(orchestrator.quality_failures_log_path),
             "reward_ledger": str(orchestrator.agent_rewards_path),
             "reward_events": str(orchestrator.agent_reward_events_path),
+        },
+        "living_skeleton_docs": {
+            "canonical_record": living_skeleton_result.get("canonical_record_path"),
+            "living_skeleton": living_skeleton_result.get("living_skeleton_path"),
+            "doc_index": living_skeleton_result.get("doc_index_path"),
+            "extraction_succeeded": living_skeleton_result.get("extraction_succeeded"),
+            "error": living_skeleton_result.get("error"),
         },
         "verbose": bool(args.verbose),
     }

@@ -289,6 +289,28 @@ STAGE_OUTPUT_SCHEMAS = {
             "series_threads": {"type": "array"},
         },
     },
+    "skeleton_update": {
+        "type": "object",
+        "required": [
+            "accepted_content_summary",
+            "law_items",
+            "character_states",
+            "timeline_events",
+            "open_loops_opened",
+            "open_loops_closed",
+            "continuity_constraints",
+        ],
+        "properties": {
+            "accepted_content_summary": {"type": "string", "minLength": 10},
+            "law_items": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}},
+            "character_states": {"type": "object"},
+            "timeline_events": {"type": "array"},
+            "open_loops_opened": {"type": "array"},
+            "open_loops_closed": {"type": "array"},
+            "continuity_constraints": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}},
+            "delta_from_skeleton": {"type": ["string", "null"]},
+        },
+    },
 }
 
 
