@@ -467,6 +467,18 @@ These should be completed once publisher outputs successfully:
   - Prevent the agent stack from accepting a new book-flow job while one is already in flight (or limit to a configurable concurrency)
   - Return a clear 429 / busy response so clients can queue rather than accidentally spawning parallel runs that overload VRAM
 
+- **Todo 87**: Overhaul review validation logic and writer scene guidance for story-aware correctness
+  - **Review targets acceptance criteria**: Every review stage (rubric, developmental, section review, publisher QA) must explicitly receive and evaluate against the chapter's `acceptance_criteria` from the book brief and framework skeleton — not just generic rubric dimensions. Reviews that pass without addressing declared acceptance criteria should be treated as incomplete.
+  - **Review pass → external notes propagation**: When a review stage passes its gate, extract and commit pertinent story elements (open loops introduced or progressed, character state changes, canon additions, timeline events) to `arc_tracker.json` and `agent_context_status.jsonl` immediately — not only at run-end. This ensures elements survive even if a later stage fails.
+  - **Temporal chapter awareness in reviews**: Review agents should receive past chapter summaries (from `session_handoffs.jsonl` / `rolling_memory.json`) AND relevant planned future chapter beats from the framework skeleton's outline structure, so they can evaluate whether the current chapter sets up future chapters correctly and closes what it should.
+  - **Structured Writer's Scene Briefing**: Replace the current `local_task_memory` dict passed to the Section Writer with a structured `build_scene_briefing()` function that assembles:
+    - *Past context* — open loops (all, with chapter-introduced annotation), character states from arc tracker, relevant prior chapter notes filtered by section goal
+    - *Current context* — chapter acceptance criteria, section goal, must_include/must_avoid from chapter spec, continuity watch items from last rubric
+    - *Future context* — upcoming chapter beats from framework outline (so the writer can set them up without resolving them)
+    - *Guidance header* — a short preamble listing the 3-5 most critical items the writer must honor in this scene (open loops to NOT resolve, character state to maintain, acceptance criterion to hit)
+  - **`build_relevant_chapter_notes` fix**: Currently only scores backward-looking summaries. Extend it to also include forward-looking notes from the framework outline for planned but not-yet-written chapters, clearly tagged as `[FUTURE]` so the writer knows not to resolve them prematurely.
+  - **Review-on-pass annotation contract**: Add a `review_annotations` field to rubric/developmental/continuity output schemas. When a review passes, write `review_annotations.story_elements` to `agent_context_status.jsonl` with phase `review_passed_annotation` so story state is externalized at the point of approval, not only at pipeline end.
+
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges
   - Export route/model labels carefully so the metric cardinality stays bounded and operationally safe
