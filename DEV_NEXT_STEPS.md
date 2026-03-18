@@ -455,6 +455,14 @@ These should be completed once publisher outputs successfully:
   - **Execution result (2026-03-18, Attempt 7 / IN PROGRESS / latest code path)**:
     - New default-on debug payload logging was added so every stage attempt/recovery can persist raw output to diagnostics for offline analysis.
     - Next evaluation should be performed from `run_journal.jsonl` + `diagnostics/agent_diagnostics.jsonl` rather than process watching.
+  - **Current checkpoint (2026-03-18, before next todo pickup)**:
+    - Pre-run cleanup and archival are now active and verified in live runs: old `runs/` content is copied into `run_history/` before the next run starts.
+    - Full debug payload logging is active by default, so stage attempt/recovery payloads are available in diagnostics without needing `--debug`.
+    - `publisher_brief` is now stable enough to pass on current validation runs.
+    - `research` on AMD is still returning `raw_output: null` / empty output, but the pipeline now applies a deterministic fallback dossier and continues.
+    - The current active blocker has moved downstream to `architect_outline`, where the NVIDIA architect model is repeatedly omitting `master_outline_markdown`.
+    - A local architect fallback/repair patch has been added in `book_flow.py`, but the current validation run has not yet produced a final post-patch success/failure result for that stage.
+    - Immediate next evaluation target: confirm whether the architect fallback advances the run into `chapter_planner`; if it does, the next todo should move to chapter planner / canon stage failures rather than revisiting earlier runtime issues.
   - **Current Todo 73 analysis summary**:
     - Infra timeout mismatch: fixed.
     - Executor timeout shutdown blocking: fixed.
