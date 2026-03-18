@@ -142,12 +142,16 @@ class OrchestratorAgent:
             for name in self.subagents
         }
         self.call_timeout_seconds = float(os.environ.get("AGENT_CALL_TIMEOUT_SECONDS", "180"))
+        default_route_timeout_seconds = max(
+            self.call_timeout_seconds,
+            float(os.environ.get("AGENT_DEFAULT_ROUTE_TIMEOUT_SECONDS", "900")),
+        )
         self.route_call_timeouts = {
             "ollama_amd": float(
-                os.environ.get("AGENT_CALL_TIMEOUT_SECONDS_AMD", str(self.call_timeout_seconds))
+                os.environ.get("AGENT_CALL_TIMEOUT_SECONDS_AMD", str(default_route_timeout_seconds))
             ),
             "ollama_nvidia": float(
-                os.environ.get("AGENT_CALL_TIMEOUT_SECONDS_NVIDIA", str(self.call_timeout_seconds))
+                os.environ.get("AGENT_CALL_TIMEOUT_SECONDS_NVIDIA", str(default_route_timeout_seconds))
             ),
         }
         default_heartbeat_timeout = max(120.0, max(self.route_call_timeouts.values()) * 1.25)
@@ -1293,92 +1297,98 @@ class OrchestratorAgent:
         try:
             with global_gate:
                 with gate:
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(
-                            self.subagents[agent_name].run,
-                            user_input,
-                            model=model,
-                            stream=stream,
-                            system_prompt=system_prompt,
-                            options=request_options,
-                            keep_alive=request_keep_alive,
-                            on_stream=wrapped_stream_callback,
-                            correlation_id=call_correlation_id,
-                            ledger_path=str(self.ollama_run_ledger_path),
-                        )
-                        try:
-                            result = future.result(timeout=call_timeout_seconds)
-                            self.analytics_log_event("agent_success", {"agent": agent_name, "result": str(result)[:400]})
-                            if hasattr(self, "diagnostics_path") and self.diagnostics_path:
-                                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
-                                    f.write(json.dumps({
-                                        "event": "orchestrator_agent_success",
-                                        "agent": agent_name,
-                                        "profile": profile_name,
-                                        "result": str(result)[:400],
-                                        "timestamp": time.time(),
-                                    }) + "\n")
-                        except FutureTimeoutError:
-                            self._triage_mark_hung(agent_name, started_at)
-                            self.analytics_log_event("agent_hung", {"agent": agent_name})
-                            if hasattr(self, "diagnostics_path") and self.diagnostics_path:
-                                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
-                                    f.write(json.dumps({
-                                        "event": "orchestrator_agent_hung",
-                                        "agent": agent_name,
-                                        "profile": profile_name,
-                                        "timestamp": time.time(),
-                                    }) + "\n")
-                            raise AgentHungError(
-                                f"Agent {agent_name} hung and was quarantined",
-                                details={"agent": agent_name, "timeout_seconds": call_timeout_seconds},
-                            )
-                        except AgentStackError as err:
-                            self._triage_mark_failed(agent_name, err, started_at)
-                            self.analytics_log_event(
-                                "agent_error",
-                                {
+                    pool = ThreadPoolExecutor(max_workers=1)
+                    future = pool.submit(
+                        self.subagents[agent_name].run,
+                        user_input,
+                        model=model,
+                        stream=stream,
+                        system_prompt=system_prompt,
+                        options=request_options,
+                        keep_alive=request_keep_alive,
+                        on_stream=wrapped_stream_callback,
+                        correlation_id=call_correlation_id,
+                        ledger_path=str(self.ollama_run_ledger_path),
+                    )
+                    try:
+                        result = future.result(timeout=call_timeout_seconds)
+                        self.analytics_log_event("agent_success", {"agent": agent_name, "result": str(result)[:400]})
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_success",
                                     "agent": agent_name,
+                                    "profile": profile_name,
+                                    "result": str(result)[:400],
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                    except FutureTimeoutError:
+                        future.cancel()
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        pool = None
+                        self._triage_mark_hung(agent_name, started_at)
+                        self.analytics_log_event("agent_hung", {"agent": agent_name})
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_hung",
+                                    "agent": agent_name,
+                                    "profile": profile_name,
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                        raise AgentHungError(
+                            f"Agent {agent_name} hung and was quarantined",
+                            details={"agent": agent_name, "timeout_seconds": call_timeout_seconds},
+                        )
+                    except AgentStackError as err:
+                        self._triage_mark_failed(agent_name, err, started_at)
+                        self.analytics_log_event(
+                            "agent_error",
+                            {
+                                "agent": agent_name,
+                                "error": str(err),
+                                "error_code": err.code,
+                            },
+                        )
+                        if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                            with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps({
+                                    "event": "orchestrator_agent_error",
+                                    "agent": agent_name,
+                                    "profile": profile_name,
                                     "error": str(err),
                                     "error_code": err.code,
-                                },
-                            )
-                            if hasattr(self, "diagnostics_path") and self.diagnostics_path:
-                                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
-                                    f.write(json.dumps({
-                                        "event": "orchestrator_agent_error",
-                                        "agent": agent_name,
-                                        "profile": profile_name,
-                                        "error": str(err),
-                                        "error_code": err.code,
-                                        "timestamp": time.time(),
-                                    }) + "\n")
-                            raise
-                        except Exception as err:
-                            wrapped = AgentUnexpectedError(
-                                f"Unexpected agent execution error for {agent_name}: {err}",
-                                details={"agent": agent_name},
-                            )
-                            self._triage_mark_failed(agent_name, wrapped, started_at)
-                            self.analytics_log_event(
-                                "agent_error",
-                                {
-                                    "agent": agent_name,
-                                    "error": str(wrapped),
-                                    "error_code": wrapped.code,
-                                },
-                            )
-                            if hasattr(self, "diagnostics_path") and self.diagnostics_path:
-                                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
-                                    f.write(json.dumps({
-                                        "event": "orchestrator_agent_error",
-                                        "agent": agent_name,
-                                        "profile": profile_name,
-                                        "error": str(wrapped),
-                                        "error_code": wrapped.code,
-                                        "timestamp": time.time(),
-                                    }) + "\n")
-                            raise wrapped
+                                    "timestamp": time.time(),
+                                }) + "\n")
+                        raise
+                    finally:
+                        if pool is not None:
+                            pool.shutdown(wait=True)
+        except Exception as err:
+            wrapped = AgentUnexpectedError(
+                f"Unexpected agent execution error for {agent_name}: {err}",
+                details={"agent": agent_name},
+            )
+            self._triage_mark_failed(agent_name, wrapped, started_at)
+            self.analytics_log_event(
+                "agent_error",
+                {
+                    "agent": agent_name,
+                    "error": str(wrapped),
+                    "error_code": wrapped.code,
+                },
+            )
+            if hasattr(self, "diagnostics_path") and self.diagnostics_path:
+                with open(self.diagnostics_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "event": "orchestrator_agent_error",
+                        "agent": agent_name,
+                        "profile": profile_name,
+                        "error": str(wrapped),
+                        "error_code": wrapped.code,
+                        "timestamp": time.time(),
+                    }) + "\n")
+            raise wrapped
 
             self._triage_mark_success(agent_name, started_at)
             if isinstance(result, str):

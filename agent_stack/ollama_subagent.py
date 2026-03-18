@@ -29,7 +29,26 @@ class OllamaSubagent:
         self.lock_manager = lock_manager or AgentLockManager()
         self.policy = policy or EndpointPolicy(min_interval_seconds=1.5, max_inflight=1)
         # Keep per-request socket timeout configurable for slower long-form runs.
-        self.http_timeout_seconds = float(os.environ.get("AGENT_OLLAMA_HTTP_TIMEOUT_SECONDS", "420"))
+        self.http_timeout_seconds = self._resolve_http_timeout_seconds()
+
+    def _resolve_http_timeout_seconds(self):
+        candidates = []
+        for key in (
+            "AGENT_OLLAMA_HTTP_TIMEOUT_SECONDS",
+            "AGENT_CALL_TIMEOUT_SECONDS_AMD",
+            "AGENT_CALL_TIMEOUT_SECONDS_NVIDIA",
+            "AGENT_CALL_TIMEOUT_SECONDS",
+        ):
+            raw = os.environ.get(key)
+            if raw is None:
+                continue
+            try:
+                candidates.append(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if not candidates:
+            return 900.0
+        return max(candidates)
 
     def run(
         self,
