@@ -189,9 +189,15 @@ These should be completed once publisher outputs successfully:
   - Gate is called after `build_framework_skeleton()` writes the skeleton, before the Canon stage; raises with a full diagnostic list of all missing/empty fields
   - A `framework_integrity_passed` event is appended to `run_journal.jsonl` on success
 
-- **Todo 36**: Add arc consistency scorer
-  - Score chapter outputs against active character/story arcs and unresolved loops
-  - Require minimum score threshold for pass to next stage
+- **Completed (2026-03-18) / Todo 36**: Add arc consistency scorer
+  - Added `score_arc_consistency(arc_tracker, rubric_report)` to `book_flow.py`
+  - Open loops are **persistent story features** that carry across chapters until resolved before series end — they are NOT failures
+  - Factor 1: **Open-loop persistence** — are tracked loops present in `must_carry_forward`? Loops absent from carry_forward are flagged as at risk of being dropped next chapter
+  - Factor 2: **Character-arc acknowledgement** — are prior chapter character updates referenced in `character_state_updates`?
+  - Fixed `update_arc_tracker` to **merge** open loops (union) instead of replacing them — loops from prior chapters can never be silently dropped
+  - Untracked loops are written as `open_loop_persistence_warning` entries to `agent_context_status.jsonl` so operators/agents know which story features need attention
+  - Fires after continuity stage; writes `arc_consistency_score.json` (includes `all_open_loops` and `untracked_open_loops`) and logs `arc_consistency_scored` to `run_journal.jsonl`
+  - Raises `StageQualityGateError` with full diagnostic detail if score falls below `ARC_CONSISTENCY_THRESHOLD = 0.5`
 
 - **Todo 37**: Add agent handoff expectation contract
   - Require each agent output to include downstream expectations and acceptance checks
@@ -436,6 +442,30 @@ These should be completed once publisher outputs successfully:
 - **Todo 80**: Add automated .gitignore drift detection
   - On each commit (pre-commit hook) or CI step, check that newly generated runtime artifacts are covered by `.gitignore`
   - Alert operator if untracked runtime files appear that are not in the ignore list, preventing artifact creep back into the index
+
+- **Todo 81**: Add run-level retry budget and abort policy
+  - Track cumulative retries across all stages per run; enforce a hard cap (e.g., 20 total retries) to prevent runaway runs
+  - On budget exhaustion, write a `run_aborted.json` artifact with stage-by-stage retry counts, then raise a clean abort error instead of hanging
+
+- **Todo 82**: Add profile decay and rebalance mechanism
+  - When a profile repeatedly fails quality gates or exhausts tokens, decay its priority weight for the next N routing decisions
+  - Auto-rebalance after a configured recovery window so profiles rehabilitate after good performance rather than staying suppressed indefinitely
+
+- **Todo 83**: Expose stage outputs and gate verdicts in the WebUI run view
+  - Add a collapsible stage timeline panel to the WebUI that shows each stage, its gate verdict (pass/fail/retry count), and a truncated output preview
+  - Wire from the `run_journal.jsonl` so it populates from existing data without requiring new API routes
+
+- **Todo 84**: Add run dry-run / preflight mode
+  - Add `--dry-run` flag to book_flow CLI that validates args, profiles, model availability, and framework integrity without calling Ollama
+  - Emit a structured preflight report so operators can catch configuration problems before burning GPU time
+
+- **Todo 85**: Add stale run detection and cleanup
+  - Track `run_start` events; flag runs with no `run_end` event after a configurable TTL as stale
+  - Expose stale runs in the WebUI with a quarantine / abandon action and clean up their run dirs or mark them archived
+
+- **Todo 86**: Add API rate-limit and concurrency guard
+  - Prevent the agent stack from accepting a new book-flow job while one is already in flight (or limit to a configurable concurrency)
+  - Return a clear 429 / busy response so clients can queue rather than accidentally spawning parallel runs that overload VRAM
 
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges

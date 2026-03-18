@@ -2,6 +2,7 @@
 # - Add detailed logging for agent work, responses, and lifecycle events
 # - Log all major stage transitions, returns, and errors
 import argparse
+import copy
 import json
 import os
 import re
@@ -251,8 +252,16 @@ def update_arc_tracker(existing: dict, *, chapter_number: int, chapter_title: st
     tracker.setdefault("open_loops", [])
     tracker.setdefault("chapter_progress", [])
 
-    loop_items = canon_payload.get("open_loops") if isinstance(canon_payload, dict) else []
-    tracker["open_loops"] = _normalize_list(loop_items)
+    # Merge open loops — never replace. Open loops are persistent story features
+    # that must be tracked until explicitly resolved. Loops from the current
+    # chapter's canon output are added to the set; loops already tracked from
+    # prior chapters are preserved so they are never silently dropped.
+    new_loops = _normalize_list(canon_payload.get("open_loops") if isinstance(canon_payload, dict) else [])
+    existing_loops = _normalize_list(tracker.get("open_loops"))
+    merged_loops_set: dict[str, str] = {str(l).lower(): str(l) for l in existing_loops}
+    for loop in new_loops:
+        merged_loops_set.setdefault(str(loop).lower(), str(loop))
+    tracker["open_loops"] = list(merged_loops_set.values())
 
     notes = next_writer_notes if isinstance(next_writer_notes, dict) else {}
     state_updates = continuity_state.get("section_updates") if isinstance(continuity_state, dict) else []
@@ -499,6 +508,110 @@ def gate_no_blocking_issues(report):
         return False, "consistency review found blocking issues"
     return True, "pass"
 
+
+# ---------------------------------------------------------------------------
+# Arc consistency scorer (Todo 36)
+# ---------------------------------------------------------------------------
+ARC_CONSISTENCY_THRESHOLD = 0.6  # Minimum score; ensures a complete failure on either open-loop persistence or character-arc acknowledgement fails the gate
+
+
+def score_arc_consistency(
+    arc_tracker: dict,
+    rubric_report: dict,
+) -> tuple[float, list[str], list[str]]:
+    """Score arc persistence (0.0–1.0) across two narrative tracking factors.
+
+    Open loops are **intentional story features** that carry across chapters and
+    must be resolved before the end of the story or series — they are NOT
+    failures. The scorer checks that loops survive the chapter handoff:
+
+    Factor 1: **Open-loop persistence** — are tracked loops from arc_tracker
+      present in rubric next_writer_notes.must_carry_forward? A loop absent
+      from carry_forward risks being forgotten in the next chapter.
+
+    Factor 2: **Character-arc acknowledgement** — are tracked character arcs
+      (from prior chapter entries) referenced in character_state_updates?
+      This ensures characters are not silently abandoned.
+
+    Blocking continuity issues are gated separately by gate_no_blocking_issues
+    on the continuity stage and are not part of this score.
+
+    Returns:
+        (score, issues, untracked_loops)
+          score          — 0.0–1.0
+          issues         — human-readable diagnostic strings for failed factors
+          untracked_loops — loops missing from must_carry_forward (for the
+                            run journal annotation)
+    """
+    issues: list[str] = []
+    untracked_loops: list[str] = []
+    factors: list[float] = []
+
+    arc = arc_tracker if isinstance(arc_tracker, dict) else {}
+    rubric = rubric_report if isinstance(rubric_report, dict) else {}
+    next_notes = rubric.get("next_writer_notes") or {}
+    next_notes = next_notes if isinstance(next_notes, dict) else {}
+
+    # Factor 1: open-loop persistence into must_carry_forward
+    open_loops = _normalize_list(arc.get("open_loops"))
+    if open_loops:
+        carry_forward_raw = _normalize_list(next_notes.get("must_carry_forward"))
+        carry_corpus = [str(x).lower() for x in carry_forward_raw]
+        persisted = []
+        dropped = []
+        for loop in open_loops:
+            loop_key = str(loop).lower()[:50]
+            if any(loop_key in text for text in carry_corpus):
+                persisted.append(loop)
+            else:
+                dropped.append(loop)
+        loop_score = len(persisted) / len(open_loops)
+        factors.append(loop_score)
+        if dropped:
+            untracked_loops = dropped
+            issues.append(
+                f"open-loop persistence {loop_score:.0%}: {len(dropped)}/{len(open_loops)} "
+                f"loop(s) missing from must_carry_forward — risk of being lost next chapter: "
+                + ", ".join(repr(l) for l in dropped[:5])
+            )
+    else:
+        factors.append(1.0)  # No established loops yet — always passes
+
+    # Factor 2: character-arc acknowledgement (arcs from prior chapter entries)
+    # character_arcs is a list of chapter-level objects; flatten unique arc/name labels
+    char_arc_entries = arc.get("character_arcs") or []
+    char_arc_entries = [a for a in char_arc_entries if isinstance(a, dict)]
+    # Collect unique character names from all prior chapter entries
+    char_names: list[str] = []
+    seen_names: set[str] = set()
+    for entry in char_arc_entries:
+        for update in _normalize_list(entry.get("updates")):
+            key = str(update).lower()[:30]
+            if key not in seen_names:
+                seen_names.add(key)
+                char_names.append(str(update).lower())
+    if char_names:
+        state_updates_raw = [str(u).lower() for u in _normalize_list(next_notes.get("character_state_updates"))]
+        acknowledged = sum(
+            1 for name in char_names
+            if any(name[:30] in update for update in state_updates_raw)
+        )
+        char_score = acknowledged / len(char_names)
+        factors.append(char_score)
+        unacknowledged = len(char_names) - acknowledged
+        if unacknowledged:
+            issues.append(
+                f"character-arc acknowledgement {char_score:.0%}: "
+                f"{unacknowledged}/{len(char_names)} character updates not referenced in character_state_updates"
+            )
+    else:
+        factors.append(1.0)  # No prior character arcs to track yet
+
+    score = round(sum(factors) / len(factors), 3) if factors else 1.0
+    return score, issues, untracked_loops
+
+
+# ---------------------------------------------------------------------------
 
 def validate_required_artifacts(run_dir: Path, expected_section_count: int):
     required = [
@@ -2391,6 +2504,57 @@ def run_flow(args):
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
     )
+
+    # Arc consistency check — verify open loops are persisted into next_writer_notes and
+    # character arcs are acknowledged. Open loops are intentional story features that
+    # must survive chapter handoffs and be resolved before series end, not within the chapter.
+    _arc_current = read_json(arc_tracker_path, default={})
+    arc_score, arc_issues, untracked_loops = score_arc_consistency(_arc_current, rubric_report)
+    write_json(
+        dirs["reviews"] / "arc_consistency_score.json",
+        {
+            "score": arc_score,
+            "threshold": ARC_CONSISTENCY_THRESHOLD,
+            "passed": arc_score >= ARC_CONSISTENCY_THRESHOLD,
+            "issues": arc_issues,
+            "untracked_open_loops": untracked_loops,
+            "all_open_loops": _normalize_list(_arc_current.get("open_loops")),
+            "chapter_number": args.chapter_number,
+            "section_title": args.section_title,
+        },
+    )
+    # Log untracked loops as persistent story feature annotations so operators
+    # know which loops are at risk of being dropped before series end.
+    if untracked_loops:
+        write_agent_context_status(
+            agent_context_status_path,
+            {
+                "phase": "open_loop_persistence_warning",
+                "chapter_number": args.chapter_number,
+                "section_title": args.section_title,
+                "untracked_open_loops": untracked_loops,
+                "action_required": (
+                    "These open loops were not found in must_carry_forward. "
+                    "Add them to next_writer_notes or they risk being lost next chapter."
+                ),
+            },
+        )
+    append_run_event(
+        run_journal,
+        "arc_consistency_scored",
+        {
+            "score": arc_score,
+            "threshold": ARC_CONSISTENCY_THRESHOLD,
+            "passed": arc_score >= ARC_CONSISTENCY_THRESHOLD,
+            "issues": arc_issues,
+            "untracked_open_loops": untracked_loops,
+        },
+    )
+    if arc_score < ARC_CONSISTENCY_THRESHOLD:
+        raise StageQualityGateError(
+            f"arc_consistency_score={arc_score} below threshold={ARC_CONSISTENCY_THRESHOLD}: " + "; ".join(arc_issues),
+            details={"score": arc_score, "threshold": ARC_CONSISTENCY_THRESHOLD, "issues": arc_issues},
+        )
 
     # 11) Publisher final gate
     publisher_qa_contract = build_contract(
