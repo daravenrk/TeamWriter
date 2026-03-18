@@ -460,9 +460,9 @@ These should be completed once publisher outputs successfully:
     - Full debug payload logging is active by default, so stage attempt/recovery payloads are available in diagnostics without needing `--debug`.
     - `publisher_brief` is now stable enough to pass on current validation runs.
     - `research` on AMD is still returning `raw_output: null` / empty output, but the pipeline now applies a deterministic fallback dossier and continues.
-    - The current active blocker has moved downstream to `architect_outline`, where the NVIDIA architect model is repeatedly omitting `master_outline_markdown`.
-    - The architect fallback/repair patch is now committed and pushed in `0f68621`, but it still needs validation in a fresh run.
-    - Immediate next evaluation target: confirm whether the architect fallback advances the run into `chapter_planner`; if it does, the next todo should move to chapter planner / canon stage failures rather than revisiting earlier runtime issues.
+    - `architect_outline` fallback is now validated in the fresh run path (`operator_generated_architect_outline` fired and advanced downstream).
+    - `chapter_planner` fallback is now validated in the fresh run path (`operator_generated_chapter_spec` fired and framework integrity passed).
+    - Immediate next evaluation target: confirm whether `canon` is simply high-latency or a new silent-stop/stall boundary between `pre_agent_call` and `stage_attempt_result`.
   - **Current Todo 73 analysis summary**:
     - Infra timeout mismatch: fixed.
     - Executor timeout shutdown blocking: fixed.
