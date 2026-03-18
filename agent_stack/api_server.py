@@ -3,6 +3,7 @@ import threading
 import time
 import uuid
 import glob
+import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,9 +13,10 @@ from typing import Dict, Optional, List, Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .book_flow import run_flow, slugify
+from .exceptions import AgentStackError, AgentUnexpectedError, OpenClawProfileConfigError
 from .orchestrator import OrchestratorAgent
 
 
@@ -149,6 +151,9 @@ RESOURCE_TRACKER_PATH = Path(
 RESOURCE_EVENTS_PATH = Path(
     os.environ.get("AGENT_RESOURCE_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/resource_events.jsonl")
 )
+TASK_LEDGER_PATH = Path(
+    os.environ.get("AGENT_TASK_LEDGER_PATH", "/home/daravenrk/dragonlair/book_project/task_ledger.json")
+)
 PRESSURE_ENABLED = str(os.environ.get("AGENT_PRESSURE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
 PRESSURE_THRESHOLD = max(1, int(os.environ.get("AGENT_PRESSURE_QUEUE_THRESHOLD", "3")))
 PRESSURE_HYSTERESIS_CLEAR = max(0, int(os.environ.get("AGENT_PRESSURE_QUEUE_CLEAR", "2")))
@@ -193,6 +198,10 @@ SPAWN_PRE_CREATE_DELAY_SECONDS = max(
     0.0,
     float(os.environ.get("AGENT_SPAWN_PRECREATE_DELAY_SECONDS", "10")),
 )
+BOOK_RUN_STALL_SECONDS = max(
+    120,
+    int(os.environ.get("BOOK_RUN_STALL_SECONDS", "1800")),
+)
 
 
 def _ensure_parent(path: Path):
@@ -204,6 +213,96 @@ def _write_json_atomic(path: Path, payload: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _task_record_to_dict(record: TaskRecord) -> dict:
+    return {
+        "id": record.id,
+        "created_at": record.created_at,
+        "status": record.status,
+        "prompt": record.prompt,
+        "direction": record.direction,
+        "profile": record.profile,
+        "route": record.route,
+        "model": record.model,
+        "started_at": record.started_at,
+        "finished_at": record.finished_at,
+        "response": record.response,
+        "error": record.error,
+        "book_request": record.book_request,
+        "retry_count": record.retry_count,
+        "max_auto_retries": record.max_auto_retries,
+        "hold": record.hold,
+        "next_retry_at": record.next_retry_at,
+        "production_status": record.production_status,
+        "spawn_release_at": record.spawn_release_at,
+        "spawn_requested_at": record.spawn_requested_at,
+    }
+
+
+def _task_record_from_dict(payload: dict) -> TaskRecord:
+    return TaskRecord(
+        id=str(payload.get("id") or uuid.uuid4()),
+        created_at=float(payload.get("created_at") or time.time()),
+        status=str(payload.get("status") or "queued"),
+        prompt=str(payload.get("prompt") or ""),
+        direction=payload.get("direction"),
+        profile=payload.get("profile"),
+        route=payload.get("route"),
+        model=payload.get("model"),
+        started_at=payload.get("started_at"),
+        finished_at=payload.get("finished_at"),
+        response=payload.get("response"),
+        error=payload.get("error"),
+        book_request=payload.get("book_request"),
+        retry_count=int(payload.get("retry_count") or 0),
+        max_auto_retries=int(payload.get("max_auto_retries") or 0),
+        hold=bool(payload.get("hold") or False),
+        next_retry_at=payload.get("next_retry_at"),
+        production_status=payload.get("production_status"),
+        spawn_release_at=payload.get("spawn_release_at"),
+        spawn_requested_at=payload.get("spawn_requested_at"),
+    )
+
+
+def _persist_tasks_locked(reason: str) -> None:
+    payload = {
+        "generated_at": time.time(),
+        "reason": reason,
+        "tasks": [_task_record_to_dict(rec) for rec in _tasks.values()],
+    }
+    _write_json_atomic(TASK_LEDGER_PATH, payload)
+
+
+def _load_tasks_from_disk() -> Dict[str, TaskRecord]:
+    if not TASK_LEDGER_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(TASK_LEDGER_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    tasks_raw = raw.get("tasks") if isinstance(raw, dict) else None
+    if not isinstance(tasks_raw, list):
+        return {}
+
+    loaded: Dict[str, TaskRecord] = {}
+    for item in tasks_raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rec = _task_record_from_dict(item)
+        except (TypeError, ValueError):
+            continue
+
+        # Running tasks are considered interrupted across restarts and must be re-queued.
+        if rec.status == "running":
+            rec.status = "queued"
+            rec.error = "Recovered after API restart while running"
+            rec.started_at = None
+            rec.finished_at = None
+            rec.next_retry_at = None
+        loaded[rec.id] = rec
+    return loaded
 
 
 def _append_ui_event(event_type: str, payload: dict):
@@ -228,16 +327,75 @@ def _append_resource_event(event_type: str, payload: dict):
         handle.write(json.dumps(entry) + "\n")
 
 
+def _append_run_journal_event(run_dir: Optional[str], event_type: str, payload: dict):
+    if not run_dir:
+        return
+    try:
+        run_path = Path(run_dir)
+        run_path.mkdir(parents=True, exist_ok=True)
+        journal_path = run_path / "run_journal.jsonl"
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            "event": event_type,
+            "details": payload,
+        }
+        with open(journal_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+# Events that mark a run as irrevocably finished (no further progress expected).
+_TERMINAL_RUN_EVENTS = frozenset({"run_success", "run_failure"})
+
+
+def _ensure_run_journal_terminal(run_dir: Optional[str], task_id: str, reason: str) -> bool:
+    """Write run_failure to run_journal.jsonl only when no terminal event already exists.
+
+    Returns True if run_failure was written, False if a terminal event was already
+    present (idempotent) or run_dir is missing/unreadable.
+    """
+    if not run_dir:
+        return False
+    try:
+        journal_path = Path(run_dir) / "run_journal.jsonl"
+        if journal_path.exists():
+            for row in _read_jsonl(journal_path):
+                if row.get("event") in _TERMINAL_RUN_EVENTS:
+                    return False
+    except (OSError, TypeError, ValueError):
+        return False
+    _append_run_journal_event(
+        run_dir,
+        "run_failure",
+        {
+            "task_id": task_id,
+            "reason": reason,
+            "emitted_by": "integrity_guard",
+        },
+    )
+    return True
+
+
 def _agent_health_summary(health_report: dict) -> dict:
     agents = (health_report or {}).get("agents") or {}
-    summary = {"idle": 0, "running": 0, "healthy": 0, "hung": 0, "failed": 0, "quarantined": 0}
+    summary = {
+        "idle": 0,
+        "running": 0,
+        "healthy": 0,
+        "hung": 0,
+        "failed": 0,
+        "hibernated": 0,
+        "quarantined": 0,
+    }
     now = time.time()
     for data in agents.values():
-        state = str((data or {}).get("state") or "idle")
+        display_state = str((data or {}).get("display_state") or "")
+        state = display_state or str((data or {}).get("state") or "idle")
         if state in summary:
             summary[state] += 1
         quarantined_until = float((data or {}).get("quarantined_until") or 0.0)
-        if quarantined_until > now:
+        if not display_state and quarantined_until > now:
             summary["quarantined"] += 1
     summary["total_agents"] = len(agents)
     return summary
@@ -311,6 +469,7 @@ def _build_resource_tracker_payload_locked(reason: str) -> dict:
 def _write_resource_tracker_locked(reason: str) -> dict:
     payload = _build_resource_tracker_payload_locked(reason=reason)
     _write_json_atomic(RESOURCE_TRACKER_PATH, payload)
+    _persist_tasks_locked(reason=f"resource_tracker:{reason}")
     _append_resource_event("resource_check", {"reason": reason, "mode": payload.get("mode")})
     return payload
 
@@ -318,6 +477,47 @@ def _write_resource_tracker_locked(reason: str) -> dict:
 def _resource_snapshot(reason: str = "snapshot") -> dict:
     with _task_lock:
         return _write_resource_tracker_locked(reason=reason)
+
+
+def _latest_ollama_ledger_entry() -> Optional[dict]:
+    """Return the last line from the Ollama run ledger for live WebUI display."""
+    try:
+        ledger = Path(str(orchestrator.ollama_run_ledger_path))
+        if not ledger.exists():
+            return None
+        last: Optional[dict] = None
+        with open(ledger, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                raw_line = raw_line.strip()
+                if raw_line:
+                    try:
+                        last = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        pass
+        return last
+    except (OSError, TypeError):
+        return None
+
+
+def _recent_quarantine_events(limit: int = 12) -> List[dict]:
+    try:
+        path = Path(str(orchestrator.quarantine_events_path))
+        if not path.exists():
+            return []
+        rows = []
+        for raw_line in path.read_text(encoding="utf-8").splitlines()[-max(1, int(limit)):]:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                item = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                rows.append(item)
+        return rows
+    except (OSError, TypeError):
+        return []
 
 
 def _build_status_payload(records: List[TaskRecord]):
@@ -348,7 +548,7 @@ def _build_status_payload(records: List[TaskRecord]):
                     for line in reversed(changes_log.read_text(encoding="utf-8").splitlines()):
                         try:
                             obj = json.loads(line)
-                        except Exception:
+                        except json.JSONDecodeError:
                             continue
                         action = str(obj.get("action") or "")
                         details = obj.get("details") or {}
@@ -389,6 +589,8 @@ def _build_status_payload(records: List[TaskRecord]):
         "pending_spawn_groups": pending_spawn_groups,
         "latest_gate_failure": latest_failure,
         "latest_stage_event": latest_stage_event,
+        "latest_ollama_call": _latest_ollama_ledger_entry(),
+        "recent_quarantine_events": _recent_quarantine_events(),
         "crontab_next_execution": _calculate_next_crontab_execution(),
     }
 
@@ -464,6 +666,44 @@ def _schedule_spawn(task_id: str, runner, *runner_args):
     threading.Thread(target=delayed_spawn, daemon=True).start()
 
 
+def _bootstrap_task_ledger():
+    loaded = _load_tasks_from_disk()
+    if not loaded:
+        return
+
+    queued_for_resume: List[tuple] = []
+    with _task_lock:
+        _tasks.clear()
+        _tasks.update(loaded)
+
+        for task_id, record in _tasks.items():
+            if record.status != "queued":
+                continue
+            _set_spawn_release_locked(record, delay_seconds=0.0)
+            if record.profile == "book-flow" and record.book_request:
+                try:
+                    req = BookFlowRequest(**record.book_request)
+                except ValidationError:
+                    record.status = "failed"
+                    record.error = "Invalid persisted book request payload"
+                    record.finished_at = time.time()
+                    continue
+                queued_for_resume.append((task_id, _run_book_task, req))
+            else:
+                queued_for_resume.append((task_id, _run_task))
+
+        _update_pressure_state_locked()
+        _write_resource_tracker_locked(reason="task_ledger_bootstrap")
+
+    for item in queued_for_resume:
+        task_id = item[0]
+        runner = item[1]
+        args = item[2:] if len(item) > 2 else ()
+        _schedule_spawn(task_id, runner, *args)
+
+    _refresh_ui_state_snapshot(event_type="task_ledger_bootstrap")
+
+
 def _refresh_ui_state_snapshot(event_type: str = "snapshot"):
     with _task_lock:
         records = list(_tasks.values())
@@ -478,7 +718,7 @@ def _read_ui_state_snapshot():
         return _refresh_ui_state_snapshot(event_type="bootstrap")
     try:
         return json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return _refresh_ui_state_snapshot(event_type="repair")
 
 
@@ -606,7 +846,7 @@ def _load_openclaw_model_profile_map() -> Dict[str, str]:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
                 return {str(k): str(v) for k, v in parsed.items()}
-        except Exception:
+        except json.JSONDecodeError:
             return {}
         return {}
 
@@ -638,13 +878,17 @@ def _validate_openclaw_profile_config():
 
     for profile_name in {fast_profile, deep_profile, tool_profile, priority_profile}:
         if profile_name not in available_profiles:
-            raise RuntimeError(f"OpenClaw profile is not loaded/available: {profile_name}")
+            raise OpenClawProfileConfigError(
+                f"OpenClaw profile is not loaded/available: {profile_name}",
+                details={"profile": profile_name},
+            )
 
     mapping = _load_openclaw_model_profile_map()
     for model_name, profile_name in mapping.items():
         if profile_name not in available_profiles:
-            raise RuntimeError(
-                f"OPENCLAW_MODEL_PROFILE_MAP maps '{model_name}' to unknown profile '{profile_name}'"
+            raise OpenClawProfileConfigError(
+                f"OPENCLAW_MODEL_PROFILE_MAP maps '{model_name}' to unknown profile '{profile_name}'",
+                details={"model": model_name, "profile": profile_name},
             )
 
 
@@ -834,15 +1078,89 @@ def _read_jsonl(path: Path) -> List[dict]:
     rows: List[dict] = []
     if not path.exists():
         return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
         raw = line.strip()
         if not raw:
             continue
         try:
             rows.append(json.loads(raw))
-        except Exception:
+        except json.JSONDecodeError:
             continue
     return rows
+
+
+def _parse_event_ts(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _assess_run_interruption(run_dir: Optional[Path], stall_seconds: int = BOOK_RUN_STALL_SECONDS) -> dict:
+    if not run_dir:
+        return {
+            "interrupted": False,
+            "stalled": False,
+            "stall_seconds": stall_seconds,
+            "reason": "run_dir_missing",
+            "last_event": None,
+            "last_event_ts": None,
+            "age_seconds": None,
+            "terminal": False,
+        }
+
+    run_journal = run_dir / "run_journal.jsonl"
+    rows = _read_jsonl(run_journal)
+    if not rows:
+        return {
+            "interrupted": False,
+            "stalled": False,
+            "stall_seconds": stall_seconds,
+            "reason": "journal_missing_or_empty",
+            "last_event": None,
+            "last_event_ts": None,
+            "age_seconds": None,
+            "terminal": False,
+        }
+
+    last = rows[-1]
+    last_event = str(last.get("event") or "")
+    last_event_ts = _parse_event_ts(last.get("timestamp"))
+    age_seconds = None
+    if last_event_ts is not None:
+        age_seconds = max(0, time.time() - last_event_ts)
+
+    terminal_events = {"run_success", "run_failure", "forced_completion"}
+    terminal = last_event in terminal_events
+
+    blocked_events = {"stage_attempt_start", "stage_recovery_start", "stage_instantiated", "run_start"}
+    stalled = bool(
+        (not terminal)
+        and (last_event in blocked_events)
+        and (age_seconds is not None)
+        and (age_seconds >= stall_seconds)
+    )
+
+    return {
+        "interrupted": stalled,
+        "stalled": stalled,
+        "stall_seconds": stall_seconds,
+        "reason": "stalled_last_event" if stalled else "ok",
+        "last_event": last_event,
+        "last_event_ts": last_event_ts,
+        "age_seconds": age_seconds,
+        "terminal": terminal,
+        "run_journal": str(run_journal),
+    }
 
 
 def _analyze_book_production(req: BookFlowRequest) -> dict:
@@ -855,7 +1173,9 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
             "next_checkpoint": "publisher_brief",
             "checkpoints": [],
             "stage_attempts": {},
+            "latest_stage_event": None,
             "last_error": None,
+            "interruption": _assess_run_interruption(None),
         }
 
     changes_log = run_dir / "changes.log"
@@ -863,6 +1183,7 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
     stage_start = {}
     stage_complete = {}
     stage_result = {}
+    latest_stage_event = None
     last_error = None
 
     for item in rows:
@@ -879,6 +1200,23 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
                 "gate_message": details.get("gate_message"),
                 "attempt": details.get("attempt"),
             }
+
+    for item in reversed(rows):
+        action = str(item.get("action") or "")
+        if action not in {"stage_start", "stage_result", "stage_complete", "stage_failure"}:
+            continue
+        details = item.get("details") or {}
+        latest_stage_event = {
+            "action": action,
+            "stage": details.get("stage"),
+            "agent": item.get("agent"),
+            "profile": item.get("profile"),
+            "attempt": details.get("attempt"),
+            "gate_ok": details.get("gate_ok"),
+            "gate_message": details.get("gate_message"),
+            "ts": item.get("timestamp"),
+        }
+        break
 
     diag = run_dir / "diagnostics" / "agent_diagnostics.jsonl"
     for item in _read_jsonl(diag):
@@ -947,9 +1285,53 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
         "next_checkpoint": next_checkpoint,
         "checkpoints": checkpoints,
         "stage_attempts": stage_start,
+        "latest_stage_event": latest_stage_event,
         "last_error": last_error,
+        "interruption": _assess_run_interruption(run_dir),
         "evaluated_at": time.time(),
     }
+
+
+def _resolve_profile_route_model(profile_name: Optional[str], prompt_hint: str = "") -> dict:
+    if not profile_name:
+        return {"route": None, "model": None}
+    try:
+        plan = orchestrator.plan_request(prompt_hint or "book-flow metadata", profile_name=profile_name)
+        return {
+            "route": plan.get("route"),
+            "model": plan.get("model"),
+        }
+    except AgentStackError:
+        return {"route": None, "model": None}
+
+
+def _resolve_book_task_runtime_target(req: BookFlowRequest, production_status: Optional[dict]) -> dict:
+    production_status = production_status if isinstance(production_status, dict) else {}
+    latest_stage = production_status.get("latest_stage_event") or {}
+    latest_profile = latest_stage.get("profile") if isinstance(latest_stage, dict) else None
+
+    candidates = [
+        latest_profile,
+        req.writer_profile,
+        req.editor_profile,
+        req.publisher_brief_profile,
+        req.publisher_profile,
+    ]
+
+    seen = set()
+    for profile_name in candidates:
+        if not profile_name:
+            continue
+        if profile_name in seen:
+            continue
+        seen.add(profile_name)
+        resolved = _resolve_profile_route_model(profile_name, prompt_hint=req.section_goal)
+        route = resolved.get("route")
+        model = resolved.get("model")
+        if route or model:
+            return {"profile": profile_name, "route": route, "model": model}
+
+    return {"profile": None, "route": None, "model": None}
 
 
 def _nvidia_pressure_depth() -> int:
@@ -1022,6 +1404,31 @@ def _pressure_guard(profile_name: Optional[str], context: str) -> None:
         )
 
 
+def _agent_error_to_http_exception(err: Exception, default_status: int = 502) -> HTTPException:
+    code = getattr(err, "code", None)
+    status_map = {
+        "AGENT_PROFILE_ERROR": 400,
+        "AGENT_ROUTE_CONFIG_ERROR": 400,
+        "OPENCLAW_PROFILE_CONFIG_ERROR": 400,
+        "AGENT_QUARANTINED": 503,
+        "AGENT_HUNG": 504,
+        "OLLAMA_REQUEST_ERROR": 502,
+        "OLLAMA_RESPONSE_DECODE_ERROR": 502,
+        "OLLAMA_ENDPOINT_ERROR": 502,
+        "OLLAMA_EMPTY_RESPONSE": 502,
+        "STAGE_QUALITY_GATE_ERROR": 422,
+        "CHAPTER_SPEC_VALIDATION_ERROR": 422,
+    }
+    status_code = status_map.get(code, default_status)
+    if not code:
+        return HTTPException(status_code=status_code, detail=str(err))
+    detail = {"code": code, "message": str(err)}
+    payload = getattr(err, "details", None)
+    if isinstance(payload, dict) and payload:
+        detail["details"] = payload
+    return HTTPException(status_code=status_code, detail=detail)
+
+
 def _run_task(task_id: str):
     with _task_lock:
         record = _tasks.get(task_id)
@@ -1047,10 +1454,24 @@ def _run_task(task_id: str):
             _update_pressure_state_locked()
             _write_resource_tracker_locked(reason="task_completed")
         _refresh_ui_state_snapshot(event_type="task_completed")
-    except Exception as err:
+    except AgentStackError as err:
+        error_code = err.code
         with _task_lock:
             record.status = "failed"
-            record.error = str(err)
+            record.error = f"[{error_code}] {err}"
+            record.finished_at = time.time()
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="task_failed")
+        _refresh_ui_state_snapshot(event_type="task_failed")
+    except Exception as err:
+        wrapped = AgentUnexpectedError(
+            f"Unexpected task execution failure: {err}",
+            details={"task_id": task_id, "profile": record.profile, "model": record.model},
+        )
+        error_code = wrapped.code
+        with _task_lock:
+            record.status = "failed"
+            record.error = f"[{error_code}] {wrapped}"
             record.finished_at = time.time()
             _update_pressure_state_locked()
             _write_resource_tracker_locked(reason="task_failed")
@@ -1066,6 +1487,13 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
         record.started_at = time.time()
         record.profile = "book-flow"
         record.production_status = _analyze_book_production(req)
+        runtime_target = _resolve_book_task_runtime_target(req, record.production_status)
+        if runtime_target.get("route"):
+            record.route = runtime_target.get("route")
+        if runtime_target.get("model"):
+            record.model = runtime_target.get("model")
+        if (record.production_status or {}).get("last_error"):
+            record.error = (record.production_status or {}).get("last_error")
         _write_resource_tracker_locked(reason="book_task_running")
     _refresh_ui_state_snapshot(event_type="book_task_running")
 
@@ -1100,16 +1528,28 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
             record.response = summary
             record.finished_at = time.time()
             record.production_status = _analyze_book_production(req)
+            runtime_target = _resolve_book_task_runtime_target(req, record.production_status)
+            if runtime_target.get("route"):
+                record.route = runtime_target.get("route")
+            if runtime_target.get("model"):
+                record.model = runtime_target.get("model")
             _update_pressure_state_locked()
             _write_resource_tracker_locked(reason="book_task_completed")
         _refresh_ui_state_snapshot(event_type="book_task_completed")
-    except Exception as err:
+    except AgentStackError as err:
+        error_code = err.code
         should_retry = False
         retry_delay = BOOK_AUTO_RESUME_BACKOFF_SECONDS
         with _task_lock:
-            record.error = str(err)
+            record.error = f"[{error_code}] {err}"
             record.finished_at = time.time()
             record.production_status = _analyze_book_production(req)
+            runtime_target = _resolve_book_task_runtime_target(req, record.production_status)
+            if runtime_target.get("route"):
+                record.route = runtime_target.get("route")
+            if runtime_target.get("model"):
+                record.model = runtime_target.get("model")
+            run_dir = ((record.production_status or {}).get("run_dir") if isinstance(record.production_status, dict) else None)
 
             can_retry = (
                 BOOK_AUTO_RESUME_ENABLED
@@ -1134,6 +1574,12 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
 
             _update_pressure_state_locked()
 
+        _ensure_run_journal_terminal(
+            run_dir,
+            task_id,
+            f"[{error_code}] {err}",
+        )
+
         _refresh_ui_state_snapshot(
             event_type="book_task_retry_scheduled" if should_retry else "book_task_failed"
         )
@@ -1154,6 +1600,78 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
                 _schedule_spawn(task_id, _run_book_task, req)
 
             threading.Thread(target=delayed_retry, daemon=True).start()
+    except Exception as err:
+        wrapped = AgentUnexpectedError(
+            f"Unexpected book task failure: {err}",
+            details={"task_id": task_id, "profile": "book-flow", "title": req.title},
+        )
+        error_code = wrapped.code
+        should_retry = False
+        retry_delay = BOOK_AUTO_RESUME_BACKOFF_SECONDS
+        with _task_lock:
+            record.error = f"[{error_code}] {wrapped}"
+            record.finished_at = time.time()
+            record.production_status = _analyze_book_production(req)
+            runtime_target = _resolve_book_task_runtime_target(req, record.production_status)
+            if runtime_target.get("route"):
+                record.route = runtime_target.get("route")
+            if runtime_target.get("model"):
+                record.model = runtime_target.get("model")
+            run_dir = ((record.production_status or {}).get("run_dir") if isinstance(record.production_status, dict) else None)
+
+            can_retry = (
+                BOOK_AUTO_RESUME_ENABLED
+                and not record.hold
+                and record.retry_count < record.max_auto_retries
+            )
+
+            if can_retry:
+                record.retry_count += 1
+                retry_delay = min(
+                    BOOK_AUTO_RESUME_BACKOFF_MAX_SECONDS,
+                    BOOK_AUTO_RESUME_BACKOFF_SECONDS * (2 ** max(0, record.retry_count - 1)),
+                )
+                record.next_retry_at = time.time() + retry_delay
+                record.status = "queued"
+                should_retry = True
+                _write_resource_tracker_locked(reason="book_task_retry_scheduled")
+            else:
+                record.status = "failed"
+                record.next_retry_at = None
+                _write_resource_tracker_locked(reason="book_task_failed")
+
+            _update_pressure_state_locked()
+
+        _ensure_run_journal_terminal(
+            run_dir,
+            task_id,
+            f"[{error_code}] {wrapped}",
+        )
+
+        _refresh_ui_state_snapshot(
+            event_type="book_task_retry_scheduled" if should_retry else "book_task_failed"
+        )
+
+        if should_retry:
+            def delayed_retry():
+                time.sleep(retry_delay)
+                with _task_lock:
+                    retry_record = _tasks.get(task_id)
+                    if not retry_record:
+                        return
+                    if retry_record.hold:
+                        return
+                    if retry_record.status != "queued":
+                        return
+                    retry_record.next_retry_at = None
+                    _set_spawn_release_locked(retry_record)
+                _schedule_spawn(task_id, _run_book_task, req)
+
+            threading.Thread(target=delayed_retry, daemon=True).start()
+
+
+# Bootstrap persisted tasks only after task runners are defined.
+_bootstrap_task_ledger()
 
 
 @app.get("/")
@@ -1221,11 +1739,14 @@ def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
     _pressure_guard(profile_name, context="/v1/chat/completions")
 
     if not req.stream:
-        result = orchestrator.handle_request_with_overrides(
-            prompt,
-            profile_name=profile_name,
-            stream_override=False,
-        )
+        try:
+            result = orchestrator.handle_request_with_overrides(
+                prompt,
+                profile_name=profile_name,
+                stream_override=False,
+            )
+        except AgentStackError as err:
+            raise _agent_error_to_http_exception(err, default_status=502) from err
         return _openclaw_compat_response(result, req.model)
 
     def stream_generator():
@@ -1246,8 +1767,14 @@ def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
                     stream_override=True,
                     on_stream=callback,
                 )
+            except AgentStackError as exc:
+                err = {"code": exc.code, "message": str(exc), "details": exc.details}
             except Exception as exc:
-                err = str(exc)
+                wrapped = AgentUnexpectedError(
+                    f"Unexpected streaming failure: {exc}",
+                    details={"profile": profile_name, "model": req.model},
+                )
+                err = {"code": wrapped.code, "message": str(wrapped), "details": wrapped.details}
             finally:
                 done = True
 
@@ -1352,14 +1879,14 @@ def clear_history(_request: Request):
         try:
             os.remove(log_path)
             removed["changes_logs"] += 1
-        except Exception:
+        except OSError:
             continue
 
     for diag_path in glob.glob(f"{project_root}/**/diagnostics/agent_diagnostics.jsonl", recursive=True):
         try:
             os.remove(diag_path)
             removed["diagnostics"] += 1
-        except Exception:
+        except OSError:
             continue
     payload = _refresh_ui_state_snapshot(event_type="history_cleared")
     return {"status": "cleared", "removed": removed, "state": payload}
@@ -1377,7 +1904,10 @@ def create_task(req: SteerRequest):
             if t.profile == "book-flow" and t.status in {"queued", "running"}:
                 raise HTTPException(status_code=409, detail="Book mode is active. Coding tasks are blocked until book mode completes or is cancelled.")
 
-    plan = orchestrator.plan_request(merged_prompt, profile_name=req.profile, model_override=req.model)
+    try:
+        plan = orchestrator.plan_request(merged_prompt, profile_name=req.profile, model_override=req.model)
+    except AgentStackError as err:
+        raise _agent_error_to_http_exception(err, default_status=400) from err
     resolved_profile_name = (plan.get("profile") or {}).get("name")
     _pressure_guard(resolved_profile_name, context="/api/tasks")
 
@@ -1434,6 +1964,7 @@ def create_book_flow(req: BookFlowRequest):
 
     task_id = str(uuid.uuid4())
     label = f"book-flow: ch{req.chapter_number} {req.chapter_title} / {req.section_title}"
+    initial_target = _resolve_book_task_runtime_target(req, None)
     record = TaskRecord(
         id=task_id,
         created_at=time.time(),
@@ -1441,6 +1972,8 @@ def create_book_flow(req: BookFlowRequest):
         prompt=label,
         direction="book-mode",
         profile="book-flow",
+        route=initial_target.get("route"),
+        model=initial_target.get("model"),
         book_request=req.model_dump(),
         retry_count=0,
         max_auto_retries=BOOK_AUTO_RESUME_MAX_RETRIES,
@@ -1452,11 +1985,20 @@ def create_book_flow(req: BookFlowRequest):
         _set_spawn_release_locked(record)
         _update_pressure_state_locked()
         _write_resource_tracker_locked(reason="book_task_queued")
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        position = queue_positions.get(task_id)
 
     _refresh_ui_state_snapshot(event_type="book_task_queued")
 
     _schedule_spawn(task_id, _run_book_task, req)
-    return {"task_id": task_id, "status": "queued", "task_type": "book-flow"}
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "task_type": "book-flow",
+        "queue_position": position,
+        "route": record.route,
+        "model": record.model,
+    }
 
 
 @app.get("/api/tasks/{task_id}")
@@ -1511,6 +2053,7 @@ def hold_book_task(task_id: str, req: BookHoldRequest):
 def reconcile_book_jobs():
     resumed = []
     skipped = []
+    interruption_events = []
 
     with _task_lock:
         for task_id, record in _tasks.items():
@@ -1522,7 +2065,53 @@ def reconcile_book_jobs():
                 continue
 
             if record.status == "running":
-                skipped.append({"task_id": task_id, "reason": "running"})
+                if not record.book_request:
+                    skipped.append({"task_id": task_id, "reason": "running_missing_request_payload"})
+                    continue
+
+                try:
+                    req = BookFlowRequest(**record.book_request)
+                except ValidationError:
+                    skipped.append({"task_id": task_id, "reason": "running_invalid_request_payload"})
+                    continue
+
+                record.production_status = _analyze_book_production(req)
+                interruption = (record.production_status or {}).get("interruption") or {}
+                if interruption.get("stalled"):
+                    run_dir = (record.production_status or {}).get("run_dir")
+                    record.status = "queued"
+                    record.started_at = None
+                    record.finished_at = None
+                    record.next_retry_at = None
+                    record.error = (
+                        "Recovered stalled run during reconcile: "
+                        f"last_event={interruption.get('last_event')} age={int(interruption.get('age_seconds') or 0)}s"
+                    )
+                    _set_spawn_release_locked(record, delay_seconds=0.0)
+                    resumed.append({
+                        "task_id": task_id,
+                        "retry_count": record.retry_count,
+                        "reason": "stalled_running_task",
+                    })
+                    interruption_payload = {
+                        "task_id": task_id,
+                        "run_dir": run_dir,
+                        "interruption": interruption,
+                        "action": "requeued",
+                    }
+                    interruption_events.append(interruption_payload)
+                    _append_run_journal_event(
+                        run_dir,
+                        "run_interrupted",
+                        {
+                            "task_id": task_id,
+                            "interruption": interruption,
+                            "reconciled_at": time.time(),
+                        },
+                    )
+                    _schedule_spawn(task_id, _run_book_task, req)
+                else:
+                    skipped.append({"task_id": task_id, "reason": "running"})
                 continue
 
             if not record.book_request:
@@ -1543,7 +2132,7 @@ def reconcile_book_jobs():
 
             try:
                 req = BookFlowRequest(**record.book_request)
-            except Exception:
+            except ValidationError:
                 skipped.append({"task_id": task_id, "reason": "invalid_request_payload"})
                 continue
 
@@ -1555,14 +2144,36 @@ def reconcile_book_jobs():
             resumed.append({"task_id": task_id, "retry_count": record.retry_count})
             _schedule_spawn(task_id, _run_book_task, req)
 
+        # Integrity pass: for every task that is permanently failed (not going
+        # to be retried), ensure the run journal has a terminal event so that
+        # external readers can always identify a closed run without ambiguity.
+        for task_id, record in _tasks.items():
+            if record.status != "failed" or not record.book_request:
+                continue
+            try:
+                req = BookFlowRequest(**record.book_request)
+            except ValidationError:
+                continue
+            failed_run_dir = (record.production_status or {}).get("run_dir") if isinstance(record.production_status, dict) else None
+            if failed_run_dir:
+                _ensure_run_journal_terminal(
+                    failed_run_dir,
+                    task_id,
+                    "run sealed by reconcile integrity pass",
+                )
+
         _write_resource_tracker_locked(reason="book_jobs_reconciled")
         _update_pressure_state_locked()
 
     _refresh_ui_state_snapshot(event_type="book_jobs_reconciled")
+    for event in interruption_events:
+        _append_ui_event("book_run_interrupted", event)
+        _append_resource_event("book_run_interrupted", event)
     return {
         "status": "ok",
         "resumed": resumed,
         "skipped": skipped,
+        "interrupted": interruption_events,
         "resumed_count": len(resumed),
     }
 
@@ -1664,12 +2275,15 @@ def spawn_control(task_id: str, req: SpawnControlRequest):
 @app.post("/api/stream")
 def stream(req: StreamRequest):
     merged_prompt = _compose_prompt(req.direction, req.prompt)
-    plan = orchestrator.plan_request(
-        merged_prompt,
-        profile_name=req.profile,
-        stream_override=True,
-        model_override=req.model,
-    )
+    try:
+        plan = orchestrator.plan_request(
+            merged_prompt,
+            profile_name=req.profile,
+            stream_override=True,
+            model_override=req.model,
+        )
+    except AgentStackError as err:
+        raise _agent_error_to_http_exception(err, default_status=400) from err
     resolved_profile_name = (plan.get("profile") or {}).get("name")
     _pressure_guard(resolved_profile_name, context="/api/stream")
 
@@ -1705,8 +2319,14 @@ def stream(req: StreamRequest):
                     stream_override=True,
                     on_stream=callback,
                 )
+            except AgentStackError as err:
+                error = f"[{err.code}] {err}"
             except Exception as err:
-                error = str(err)
+                wrapped = AgentUnexpectedError(
+                    f"Unexpected stream endpoint failure: {err}",
+                    details={"profile": req.profile, "model": req.model},
+                )
+                error = f"[{wrapped.code}] {wrapped}"
             finally:
                 done = True
 
@@ -1763,7 +2383,7 @@ def cancel_task(task_id: str):
                     try:
                         summary = json.loads(record.response)
                         run_dir = summary.get('run_dir')
-                    except Exception:
+                    except json.JSONDecodeError:
                         pass
                 if not run_dir:
                     run_dir = "/home/daravenrk/dragonlair/book_runs/cancelled_runs"
@@ -1783,7 +2403,7 @@ def cancel_task(task_id: str):
                         section_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(section_path, "a", encoding="utf-8") as f:
                             f.write(f"\n---\nSection interrupted and cancelled at {datetime.datetime.now().isoformat()} (Task ID: {task_id})\n")
-                except Exception as docerr:
+                except OSError as docerr:
                     record.error = f"Cancelled by user (log/doc error: {docerr})"
             # For coding mode, write to dragonlair/coding_cancelled.md
             elif record.profile in {"amd-coder", "nvidia-fast", "nvidia-lowlatency"}:
@@ -1791,7 +2411,7 @@ def cancel_task(task_id: str):
                 with open(log_path, "a", encoding="utf-8") as f:
                     import datetime
                     f.write(f"# Coding Task Cancelled\nCancelled at: {datetime.datetime.now().isoformat()}\nTask ID: {task_id}\nPrompt: {record.prompt}\nStatus: {record.status}\n\n")
-        except Exception as logerr:
+        except OSError as logerr:
             record.error = f"Cancelled by user (log error: {logerr})"
         else:
             record.error = "Cancelled by user (soft cancel)"

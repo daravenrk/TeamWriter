@@ -26,6 +26,7 @@
     .failed { background:#991b1b; }
     .muted { color:var(--muted); font-size:12px; }
     .alert { margin-top:10px; border:1px solid #6b1f1f; background:#3a1313; color:#ffd4d4; border-radius:10px; padding:10px; font-size:13px; }
+    .good { margin-top:10px; border:1px solid #14532d; background:#0f2d20; color:#c7f9df; border-radius:10px; padding:10px; font-size:13px; }
     .spawn-groups { display:grid; gap:10px; }
     .spawn-group { border:1px solid #2a3962; border-radius:12px; padding:10px; background:#0d1630; }
     .spawn-group-title { font-size:13px; color:#c6d4f5; margin-bottom:8px; }
@@ -60,6 +61,11 @@
     .pulse { animation:pulse 1.8s ease-in-out infinite; }
     .book-fields { margin-top:10px; border:1px dashed #2f4674; border-radius:10px; padding:10px; background:#0b1430; }
     .book-fields .mini-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+    .diag-list { display:grid; gap:8px; margin-top:10px; }
+    .diag-item { border:1px solid #2f4674; border-radius:10px; background:#132246; padding:10px; }
+    .diag-head { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:12px; margin-bottom:6px; }
+    .diag-title { color:#dbe8ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .diag-body { white-space:pre-wrap; font-size:12px; color:#b8c8ea; }
     @keyframes pulse {
       0% { box-shadow:0 0 0 1px rgba(45,212,191,0.2), 0 0 8px rgba(45,212,191,0.15); }
       50% { box-shadow:0 0 0 1px rgba(45,212,191,0.4), 0 0 18px rgba(45,212,191,0.28); }
@@ -113,7 +119,16 @@
         <h2>System Snapshot</h2>
         <div id="healthSummary" class="muted">Loading status...</div>
         <div id="healthAlert" class="alert" style="display:none"></div>
+        <div id="healthRecovery" class="good" style="display:none"></div>
         <div id="agentVoyeur" class="voyeur-root muted">Loading live topology...</div>
+        <details id="quarantineDetails" style="margin-top:10px;">
+          <summary>Quarantine Diagnostics</summary>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+            <button id="recoverAgents" class="secondary">Recover Flagged Agents</button>
+            <span id="recoverAgentsResult" class="muted"></span>
+          </div>
+          <div id="quarantineDiagnostics" class="muted" style="margin-top:10px;">Loading quarantine diagnostics...</div>
+        </details>
         <details id="healthDetails">
           <summary>Show full health JSON</summary>
           <pre id="health"></pre>
@@ -129,7 +144,7 @@
         <summary>Show telemetry table</summary>
         <table>
           <thead>
-            <tr><th>Agent</th><th>State</th><th>Heartbeat</th><th>Profile</th><th>Model</th><th>Task</th><th>LLM Preview</th></tr>
+            <tr><th>Agent</th><th>State</th><th>Heartbeat</th><th>Profile</th><th>Tokens</th><th>Model</th><th>Task</th><th>LLM Preview</th></tr>
           </thead>
           <tbody id="agents"></tbody>
         </table>
@@ -331,6 +346,102 @@ function toNodeState(status) {
   return 'idle';
 }
 
+function agentDisplayState(info) {
+  return (info && (info.display_state || info.state)) || 'idle';
+}
+
+function agentStatusLabel(info) {
+  const state = agentDisplayState(info);
+  const detail = ((info && info.status_detail) || '').slice(0, 96);
+  if (state === 'quarantined' && info && Number.isFinite(info.quarantine_remaining_seconds)) {
+    return `${state} (${Math.max(0, Math.ceil(info.quarantine_remaining_seconds))}s)`;
+  }
+  if (detail && (state === 'failed' || state === 'hung')) {
+    return `${state}: ${detail}`;
+  }
+  if (detail && state === 'idle' && detail.includes('auto-recovered')) {
+    return `${state}: ${detail}`;
+  }
+  return state;
+}
+
+function renderQuarantineDiagnostics(data) {
+  const root = document.getElementById('quarantineDiagnostics');
+  const recoveryEl = document.getElementById('healthRecovery');
+  if (!root || !recoveryEl) return;
+
+  const agents = (data.health && data.health.agents) || {};
+  const events = data.recent_quarantine_events || [];
+  const now = Date.now() / 1000;
+  const flagged = [];
+  const recovered = [];
+
+  for (const [name, info] of Object.entries(agents)) {
+    const displayState = agentDisplayState(info);
+    const recentRecovery = info.last_recovered_at && (now - Number(info.last_recovered_at) < 600);
+    if (['quarantined', 'hung', 'failed'].includes(displayState)) {
+      const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '-';
+      const until = info.quarantined_until ? new Date(info.quarantined_until * 1000).toLocaleTimeString() : '-';
+      flagged.push({
+        name,
+        label: agentStatusLabel(info),
+        body: [
+          `profile=${info.current_profile || '-'}`,
+          `model=${info.current_model || '-'}`,
+          `heartbeat=${hb}`,
+          `quarantine_until=${until}`,
+          `detail=${(info.status_detail || info.last_error || '-').slice(0, 120)}`,
+        ].join('\n'),
+      });
+      continue;
+    }
+    if (recentRecovery) {
+      recovered.push(`${name}: ${new Date(info.last_recovered_at * 1000).toLocaleTimeString()} ${info.last_recovery_reason || ''}`.trim());
+    }
+  }
+
+  const flaggedHtml = flagged.length === 0
+    ? '<div class="muted">No active quarantine, hung, or failed agents.</div>'
+    : `<div class="diag-list">${flagged.map((entry) => `
+      <div class="diag-item">
+        <div class="diag-head">
+          <span class="diag-title">${entry.name}</span>
+          <span class="file-state state-failed">${entry.label}</span>
+        </div>
+        <div class="diag-body">${entry.body}</div>
+      </div>
+    `).join('')}</div>`;
+
+  const recentEventHtml = events.length === 0
+    ? '<div class="muted" style="margin-top:10px;">No recent quarantine events.</div>'
+    : `<div style="margin-top:12px;"><div class="voyeur-title">Recent Quarantine Events</div><div class="diag-list">${events.slice().reverse().map((event) => {
+        const ts = event.timestamp ? new Date(event.timestamp * 1000).toLocaleTimeString() : '-';
+        const agent = event.agent || '-';
+        const route = event.route || '-';
+        const model = event.model || '-';
+        const detail = (event.recovery_reason || event.last_error || event.event || '-').toString().slice(0, 140);
+        return `
+          <div class="diag-item">
+            <div class="diag-head">
+              <span class="diag-title">${agent}</span>
+              <span class="file-state ${String(event.event || '').includes('recover') ? 'state-completed' : 'state-failed'}">${event.event || 'event'}</span>
+            </div>
+            <div class="diag-body">time=${ts}\nroute=${route}\nmodel=${model}\ndetail=${detail}</div>
+          </div>
+        `;
+      }).join('')}</div></div>`;
+
+  root.innerHTML = `${flaggedHtml}${recentEventHtml}`;
+
+  if (recovered.length > 0) {
+    recoveryEl.style.display = 'block';
+    recoveryEl.textContent = `Recovered recently: ${recovered.join(', ')}`;
+  } else {
+    recoveryEl.style.display = 'none';
+    recoveryEl.textContent = '';
+  }
+}
+
 function renderFileNode(node) {
   const state = toNodeState(node.status);
   const div = document.createElement('div');
@@ -353,28 +464,52 @@ function renderAgentVoyeur(data) {
   const agents = (data.health && data.health.agents) || {};
   const latestFailure = data.latest_gate_failure || null;
   const latestStage = data.latest_stage_event || null;
+  const latestOllama = data.latest_ollama_call || null;
 
   const bookTask = tasks.find((t) => t.profile === 'book-flow');
+  const production = (bookTask && bookTask.production_status) || {};
+  const checkpoints = production.checkpoints || [];
+  const checkpointScore = production.checkpoint_score || {};
+  const stageAttempts = production.stage_attempts || {};
   const rootName = bookTask
     ? `book_run_${(bookTask.id || '').slice(0, 8)}.graph`
     : 'dragonlair_control.graph';
 
   const rootStatus = bookTask ? (bookTask.status || 'idle') : 'idle';
+
+  let ollamaLine = '';
+  if (latestOllama) {
+    const tps = latestOllama.tokens_per_second != null ? `${latestOllama.tokens_per_second} tok/s` : '-';
+    const ec = latestOllama.eval_count != null ? latestOllama.eval_count : '-';
+    const ws = latestOllama.wall_seconds != null ? `${latestOllama.wall_seconds}s` : '-';
+    ollamaLine = `\nlast_call: model=${latestOllama.model || '-'} toks=${ec} tps=${tps} wall=${ws} ok=${latestOllama.success}`;
+  }
+
+  const cpDone = checkpointScore.completed != null ? checkpointScore.completed : '-';
+  const cpTotal = checkpointScore.total != null ? checkpointScore.total : '-';
+  const cpBar = (checkpointScore.completed != null && checkpointScore.total)
+    ? '[' + '█'.repeat(checkpointScore.completed) + '░'.repeat(checkpointScore.total - checkpointScore.completed) + ']'
+    : '';
   const rootBody = bookTask
-    ? `profile=${bookTask.profile}\nroute=${bookTask.route || '-'}\nmodel=${bookTask.model || '-'}\nqueue=${bookTask.queue_position || '-'}\nerror=${bookTask.error || '-'}`
-    : 'No active book-flow task';
+    ? `profile=${bookTask.profile}\nroute=${bookTask.route || '-'}\nmodel=${bookTask.model || '-'}\ncheckpoints=${cpDone}/${cpTotal} ${cpBar}\nnext=${production.next_checkpoint || '-'}\nretries=${bookTask.retry_count ?? '-'}\nerror=${bookTask.error || '-'}${ollamaLine}`
+    : `No active book-flow task${ollamaLine}`;
 
   const stageDefs = [
-    { key: 'publisher', name: 'publisher_brief.md', profiles: ['book-publisher-brief', 'book-publisher'] },
-    { key: 'research', name: 'research.md', profiles: ['book-researcher'] },
-    { key: 'architect', name: 'architect_outline.md', profiles: ['book-architect'] },
-    { key: 'chapter', name: 'chapter_planner.md', profiles: ['book-chapter-planner'] },
-    { key: 'writer', name: 'draft.md', profiles: ['book-writer'] },
-    { key: 'editor', name: 'editor_pass.md', profiles: ['book-editor'] },
+    { key: 'publisher_brief',  name: 'publisher_brief.md',   cpKey: 'publisher_brief',   profiles: ['book-publisher-brief'] },
+    { key: 'research',         name: 'research.md',           cpKey: 'research',           profiles: ['book-researcher'] },
+    { key: 'architect',        name: 'architect_outline.md',  cpKey: 'architect_outline',  profiles: ['book-architect'] },
+    { key: 'chapter',          name: 'chapter_planner.md',    cpKey: 'chapter_planner',    profiles: ['book-chapter-planner'] },
+    { key: 'writer',           name: 'draft.md',              cpKey: 'sections_written',   profiles: ['book-writer'] },
+    { key: 'editor',           name: 'editor_pass.md',        cpKey: 'section_reviews',    profiles: ['book-editor', 'book-developmental-editor', 'book-line-editor', 'book-copy-editor'] },
+    { key: 'canon',            name: 'canon.md',              cpKey: 'canon',              profiles: ['book-canon'] },
+    { key: 'continuity',       name: 'continuity.md',         cpKey: 'quality_gates',      profiles: ['book-continuity'] },
+    { key: 'assembler',        name: 'assembly.md',           cpKey: 'assembly',           profiles: ['book-assembler'] },
+    { key: 'publisher',        name: 'publisher_qa.md',       cpKey: 'final_export',       profiles: ['book-publisher'] },
   ];
 
   const pipelineNodes = stageDefs.map((stage) => {
     let status = 'idle';
+    const cp = checkpoints.find((c) => c.name === stage.cpKey);
 
     const stageMatch = latestStage && (latestStage.stage || '').toLowerCase().includes(stage.key);
     if (stageMatch) {
@@ -382,32 +517,36 @@ function renderAgentVoyeur(data) {
       else if (latestStage.action === 'stage_complete') status = 'completed';
       else if (latestStage.action === 'stage_failure') status = 'failed';
       else if (latestStage.action === 'stage_result') status = latestStage.gate_ok === false ? 'failed' : 'running';
+    } else if (cp && cp.completed) {
+      status = 'completed';
     } else if (latestFailure && (latestFailure.stage || '').toLowerCase().includes(stage.key)) {
       status = 'failed';
     } else if (bookTask && ['queued', 'running'].includes(bookTask.status || '')) {
       status = 'queued';
     }
 
-    const gate = stageMatch
-      ? `action=${latestStage.action || '-'}\nattempt=${latestStage.attempt ?? '-'}\ngate=${latestStage.gate_message || (latestStage.gate_ok === false ? 'failed' : 'ok')}`
-      : (latestFailure && (latestFailure.stage || '').toLowerCase().includes(stage.key)
-          ? `gate=${latestFailure.gate_message || 'failed'}`
-          : 'gate=ok');
+    const attempts = cp ? cp.stage_attempts : (stageAttempts[stage.cpKey] || stageAttempts[stage.key] || 0);
+    const gateOk = cp && cp.last_stage_result ? cp.last_stage_result.gate_ok : (stageMatch ? latestStage.gate_ok : null);
+    const gateMsg = cp && cp.last_stage_result
+      ? (cp.last_stage_result.gate_message || (gateOk === false ? 'failed' : 'ok'))
+      : (stageMatch ? (latestStage.gate_message || (latestStage.gate_ok === false ? 'failed' : 'ok')) : (latestFailure && (latestFailure.stage || '').toLowerCase().includes(stage.key) ? (latestFailure.gate_message || 'failed') : 'ok'));
+    const artifactLine = cp ? `artifact=${cp.artifact_ok ? '✓' : '✗'}` : '';
 
     return {
       name: stage.name,
       status,
-      body: `${gate}`,
+      body: `gate=${gateMsg}\nattempts=${attempts ?? 0}\n${artifactLine}`,
     };
   });
 
   const agentNodes = Object.entries(agents).map(([name, info]) => {
     const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '-';
-    const synthesized = bookTask && bookTask.status === 'running' && latestStage && (info.state || 'idle') === 'idle';
+    const displayState = agentDisplayState(info);
+    const synthesized = bookTask && bookTask.status === 'running' && latestStage && displayState === 'idle';
     return {
       name: `${name}.agent`,
-      status: synthesized ? 'queued' : (info.state || 'idle'),
-      body: `profile=${info.current_profile || '-'}\nmodel=${info.current_model || '-'}\nheartbeat=${hb}\n${(info.current_task_excerpt || '-').slice(0, 80)}\nsource=${synthesized ? 'route-health (task active via stage log)' : 'route-health'}`,
+      status: synthesized ? 'queued' : displayState,
+      body: `state=${agentStatusLabel(info)}\nprofile=${info.current_profile || '-'}\ntokens=${info.profile_tokens ?? '-'}\nmodel=${info.current_model || '-'}\nheartbeat=${hb}\n${(info.current_task_excerpt || '-').slice(0, 80)}\nsource=${synthesized ? 'route-health (task active via stage log)' : 'route-health'}`,
     };
   });
 
@@ -463,12 +602,16 @@ async function refreshStatus() {
 
   document.getElementById('health').textContent = JSON.stringify(data.health, null, 2);
   const summary = ((data.resource_tracker || {}).agents || {}).summary || {};
+  const rewards = (data.health && data.health.rewards) || {};
+  const depletedProfiles = rewards.depleted_profiles || [];
   document.getElementById('healthSummary').textContent = [
     `agents=${summary.total_agents || 0}`,
     `healthy=${summary.healthy || 0}`,
     `running=${summary.running || 0}`,
+    `quarantined=${summary.quarantined || 0}`,
     `hung=${summary.hung || 0}`,
     `failed=${summary.failed || 0}`,
+    `depleted_tokens=${depletedProfiles.length}`,
   ].join('  ');
 
   const c = data.task_counts || {queued: 0, running: 0, completed: 0, failed: 0};
@@ -486,20 +629,29 @@ async function refreshStatus() {
   renderPendingSpawnGroups(data.pending_spawn_groups || []);
   renderCrontabTimer(data.crontab_next_execution || null);
   renderAgentVoyeur(data);
+  renderQuarantineDiagnostics(data);
 
   const agentBody = document.getElementById('agents');
   agentBody.innerHTML = '';
   const agents = (data.health && data.health.agents) || {};
   const alertEl = document.getElementById('healthAlert');
   const unhealthy = [];
+  const depletedProfilesForAlert = ((data.health || {}).rewards || {}).depleted_profiles || [];
   for (const [name, info] of Object.entries(agents)) {
-    if (['hung', 'failed', 'quarantined'].includes(info.state)) {
-      unhealthy.push(`${name}:${info.state}`);
+    const displayState = agentDisplayState(info);
+    if (['hung', 'failed', 'quarantined'].includes(displayState)) {
+      unhealthy.push(`${name}:${agentStatusLabel(info)}`);
+    }
+    if (Number(info.profile_tokens) === 0) {
+      unhealthy.push(`${name}:token-0`);
     }
     const tr = document.createElement('tr');
     const hb = info.last_heartbeat_at ? new Date(info.last_heartbeat_at * 1000).toLocaleTimeString() : '';
-    tr.innerHTML = `<td>${name}</td><td>${info.state || ''}</td><td>${hb}</td><td>${info.current_profile || ''}</td><td>${info.current_model || ''}</td><td>${(info.current_task_excerpt || '').slice(0, 90)}</td><td>${(info.last_response_preview || '').slice(0, 120)}</td>`;
+    tr.innerHTML = `<td>${name}</td><td>${agentStatusLabel(info)}</td><td>${hb}</td><td>${info.current_profile || ''}</td><td>${info.profile_tokens ?? ''}</td><td>${info.current_model || ''}</td><td>${(info.current_task_excerpt || '').slice(0, 90)}</td><td>${(info.last_response_preview || '').slice(0, 120)}</td>`;
     agentBody.appendChild(tr);
+  }
+  for (const profileName of depletedProfilesForAlert) {
+    unhealthy.push(`profile:${profileName}:token-0`);
   }
   if (unhealthy.length > 0) {
     alertEl.style.display = 'block';
@@ -618,6 +770,35 @@ async function clearHistory() {
   }
 }
 
+async function recoverAgents(force = false) {
+  const result = document.getElementById('recoverAgentsResult');
+  result.textContent = force ? 'Forcing recovery...' : 'Recovering...';
+  try {
+    const res = await fetch('/api/recover-hung', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 409 && !force) {
+        const ok = window.confirm('Tasks are still running. Force recovery anyway? This may reset route state for active work.');
+        if (ok) {
+          await recoverAgents(true);
+          return;
+        }
+      }
+      result.textContent = `Recovery failed: ${data.detail || res.status}`;
+      return;
+    }
+    const count = ((data.recovery || {}).count) || 0;
+    result.textContent = `Recovered ${count} agent(s).`;
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Recovery failed: ${err}`;
+  }
+}
+
 document.getElementById('submitCorrection').addEventListener('click', async () => {
   const correction = document.getElementById('correctionInput').value.trim();
   if (!correction) {
@@ -645,6 +826,7 @@ document.getElementById('submitTask').addEventListener('click', queueTask);
 document.getElementById('streamTask').addEventListener('click', runStream);
 document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
 document.getElementById('clearHistory').addEventListener('click', clearHistory);
+document.getElementById('recoverAgents').addEventListener('click', () => recoverAgents(false));
 document.getElementById('mode').addEventListener('change', syncModePanels);
 syncModePanels();
 refreshStatus();
