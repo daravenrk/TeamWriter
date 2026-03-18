@@ -712,6 +712,21 @@ These should be completed once publisher outputs successfully:
   - Require checksum/manifest validation of upstream artifacts before resume to avoid drift.
   - Goal: reduce repetitive end-to-end reruns when validating fixes for a downstream stage.
 
+- **Todo 117**: Add canon route failover when AMD agent is quarantined
+  - Current run evidence shows `canon` attempt 1 can fail with empty response and then immediately collapse because `ollama_amd` is quarantined for attempts 2/3 and recovery.
+  - Add stage-level route failover policy for `canon` (for example AMD primary, NVIDIA fallback) when errors are `AGENT_QUARANTINED` or empty-response transport faults.
+  - Emit explicit route-failover events in `run_journal.jsonl` including source route, destination route, and trigger error code.
+
+- **Todo 118**: Introduce quarantine-aware retry backoff windows
+  - Retries currently happen fast enough that quarantined agents are retried before cooldown expiry, causing deterministic repeated failure.
+  - Add backoff that respects remaining quarantine duration before retrying the same route/agent.
+  - Include `quarantine_remaining_seconds` in stage error events to explain retry behavior.
+
+- **Todo 119**: Add deterministic canon fallback artifact for chapter bootstrap
+  - If canon cannot be generated after retries/recovery/failover, synthesize a minimal valid canon payload from `book_brief`, `outline_payload`, and `chapter_spec` to preserve pipeline continuity.
+  - Persist it as a clearly tagged fallback artifact and record a `stage_fallback_applied` event for `canon`.
+  - Keep fallback strict and auditable so downstream editorial stages can proceed without silent schema drift.
+
 - **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
   - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.
   - Decide ownership policy for shared runtime artifacts and enforce it consistently so host CLI runs, containerized services, and recovery scripts do not fight over lock files.
