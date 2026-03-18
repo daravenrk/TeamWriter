@@ -19,6 +19,7 @@ def slugify(text):
     return lowered or "code-run"
 
 from .orchestrator import OrchestratorAgent
+from .validate_agent_profiles import DEFAULT_MAX_SYSTEM_PROMPT_CHARS, lint_profiles
 
 
 def _print_stream(token, _chunk):
@@ -52,6 +53,35 @@ def cmd_profiles(orchestrator):
         )
 
 
+def cmd_profile_lint(profile_dir, max_system_prompt_chars, json_output):
+    report = lint_profiles(
+        profile_dir=pathlib.Path(profile_dir),
+        max_system_prompt_chars=max(1, int(max_system_prompt_chars)),
+    )
+    if json_output:
+        print(json.dumps(report, indent=2))
+    else:
+        for profile in report["profiles"]:
+            label = profile.get("name") or pathlib.Path(profile["path"]).name
+            if profile["errors"]:
+                print(f"[FAIL] {label}")
+                for error in profile["errors"]:
+                    print(f"  - error: {error}")
+            elif profile["warnings"]:
+                print(f"[WARN] {label}")
+                for warning in profile["warnings"]:
+                    print(f"  - warning: {warning}")
+            else:
+                print(f"[OK]   {label}")
+            print(f"  - system_prompt_chars={profile['stats']['system_prompt_chars']}")
+        print(
+            f"Profile lint {'passed' if report['valid'] else 'failed'}: "
+            f"{report['profile_count']} profiles, {report['error_count']} errors, {report['warning_count']} warnings"
+        )
+    if not report["valid"]:
+        raise SystemExit(1)
+
+
 def cmd_health(orchestrator):
     report = orchestrator.get_agent_health_report()
     print(json.dumps(report, indent=2))
@@ -65,6 +95,8 @@ def cmd_plan(orchestrator, prompt, profile, stream):
         "model": plan.get("model"),
         "stream": plan.get("stream"),
         "options": plan.get("options"),
+        "timeout_seconds": plan.get("timeout_seconds"),
+        "retry_limit": plan.get("retry_limit"),
         "system_prompt_chars": len(plan.get("system_prompt") or ""),
     }
     print(json.dumps(out, indent=2))
@@ -239,6 +271,10 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("profiles", help="List loaded profiles")
+    lint_p = sub.add_parser("profile-lint", help="Validate markdown agent profiles")
+    lint_p.add_argument("--profile-dir", default=str(pathlib.Path(__file__).parent / "agent_profiles"))
+    lint_p.add_argument("--max-system-prompt-chars", type=int, default=DEFAULT_MAX_SYSTEM_PROMPT_CHARS)
+    lint_p.add_argument("--json", action="store_true", help="Emit full JSON report")
     sub.add_parser("health", help="Show orchestrator health report")
 
     plan_p = sub.add_parser("plan", help="Show route/model plan for a prompt")
@@ -281,6 +317,9 @@ def main():
     elif args.command == "profiles":
         orchestrator = OrchestratorAgent()
         cmd_profiles(orchestrator)
+        return
+    elif args.command == "profile-lint":
+        cmd_profile_lint(args.profile_dir, args.max_system_prompt_chars, args.json)
         return
     elif args.command == "health":
         orchestrator = OrchestratorAgent()

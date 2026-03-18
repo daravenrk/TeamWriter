@@ -127,9 +127,15 @@ queued → (10s pre-spawn delay) → running → completed/failed/cancelled
 
 ### 📋 **HIGH PRIORITY: Runtime Hardening (After First Success)**
 
-- **Todo 39**: Add profile-signal routing scorer in orchestrator
+- **Completed (2026-03-18) / Todo 39**: Add profile-signal routing scorer in orchestrator
   - Use profile `intent_keywords`, `priority`, recent quality outcomes, and token balance when selecting a profile
   - Replace first-match keyword routing with weighted scoring + deterministic tie-break rules
+
+- **Completed (2026-03-18)**: Add profile execution policy enforcement
+  - Added profile lint support for `timeout_seconds`, `retry_limit`, `allowed_routes`, and `model_allowlist`
+  - `profile_loader.py` now parses those frontmatter fields into runtime profile metadata
+  - `orchestrator.plan_request()` now enforces route/model allowlists and threads timeout/retry policy into execution planning
+  - `handle_request_with_overrides()` now honors per-profile timeout and transient retry policy during invocation
 
 - **Completed (2026-03-18)**: Remove duplicate `OrchestratorAgent.__init__` definition in `orchestrator.py`.
 - **Completed (2026-03-18)**: Convert broad `except Exception` blocks in core runtime files to typed exceptions with error codes.
@@ -172,9 +178,10 @@ These should be completed once publisher outputs successfully:
   - Test under load (multiple concurrent tasks)
   - Verify resource limits and error handling
 
-- **Todo 34**: Add global agent output schema validator
-  - Validate stage payloads against required JSON schema before accepting outputs
-  - Auto-retry with corrective feedback when schema fields are missing
+- **Completed (2026-03-18) / Todo 34**: Add global agent output schema validator
+  - Added shared stage output schema registry in `agent_stack/output_schemas.py`
+  - `run_stage(...)` now validates structured payloads against named schemas before custom quality gates run
+  - Schema failures feed the existing retry loop, so missing fields automatically trigger corrective retries with actionable gate messages
 
 - **Todo 35**: Add framework integrity gate
   - Block draft progression if framework skeleton or progress index is missing critical fields
@@ -378,6 +385,26 @@ These should be completed once publisher outputs successfully:
   - Track repeated quarantine events per route/model/profile over rolling windows and surface the trend in API diagnostics
   - Recommend model fallback, route downgrade, or profile reroute automatically when the same failure signature repeats
   - Feed these counters into the future Prometheus/Grafana work so quarantine is observable over time
+
+- **Todo 70**: Expose effective profile execution policy in CLI/API/UI
+  - Show resolved `timeout_seconds`, `retry_limit`, route allowlist, and model allowlist in `agentctl plan`, `/api/status`, and operator diagnostics
+  - Make it obvious when a request is using profile defaults versus explicit overrides so operators can debug policy behavior quickly
+  - Include policy-violation diagnostics in API responses when a model or route is rejected by profile rules
+
+- **Todo 71**: Review Claude-produced code/artifacts (if available) for production-gap analysis
+  - Locate Claude-authored code paths, prompts, docs, and implementation notes in this repo (or adjacent workspaces if linked)
+  - Compare Dragonlair decisions against Claude artifacts for control-plane reliability, autonomous recovery, schema safety, and writing-pipeline quality
+  - Produce a concrete gap report with prioritized "adopt", "adapt", and "reject" actions tied to Dragonlair backlog items
+
+- **Todo 72**: Complete open-port audit and least-exposure hardening
+  - Inventory active listeners (`11434`, `11435`, `11888`, `11999`, plus infra ports) and map each to owner service, dependency path, and operator need
+  - Recommend and implement least-exposure bindings where safe (prefer localhost or internal Docker network for non-public services)
+  - Add operator docs for which ports are required in dev/LAN/prod modes and include firewall guidance
+
+- **Todo 73**: Run one full end-to-end book flow after schema enforcement changes
+  - Execute a full chapter run with current retries/fallbacks and capture run journal + diagnostics
+  - Confirm schema validation failures surface actionable gate messages and recover through retries when possible
+  - Record pass/fail results and next fixes back into `DEV_NEXT_STEPS.md`
 
 
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health

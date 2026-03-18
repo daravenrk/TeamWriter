@@ -6,8 +6,25 @@
 - **Endpoints:**
   - AMD: `http://127.0.0.1:11435` (container: `ollama_amd`)
   - NVIDIA: `http://127.0.0.1:11434` (container: `ollama_nvidia`)
+- **Agent API/UI:** `http://127.0.0.1:11888` (container: `dragonlair_agent_stack`)
+- **Fetcher service:** `http://127.0.0.1:11999` (container: `fetcher`)
 - **Toolkit:** All scripts and controls are in `/home/daravenrk/dragonlair/bin`
 - **Model plans and lists:** `/home/daravenrk/dragonlair/model-sets/`
+
+## Port Matrix (Current)
+
+- `11434` -> `ollama_nvidia` (NVIDIA Ollama endpoint)
+- `11435` -> `ollama_amd` (AMD Ollama endpoint)
+- `11888` -> `dragonlair_agent_stack` (API + Web UI)
+- `11999` -> `fetcher` (research fetch service)
+
+Notes:
+- VS Code "Ports" can show auto-forwarded entries that are not currently listening processes.
+- Confirm real listeners with:
+
+```sh
+ss -ltnp
+```
 
 ## Control & Usage
 

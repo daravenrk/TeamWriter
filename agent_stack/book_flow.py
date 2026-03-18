@@ -14,6 +14,7 @@ from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
 from .lock_manager import AgentLockManager
 from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, ChapterSpecValidationError, StageQualityGateError
 from .orchestrator import OrchestratorAgent
+from .output_schemas import validate_stage_payload
 from .writing_assistant import generate_names, generate_technology, generate_personalities, generate_dates_history
 
 
@@ -307,9 +308,6 @@ def write_agent_context_status(path: Path, payload: dict):
 
 def gate_chapter_spec(spec):
     sections = spec.get("sections") or []
-    required = ["chapter_title", "purpose", "ending_hook"]
-    if any(not spec.get(key) for key in required):
-        return False, "missing required chapter spec fields"
     if not isinstance(sections, list) or len(sections) < 2:
         return False, "chapter spec requires at least 2 sections"
     return True, "ok"
@@ -343,21 +341,6 @@ def gate_publisher(report):
 def gate_publisher_brief(report):
     if not isinstance(report, dict):
         return False, "invalid brief payload"
-
-    required_scalars = [
-        "title_working",
-        "genre",
-        "audience",
-        "target_word_count",
-        "page_target",
-        "tone",
-    ]
-    for key in required_scalars:
-        if key not in report:
-            return False, f"missing field: {key}"
-        value = report.get(key)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return False, f"empty field: {key}"
 
     constraints = report.get("constraints")
     acceptance = report.get("acceptance_criteria")
@@ -395,14 +378,6 @@ def gate_architect_outline(payload):
             payload["master_outline_markdown"] = value
             break
 
-    outline_ok = isinstance(payload.get("master_outline_markdown"), str) and bool(payload.get("master_outline_markdown", "").strip())
-    if not outline_ok:
-        return False, "master_outline_markdown missing"
-
-    structure = payload.get("book_structure")
-    if not isinstance(structure, (dict, list)):
-        return False, "book_structure missing"
-
     return True, "ok"
 
 
@@ -410,12 +385,6 @@ def gate_rubric_report(report):
     if not isinstance(report, dict):
         return False, "invalid rubric report"
     scores = report.get("scores") or {}
-    if not isinstance(scores, dict):
-        return False, "scores missing"
-
-    missing = [k for k in RUBRIC_KEYS if k not in scores]
-    if missing:
-        return False, f"missing rubric keys: {', '.join(missing)}"
 
     values = []
     for key in RUBRIC_KEYS:
@@ -789,6 +758,7 @@ def run_stage(
     prompt,
     output_path=None,
     parse_json=False,
+    output_schema=None,
     gate_fn=None,
     max_retries=2,
     diagnostics_path=None,
@@ -1133,8 +1103,11 @@ def run_stage(
 
         gate_ok = True
         gate_message = "ok"
+        if parse_json and output_schema:
+            gate_ok, gate_message = validate_stage_payload(output_schema, parsed)
         if gate_fn:
-            gate_ok, gate_message = gate_fn(parsed)
+            if gate_ok:
+                gate_ok, gate_message = gate_fn(parsed)
 
         lock_manager.log_agent_change(
             changes_log,
@@ -1287,8 +1260,11 @@ def run_stage(
         parsed = parse_json_block(raw, fallback={}) if parse_json else raw
         gate_ok = True
         gate_message = "ok"
+        if parse_json and output_schema:
+            gate_ok, gate_message = validate_stage_payload(output_schema, parsed)
         if gate_fn:
-            gate_ok, gate_message = gate_fn(parsed)
+            if gate_ok:
+                gate_ok, gate_message = gate_fn(parsed)
         append_run_event(
             run_journal_path,
             "stage_recovery_result",
@@ -1591,6 +1567,7 @@ def run_flow(args):
             prompt=publisher_contract,
             output_path=dirs["brief"] / "book_brief.json",
             parse_json=True,
+            output_schema="publisher_brief",
             gate_fn=gate_publisher_brief,
             max_retries=1,
             diagnostics_path=diagnostics_log,
@@ -1739,6 +1716,7 @@ def run_flow(args):
         prompt=architect_contract,
         output_path=dirs["outline"] / "book_structure.json",
         parse_json=True,
+        output_schema="architect_outline",
         gate_fn=gate_architect_outline,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
@@ -1766,6 +1744,7 @@ def run_flow(args):
         prompt=planner_contract,
         output_path=dirs["chapter_specs"] / "chapter_01.json",
         parse_json=True,
+        output_schema="chapter_planner",
         gate_fn=gate_chapter_spec,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
@@ -1815,7 +1794,7 @@ def run_flow(args):
         prompt=canon_contract,
         output_path=dirs["canon"] / "canon.json",
         parse_json=True,
-        gate_fn=lambda obj: (bool(obj.get("canon")), "canon field missing"),
+        output_schema="canon",
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -1953,6 +1932,7 @@ def run_flow(args):
             prompt=section_review_contract,
             output_path=dirs["section_reviews"] / f"section_{idx:02d}_review.json",
             parse_json=True,
+            output_schema="section_review",
             gate_fn=gate_no_blocking_issues,
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
@@ -1995,10 +1975,7 @@ def run_flow(args):
         prompt=story_architect_contract,
         output_path=dirs["reviews"] / "story_architect_review.json",
         parse_json=True,
-        gate_fn=lambda obj: (
-            isinstance(obj.get("concept_validation"), (int, float)) and isinstance(obj.get("structure_validation"), (int, float)),
-            "story architect scores missing",
-        ),
+        output_schema="story_architect_review",
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -2115,6 +2092,7 @@ def run_flow(args):
         prompt=assembly_review_contract,
         output_path=dirs["assembly_reviews"] / "chapter_assembly_review.json",
         parse_json=True,
+        output_schema="assembly_review",
         gate_fn=gate_no_blocking_issues,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
@@ -2146,6 +2124,7 @@ def run_flow(args):
         prompt=dev_contract,
         output_path=dirs["reviews"] / "developmental_report.json",
         parse_json=True,
+        output_schema="developmental_editor",
         gate_fn=gate_developmental,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
@@ -2259,6 +2238,7 @@ def run_flow(args):
         prompt=rubric_contract,
         output_path=dirs["reviews"] / "rubric_report.json",
         parse_json=True,
+        output_schema="session_reviewer",
         gate_fn=gate_rubric_report,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
@@ -2324,7 +2304,7 @@ def run_flow(args):
         prompt=continuity_contract,
         output_path=dirs["reviews"] / "continuity_report.json",
         parse_json=True,
-        gate_fn=lambda obj: (isinstance(obj, dict) and "blocking_issues" in obj and "patch_tasks" in obj, "continuity report missing required fields"),
+        output_schema="continuity",
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -2360,7 +2340,7 @@ def run_flow(args):
             prompt=last_publisher_prompt,
             output_path=dirs["reviews"] / "publisher_report.json",
             parse_json=True,
-            gate_fn=lambda obj: (isinstance(obj, dict) and bool(str(obj.get("decision", "")).strip()), "publisher decision missing"),
+            output_schema="publisher_qa",
             max_retries=1,  # Only one attempt per outer loop
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
@@ -2484,7 +2464,7 @@ def run_flow(args):
             prompt=continuity_contract,
             output_path=dirs["reviews"] / f"continuity_report_{publisher_attempts:02d}.json",
             parse_json=True,
-            gate_fn=lambda obj: (isinstance(obj, dict) and "blocking_issues" in obj and "patch_tasks" in obj, "continuity report missing required fields"),
+            output_schema="continuity",
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,

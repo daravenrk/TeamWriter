@@ -13,10 +13,10 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [x] CLI control layer (`agentctl`) with streaming
 
 ## Phase 1: Control Plane Hardening
-- [ ] Add profile lint command and strict schema checks
-- [ ] Add max system-prompt size guardrails
-- [ ] Add per-profile timeout and retry settings
-- [ ] Add profile policy fields for route/model allowlists
+- [x] Add profile lint command and strict schema checks
+- [x] Add max system-prompt size guardrails
+- [x] Add per-profile timeout and retry settings
+- [x] Add profile policy fields for route/model allowlists
 
 ## Phase 2: Autonomous Execution Engine
 - [ ] Add persistent task queue (SQLite)

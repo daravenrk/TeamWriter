@@ -20,6 +20,16 @@ def _parse_float(value, default=None):
         return default
 
 
+def _parse_csv(value, *, lower=False):
+    items = []
+    for raw in str(value).split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        items.append(item.lower() if lower else item)
+    return items
+
+
 def _parse_frontmatter(frontmatter):
     data = {}
     for raw in frontmatter.splitlines():
@@ -46,6 +56,30 @@ def _parse_frontmatter(frontmatter):
         data["default_stream"] = _parse_bool(data["default_stream"])
     else:
         data["default_stream"] = False
+
+    if "timeout_seconds" in data:
+        parsed = _parse_int(data["timeout_seconds"])
+        if parsed is not None and parsed > 0:
+            data["timeout_seconds"] = parsed
+        else:
+            data.pop("timeout_seconds", None)
+
+    if "retry_limit" in data:
+        parsed = _parse_int(data["retry_limit"])
+        if parsed is not None and parsed >= 0:
+            data["retry_limit"] = parsed
+        else:
+            data.pop("retry_limit", None)
+
+    if "allowed_routes" in data:
+        data["allowed_routes"] = _parse_csv(data["allowed_routes"], lower=True)
+    else:
+        data["allowed_routes"] = []
+
+    if "model_allowlist" in data:
+        data["model_allowlist"] = _parse_csv(data["model_allowlist"])
+    else:
+        data["model_allowlist"] = []
 
     options = {}
     if "num_ctx" in data:

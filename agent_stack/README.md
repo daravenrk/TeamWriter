@@ -29,12 +29,18 @@ Examples:
 
 ```sh
 agentctl profiles
+agentctl profile-lint
 agentctl plan "write a concise debate on local AI governance"
 agentctl once "design a robust state machine"
 agentctl --stream once "design a robust state machine"
 agentctl --stream chat
 agentctl health
 ```
+
+Profile validation and prompt-size guardrail:
+
+- `agentctl profile-lint`
+- `AGENT_MAX_SYSTEM_PROMPT_CHARS=12000` limits rendered profile system prompts during lint and runtime
 
 ## Docker Deployment
 
@@ -51,6 +57,17 @@ Start:
 Frontend:
 
 - `http://127.0.0.1:11888`
+
+Service ports (current compose defaults):
+
+- `11888` -> `dragonlair_agent_stack` API/UI
+- `11434` -> `ollama_nvidia`
+- `11435` -> `ollama_amd`
+- `11999` -> `fetcher` (from `docker-compose.fetcher.yml`)
+
+Operator note:
+
+- VS Code forwarded ports may include stale auto-forward entries; verify active listeners with `ss -ltnp`.
 
 Service status and queue monitoring from CLI:
 
@@ -90,13 +107,18 @@ Optional frontmatter keys:
 - `num_ctx` integer (forwarded to Ollama options)
 - `num_predict` integer (forwarded to Ollama options)
 - `temperature` float (forwarded to Ollama options)
+- `timeout_seconds` per-profile execution timeout override
+- `retry_limit` transient retry count before surfacing failure
+- `allowed_routes` comma-separated route allowlist enforced at runtime
+- `model_allowlist` comma-separated model allowlist enforced at runtime
 
 Routing behavior:
 
 - Orchestrator loads all profiles at startup.
 - Orchestrator hot-reloads profiles when `.agent.md` files are changed.
-- Input is matched against `intent_keywords` in priority order.
+- Input is selected via weighted profile scoring using `intent_keywords`, `priority`, token balance, recent quality outcomes, and deterministic tie-break rules.
 - Selected profile determines route + model + stream default.
+- Runtime policy enforcement blocks disallowed route/model selections and applies per-profile timeout/retry policy.
 - Triage and fallback logic still applies.
 
 Prompt composition behavior:

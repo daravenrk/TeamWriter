@@ -20,6 +20,7 @@ from pathlib import Path
 from .lock_manager import AgentLockManager, EndpointPolicy
 from .ollama_subagent import OllamaSubagent
 from .profile_loader import load_agent_profiles
+from .validate_agent_profiles import DEFAULT_MAX_SYSTEM_PROMPT_CHARS, lint_profiles
 from .exceptions import (
     AgentHungError,
     AgentProfileError,
@@ -73,6 +74,11 @@ class OrchestratorAgent:
         self.server_mode = str(os.environ.get("AGENT_SERVER_MODE", "standard")).strip().lower()
         self.strict_mode_validation = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "true")).lower() in {"1", "true", "yes", "on"}
         self.profile_dir = str(Path(__file__).parent / "agent_profiles")
+        self.max_system_prompt_chars = max(
+            1,
+            int(os.environ.get("AGENT_MAX_SYSTEM_PROMPT_CHARS", str(DEFAULT_MAX_SYSTEM_PROMPT_CHARS))),
+        )
+        self._validate_profiles_or_raise()
         self.profiles = load_agent_profiles(self.profile_dir)
         self._profile_stamp = self._compute_profile_stamp()
         amd_endpoint = os.environ.get("OLLAMA_AMD_ENDPOINT", "http://127.0.0.1:11435")
@@ -130,6 +136,8 @@ class OrchestratorAgent:
                 "failed_count": 0,
                 "success_count": 0,
                 "quarantined_until": 0.0,
+                "last_recovered_at": None,
+                "last_recovery_reason": None,
             }
             for name in self.subagents
         }
@@ -264,8 +272,6 @@ class OrchestratorAgent:
             50,
             int(os.environ.get("AGENT_PROFILE_SCORE_FAILURE_MAX_LINES", "600")),
         )
-                "last_recovered_at": None,
-                "last_recovery_reason": None,
         self._quality_failure_cache = {
             "mtime": None,
             "size": None,
@@ -625,10 +631,29 @@ class OrchestratorAgent:
         current = self._compute_profile_stamp()
         if current == self._profile_stamp:
             return
+        self._validate_profiles_or_raise()
         self.profiles = load_agent_profiles(self.profile_dir)
         self._profile_stamp = current
         with self._reward_lock:
             self._ensure_profile_rewards()
+
+    def _validate_profiles_or_raise(self):
+        report = lint_profiles(
+            profile_dir=self.profile_dir,
+            max_system_prompt_chars=self.max_system_prompt_chars,
+        )
+        if report.get("valid"):
+            return
+
+        invalid_profiles = [profile for profile in report.get("profiles", []) if profile.get("errors")]
+        summary_bits = []
+        for profile in invalid_profiles[:3]:
+            label = profile.get("name") or Path(profile.get("path") or "unknown").name
+            summary_bits.append(f"{label}: {profile['errors'][0]}")
+        summary = "; ".join(summary_bits) or "profile lint failed"
+        raise AgentProfileError(
+            f"Profile validation failed with {report.get('error_count', 0)} errors: {summary}"
+        )
 
     def _pick_profile(self, user_input):
         if self.profile_scoring_enabled:
@@ -788,6 +813,51 @@ class OrchestratorAgent:
         if prompt_len <= self.joke_medium_prompt_chars:
             return self.joke_medium_model
         return self.joke_long_model
+
+    def _get_profile_timeout_seconds(self, profile, route_name):
+        if profile and profile.get("timeout_seconds") is not None:
+            return float(profile["timeout_seconds"])
+        return float(self.route_call_timeouts.get(route_name, self.call_timeout_seconds))
+
+    def _get_profile_retry_limit(self, profile):
+        if not profile:
+            return 0
+        try:
+            return max(0, int(profile.get("retry_limit", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _enforce_profile_policy(self, profile, route_name, model_name):
+        if not profile:
+            return
+
+        profile_name = str(profile.get("name") or "default")
+        allowed_routes = [str(route).strip() for route in (profile.get("allowed_routes") or []) if str(route).strip()]
+        if allowed_routes and route_name not in allowed_routes:
+            raise AgentProfileError(
+                f"Profile {profile_name} does not allow route {route_name}",
+                details={
+                    "profile": profile_name,
+                    "route": route_name,
+                    "allowed_routes": allowed_routes,
+                },
+            )
+
+        model_allowlist = [str(item).strip() for item in (profile.get("model_allowlist") or []) if str(item).strip()]
+        if model_allowlist and str(model_name or "").strip() not in model_allowlist:
+            raise AgentProfileError(
+                f"Profile {profile_name} does not allow model {model_name}",
+                details={
+                    "profile": profile_name,
+                    "model": model_name,
+                    "model_allowlist": model_allowlist,
+                },
+            )
+
+    def _is_retryable_agent_error(self, err):
+        if isinstance(err, (AgentProfileError, AgentRouteConfigError, AgentQuarantinedError)):
+            return False
+        return isinstance(err, AgentStackError)
 
     def _load_profile_quality_fallbacks(self):
         raw = os.environ.get(
@@ -964,6 +1034,11 @@ class OrchestratorAgent:
             self._build_global_agent_contract(profile),
         ])
         rendered = "\n".join(blocks).strip()
+        if rendered and len(rendered) > self.max_system_prompt_chars:
+            raise AgentProfileError(
+                f"Profile {profile.get('name', 'default')} system prompt exceeds "
+                f"AGENT_MAX_SYSTEM_PROMPT_CHARS ({len(rendered)} > {self.max_system_prompt_chars})"
+            )
         return rendered or None
 
     def _profile_section_title(self, key):
@@ -1144,6 +1219,7 @@ class OrchestratorAgent:
         on_stream=None,
         profile_name=None,
         correlation_id=None,
+        timeout_override=None,
     ):
         self._wake_agent(agent_name)
         if not self._is_available(agent_name):
@@ -1194,7 +1270,11 @@ class OrchestratorAgent:
         is_support_profile = bool(profile_name and profile_name in self.support_profiles)
         gate = nullcontext() if is_support_profile else self._route_gate(agent_name)
         global_gate = nullcontext() if is_support_profile else self._global_active_gate()
-        call_timeout_seconds = float(self.route_call_timeouts.get(agent_name, self.call_timeout_seconds))
+        call_timeout_seconds = float(
+            timeout_override
+            if timeout_override is not None
+            else self.route_call_timeouts.get(agent_name, self.call_timeout_seconds)
+        )
         self.analytics_log_event("agent_start", {"agent": agent_name, "profile": profile_name, "prompt": user_input, "model": model})
         # Diagnostics: log agent invocation and parameters
         if hasattr(self, "diagnostics_path") and self.diagnostics_path:
@@ -1357,6 +1437,7 @@ class OrchestratorAgent:
         return {
             "server_mode": self.server_mode,
             "timeout_seconds": self.call_timeout_seconds,
+            "max_system_prompt_chars": self.max_system_prompt_chars,
             "heartbeat_timeout_seconds": self.heartbeat_timeout_seconds,
             "route_timeout_seconds": self.route_call_timeouts,
             "route_max_inflight": self.route_max_inflight,
@@ -1525,11 +1606,14 @@ class OrchestratorAgent:
             model = self._resolve_dynamic_model(profile, user_input, model)
             if model_override and str(model_override).strip():
                 model = str(model_override).strip()
+            self._enforce_profile_policy(profile, route, model)
             stream = bool(profile.get("default_stream", False)) if profile else False
             if stream_override is not None:
                 stream = bool(stream_override)
             options = dict(profile.get("options", {})) if profile else None
             system_prompt = self._build_system_prompt(profile)
+            timeout_seconds = self._get_profile_timeout_seconds(profile, route)
+            retry_limit = self._get_profile_retry_limit(profile)
 
             return {
                 "profile": profile,
@@ -1538,6 +1622,8 @@ class OrchestratorAgent:
                 "stream": stream,
                 "options": options,
                 "system_prompt": system_prompt,
+                "timeout_seconds": timeout_seconds,
+                "retry_limit": retry_limit,
             }
 
     def handle_request_with_overrides(
@@ -1594,19 +1680,51 @@ class OrchestratorAgent:
         stream = plan["stream"]
         options = plan["options"]
         system_prompt = plan["system_prompt"]
+        timeout_seconds = float(plan.get("timeout_seconds") or self.call_timeout_seconds)
+        retry_limit = max(0, int(plan.get("retry_limit") or 0))
         resolved_profile_name = (plan.get("profile") or {}).get("name")
 
         try:
-            result = self._invoke_with_triage(
-                preferred,
-                merged_prompt,
-                model=model,
-                stream=stream,
-                system_prompt=system_prompt,
-                options=options,
-                on_stream=on_stream,
-                profile_name=resolved_profile_name,
-            )
+            attempt = 0
+            while True:
+                attempt += 1
+                self.analytics_log_event(
+                    "agent_execution_attempt",
+                    {
+                        "agent": preferred,
+                        "profile": resolved_profile_name,
+                        "attempt": attempt,
+                        "retry_limit": retry_limit,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
+                try:
+                    result = self._invoke_with_triage(
+                        preferred,
+                        merged_prompt,
+                        model=model,
+                        stream=stream,
+                        system_prompt=system_prompt,
+                        options=options,
+                        on_stream=on_stream,
+                        profile_name=resolved_profile_name,
+                        timeout_override=timeout_seconds,
+                    )
+                    break
+                except AgentStackError as err:
+                    if attempt > retry_limit or not self._is_retryable_agent_error(err):
+                        raise
+                    self.analytics_log_event(
+                        "agent_execution_retry",
+                        {
+                            "agent": preferred,
+                            "profile": resolved_profile_name,
+                            "attempt": attempt,
+                            "retry_limit": retry_limit,
+                            "error": str(err),
+                            "error_code": err.code,
+                        },
+                    )
             if stream or on_stream or model_override:
                 return result
 
@@ -1639,6 +1757,7 @@ class OrchestratorAgent:
                 options=retry_options,
                 on_stream=None,
                 profile_name=resolved_profile_name,
+                timeout_override=timeout_seconds,
             )
         except Exception:
             if not self.enable_cross_route_fallback:
@@ -1655,6 +1774,7 @@ class OrchestratorAgent:
                 options=options,
                 on_stream=on_stream,
                 profile_name=resolved_profile_name,
+                timeout_override=timeout_seconds,
             )
 
     def handle_request(self, user_input):
