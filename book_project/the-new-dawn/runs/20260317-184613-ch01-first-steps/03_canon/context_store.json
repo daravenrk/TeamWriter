@@ -1,0 +1,64 @@
+{
+  "book": {
+    "title": "The New Dawn",
+    "genre": "speculative fiction",
+    "audience": "adult",
+    "tone": "cinematic and emotionally grounded",
+    "premise": "A speculative fiction saga about humanity's first interstellar colony and the mysteries they uncover.",
+    "target_word_count": 125000,
+    "page_target": 450
+  },
+  "chapter": {
+    "number": 1,
+    "title": "Arrival",
+    "section_title": "First Steps",
+    "section_goal": "Establish the setting and introduce the main characters.",
+    "writer_words": 1400
+  },
+  "_handoff_dir": "/home/daravenrk/dragonlair/book_project/the-new-dawn/runs/20260317-184613-ch01-first-steps/handoff",
+  "_resource_refs": {
+    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+  },
+  "_resource_snapshot": {},
+  "publisher_brief": {
+    "agent": "book-publisher-brief",
+    "profile": "book-publisher-brief",
+    "output_path": "/home/daravenrk/dragonlair/book_project/the-new-dawn/runs/20260317-184613-ch01-first-steps/00_brief/book_brief.json",
+    "lock_after": {
+      "name": "changes_log",
+      "active": true,
+      "lock_root": "/tmp/dragonlair_agent_stack"
+    }
+  },
+  "permanent_memory": {
+    "book_brief": {
+      "title_working": "The New Dawn",
+      "genre": "speculative fiction",
+      "audience": "adult",
+      "target_word_count": 125000,
+      "page_target": 450,
+      "tone": "cinematic and emotionally grounded",
+      "constraints": [
+        "Chapter word count must not exceed 1600 words.",
+        "Chapter word count must not be less than 1200 words.",
+        "All character introductions must include a name, role, and one defining trait.",
+        "Setting descriptions must establish sensory details (sight, sound, temperature).",
+        "No exposition dumps; all information must be revealed through action or dialogue.",
+        "Resource tracker must be updated with chapter completion status.",
+        "Web UI state must reflect chapter completion before proceeding."
+      ],
+      "acceptance_criteria": [
+        "Final word count falls within the 1200-1600 range.",
+        "Chapter includes at least 3 distinct characters with defined traits.",
+        "Setting description contains at least 5 sensory details.",
+        "No paragraphs exceed 150 words.",
+        "Resource tracker JSON at /home/daravenrk/dragonlair/book_project/resource_tracker.json shows 'status': 'completed' for chapter 1.",
+        "Web UI state JSON at /home/daravenrk/dragonlair/book_project/webui_state.json contains 'current_chapter': 1.",
+        "No errors logged in /home/daravenrk/dragonlair/book_project/resource_events.jsonl during generation."
+      ]
+    }
+  }
+}

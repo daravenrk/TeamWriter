@@ -1,0 +1,57 @@
+{
+  "master_outline_markdown": "# Master Outline: Chapter 1 - Recovery Path\n\n## Act I: The Silent Initialization\n- **Scene 1.1: Gate 1 - Initialization**\n  - System boots; all components initialized.\n  - Resource state confirmed: Normal mode, 1 running agent (qwen3.5:9b), 0 failed agents.\n  - Handoff directory established: `/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff`.\n- **Scene 1.2: Gate 2 - Configuration Check**\n  - Validation of config files for consistency.\n  - No discrepancies found; system remains stable.\n\n## Act II: The Critical Startup\n- **Scene 2.1: Gate 3 - Dependency Resolution**\n  - Verification of all required dependencies.\n  - All dependencies resolved and available.\n- **Scene 2.2: Gate 4 - Startup Sequence**\n  - Critical services begin startup.\n  - System transitions from idle to active monitoring.\n\n## Act III: The Stress Verification\n- **Scene 3.1: Gate 5 - Health Check**\n  - Comprehensive health checks on running services.\n  - All services functioning properly under normal pressure.\n- **Scene 3.2: Recovery Path Completion**\n  - Confirmation of resilience verification.\n  - Journal logged to: `/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl`.\n  - Final state: Pipeline verified, no failures recorded.",
+  "book_structure": {
+    "acts": [
+      {
+        "act_number": 1,
+        "title": "The Silent Initialization",
+        "gates_covered": [
+          "Gate 1: Initialization",
+          "Gate 2: Configuration Check"
+        ],
+        "resource_state_snapshot": {
+          "mode": "normal",
+          "queue": {
+            "running": 1,
+            "failed": 0
+          },
+          "handoff_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff"
+        }
+      },
+      {
+        "act_number": 2,
+        "title": "The Critical Startup",
+        "gates_covered": [
+          "Gate 3: Dependency Resolution",
+          "Gate 4: Startup Sequence"
+        ],
+        "resource_state_snapshot": {
+          "mode": "normal",
+          "queue": {
+            "running": 1,
+            "failed": 0
+          }
+        }
+      },
+      {
+        "act_number": 3,
+        "title": "The Stress Verification",
+        "gates_covered": [
+          "Gate 5: Health Check",
+          "Recovery Path Completion"
+        ],
+        "resource_state_snapshot": {
+          "mode": "normal",
+          "queue": {
+            "running": 1,
+            "failed": 0
+          },
+          "journal_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl"
+        }
+      }
+    ],
+    "total_word_target": 450,
+    "current_word_count": 0
+  },
+  "pacing_notes": "Maintain a steady, clear rhythm mirroring the sequential nature of the orchestration pipeline. Each gate must be introduced, executed, and verified before moving to the next. The transition from Act I to Act II should feel seamless, representing the handoff from initialization to active service. Act III must culminate in the explicit confirmation of the 'Recovery Path' goal, ensuring the reader understands the system's resilience. Avoid narrative digressions; focus strictly on the technical progression and resource state updates as defined in the constraints. The word count must remain under 450 words, prioritizing conciseness over descriptive flourish."
+}

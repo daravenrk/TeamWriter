@@ -1,0 +1,13 @@
+{
+  "stage": "chapter_planner",
+  "agent": "book-chapter-planner",
+  "profile": "book-chapter-planner",
+  "output_path": "/home/daravenrk/dragonlair/book_project/interruption-drill-book/runs/20260318-032210-ch01-interruption-path/02_outline/chapter_specs/chapter_01.json",
+  "lock_after": {
+    "name": "changes_log",
+    "active": false,
+    "lock_root": "/tmp/dragonlair_agent_stack"
+  },
+  "publisher_visible": true,
+  "recovered": false
+}

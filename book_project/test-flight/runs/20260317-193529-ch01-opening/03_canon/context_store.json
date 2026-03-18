@@ -1,0 +1,60 @@
+{
+  "book": {
+    "title": "Test Flight",
+    "genre": "speculative fiction",
+    "audience": "adult",
+    "tone": "cinematic and emotionally grounded",
+    "premise": "A test pipeline",
+    "target_word_count": 125000,
+    "page_target": 450
+  },
+  "chapter": {
+    "number": 1,
+    "title": "Chapter One",
+    "section_title": "Opening",
+    "section_goal": "Introduce characters",
+    "writer_words": 1400
+  },
+  "_handoff_dir": "/home/daravenrk/dragonlair/book_project/test-flight/runs/20260317-193529-ch01-opening/handoff",
+  "_resource_refs": {
+    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+  },
+  "_resource_snapshot": {},
+  "publisher_brief": {
+    "agent": "book-publisher-brief",
+    "profile": "book-publisher-brief",
+    "output_path": "/home/daravenrk/dragonlair/book_project/test-flight/runs/20260317-193529-ch01-opening/00_brief/book_brief.json",
+    "lock_after": {
+      "name": "changes_log",
+      "active": true,
+      "lock_root": "/tmp/dragonlair_agent_stack"
+    }
+  },
+  "permanent_memory": {
+    "book_brief": {
+      "title_working": "Test Flight",
+      "genre": "speculative fiction",
+      "audience": "adult",
+      "target_word_count": 125000,
+      "page_target": 450,
+      "tone": "cinematic and emotionally grounded",
+      "constraints": [
+        "Total manuscript must not exceed 130,000 words",
+        "Chapter 1 must not exceed 1,600 words",
+        "All chapters must maintain consistent POV alignment",
+        "Resource state must be updated in /home/daravenrk/dragonlair/book_project/resource_tracker.json after every chapter completion",
+        "UI state must reflect current chapter progress in /home/daravenrk/dragonlair/book_project/webui_state.json"
+      ],
+      "acceptance_criteria": [
+        "Chapter 1 word count equals exactly 1,400 words",
+        "Chapter 1 page count falls within 40-50 pages",
+        "All character introductions in Chapter 1 are logged in /home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+        "WebUI state transition from 'draft' to 'review' is recorded in /home/daravenrk/dragonlair/book_project/webui_events.jsonl",
+        "No syntax errors in JSON output files referenced in _resource_refs"
+      ]
+    }
+  }
+}

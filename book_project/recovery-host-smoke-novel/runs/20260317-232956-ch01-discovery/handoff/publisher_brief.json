@@ -1,0 +1,13 @@
+{
+  "stage": "publisher_brief",
+  "agent": "book-publisher-brief",
+  "profile": "book-publisher-brief",
+  "output_path": "/home/daravenrk/dragonlair/book_project/recovery-host-smoke-novel/runs/20260317-232956-ch01-discovery/00_brief/book_brief.json",
+  "lock_after": {
+    "name": "changes_log",
+    "active": false,
+    "lock_root": "/tmp/dragonlair_agent_stack"
+  },
+  "publisher_visible": true,
+  "recovered": false
+}

@@ -1,0 +1,123 @@
+{
+  "master_outline_markdown": "# Master Outline: Runtime Validation Book Chapter 01 - Recovery Path\n\n## Title\nRuntime Validation Book Chapter 01: Recovery Path\n\n## Genre & Tone\nTechno-thriller, Clear and Grounded, Adult\n\n## Core Thesis\nThis chapter demonstrates the critical, high-stakes progression of a cyber-attack recovery process within a critical national infrastructure system, moving from containment to full restoration while maintaining operational integrity.\n\n## Premise\nA dedicated cybersecurity team faces a 24-hour window to recover a compromised critical system. The narrative follows the strict adherence to the four-stage recovery model (Containment, Eradication, Recovery, Restoration) to prevent further damage and ensure public safety.\n\n## Act Structure & Chapter Progression\n\n### Act I: Containment (The Crisis)\n- **Goal**: Stop the spread of the attack.\n- **Key Events**: Detection of anomalous activity, isolation of affected nodes, monitoring for lateral movement.\n- **Character Arc**: Introduction of the lead responder under pressure; realization of the severity of the breach.\n- **Chapter 1 Focus**: Initial detection and the decision to initiate containment protocols.\n\n### Act II: Eradication (The Cleanup)\n- **Goal**: Remove the malicious code and threats.\n- **Key Events**: Patching vulnerabilities, replacing compromised components, forensic analysis.\n- **Character Arc**: Technical team overcoming specific hurdles in removing the threat without destabilizing the system.\n- **Chapter 2 Focus**: Execution of eradication steps and verification of threat removal.\n\n### Act III: Recovery (The Restoration)\n- **Goal**: Return systems to normal operational state.\n- **Key Events**: Restoring data from backups, reconfiguring settings, functional verification.\n- **Character Arc**: Shift from defensive mode to active restoration; managing the tension between speed and safety.\n- **Chapter 3 Focus**: Data restoration and system reconfiguration.\n\n### Act IV: Restoration (The Standby)\n- **Goal**: Bring the network back online with enhanced security.\n- **Key Events**: Full network reintegration, security audits, implementation of new measures.\n- **Character Arc**: Team reflection on the event; securing the future against recurrence.\n- **Chapter 4 Focus**: Final go-live and post-incident review.\n\n## Reader Transformation\n- **Beginning**: Anxiety and uncertainty regarding the breach.\n- **Middle**: Tension as the team navigates complex technical challenges.\n- **End**: Relief and confidence in the restored, hardened system.\n\n## Pacing Notes\n- Maintain a steady, grounded rhythm reflecting the procedural nature of the recovery.\n- Use short, clear sentences to mimic the urgency of the 24-hour timeline.\n- Ensure each act transitions smoothly into the next, highlighting the dependency of recovery on successful containment and eradication.\n",
+  "book_structure": {
+    "format": "json",
+    "version": "1.0",
+    "metadata": {
+      "title_working": "runtime-validation-book-ch01-recovery-path",
+      "genre": "techno-thriller",
+      "audience": "adult",
+      "target_word_count": 2000,
+      "page_target": 12,
+      "tone": "clear and grounded",
+      "resource_state_ref": "/home/daravenrk/dragonlair/book_project/resource_tracker.json"
+    },
+    "acts": [
+      {
+        "act_number": 1,
+        "name": "Containment",
+        "description": "Stopping the attack from spreading within the network.",
+        "chapters": [
+          {
+            "chapter_number": 1,
+            "title": "Initial Detection and Isolation",
+            "word_count_target": 450,
+            "key_events": [
+              "Detection of anomalous network traffic",
+              "Decision to isolate affected systems",
+              "Monitoring for lateral movement"
+            ],
+            "arc_progression": "Introduction of the crisis and immediate response"
+          }
+        ],
+        "subplots": [
+          "The pressure on the cybersecurity team to act quickly",
+          "The technical challenge of identifying the scope of the breach"
+        ]
+      },
+      {
+        "act_number": 2,
+        "name": "Eradication",
+        "description": "Removing the malicious code and threat entirely.",
+        "chapters": [
+          {
+            "chapter_number": 2,
+            "title": "Patch and Purge",
+            "word_count_target": 450,
+            "key_events": [
+              "Identification of vulnerability vectors",
+              "Deployment of patches and software updates",
+              "Replacement of compromised components"
+            ],
+            "arc_progression": "Overcoming technical hurdles to remove the threat"
+          }
+        ],
+        "subplots": [
+          "The risk of patching causing temporary system instability",
+          "Forensic analysis revealing the attacker's method"
+        ]
+      },
+      {
+        "act_number": 3,
+        "name": "Recovery",
+        "description": "Restoring the system to its normal operational state.",
+        "chapters": [
+          {
+            "chapter_number": 3,
+            "title": "Data and Configuration Restore",
+            "word_count_target": 450,
+            "key_events": [
+              "Restoration of data from backups",
+              "Reconfiguration of system settings",
+              "Verification of system functionality"
+            ],
+            "arc_progression": "Transition from defensive to active restoration"
+          }
+        ],
+        "subplots": [
+          "The tension between restoring speed and ensuring data integrity",
+          "Testing critical services for functionality"
+        ]
+      },
+      {
+        "act_number": 4,
+        "name": "Restoration",
+        "description": "Bringing the network back online with enhanced security.",
+        "chapters": [
+          {
+            "chapter_number": 4,
+            "title": "Full Network Reintegration",
+            "word_count_target": 450,
+            "key_events": [
+              "Reintegration of all services",
+              "Conducting security audits",
+              "Implementation of additional preventative measures"
+            ],
+            "arc_progression": "Final stabilization and future hardening"
+          }
+        ],
+        "subplots": [
+          "The team's reflection on the attack and lessons learned",
+          "Deployment of new security protocols to prevent recurrence"
+        ]
+      }
+    ],
+    "pacing_analysis": {
+      "overall_rhythm": "Steady and procedural with moments of high tension",
+      "transition_strategy": "Each act builds upon the success of the previous one, showing the cumulative effect of containment leading to eradication, which enables recovery, which allows restoration.",
+      "climax_point": "The successful reintegration of the network in Act IV",
+      "resolution_point": "Completion of the security audit and implementation of new measures"
+    },
+    "constraints_check": {
+      "chapter_word_count_limit": 450,
+      "all_gates_demonstrated": true,
+      "complete_section_produced": true,
+      "tone_alignment": "clear and grounded",
+      "resource_paths_cited": [
+        "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+        "/home/daravenrk/dragonlair/book_project/resource_events.jsonl"
+      ]
+    }
+  },
+  "pacing_notes": "The narrative must maintain a clear, grounded tone suitable for an adult techno-thriller audience. Pacing should reflect the urgency of the 24-hour timeline while respecting the technical complexity of the recovery process. Each act must clearly demonstrate the progression through the four gates (Containment, Eradication, Recovery, Restoration). Chapter word counts must not exceed 450 words. The structure ensures that the resource state reflects normal mode with 1 running agent, as per the current snapshot at /home/daravenrk/dragonlair/book_project/resource_tracker.json. All technical claims must be verifiable against recent news or databases to avoid unverified claims."
+}

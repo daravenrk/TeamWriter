@@ -1,0 +1,46 @@
+# Stage Handoff: chapter_planner
+
+- Agent: book-chapter-planner
+- Profile: book-chapter-planner
+- Output Path: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-014118-ch01-recovery-path/02_outline/chapter_specs/chapter_01.json
+- Recovered: False
+
+## LLM Response
+
+```json
+{
+  "chapter_number": 1,
+  "chapter_title": "Initial Detection and Isolation",
+  "purpose": "Establish the crisis by demonstrating the detection of anomalous traffic and the immediate decision to isolate affected nodes, setting the stage for the containment gate.",
+  "target_words": 450,
+  "sections": [
+    {
+      "section_title": "The Anomaly",
+      "description": "Depict the moment the monitoring system flags irregular data flow patterns indicative of a breach."
+    },
+    {
+      "section_title": "The Decision",
+      "description": "Show the lead responder analyzing the data and making the critical call to isolate the compromised segment to prevent lateral movement."
+    },
+    {
+      "section_title": "The Isolation",
+      "description": "Execute the technical steps of cutting off the affected node while maintaining communication channels for the team."
+    }
+  ],
+  "must_include": [
+    "Explicit reference to the monitoring system flagging 'anomalous network traffic'.",
+    "Clear depiction of the lead responder's realization of the severity.",
+    "Technical description of the isolation protocol execution.",
+    "Reference to resource state: /home/daravenrk/dragonlair/book_project/resource_tracker.json showing mode 'normal' and 1 running agent.",
+    "Reference to resource state: /home/daravenrk/dragonlair/book_project/resource_events.jsonl for the initial event log."
+  ],
+  "must_avoid": [
+    "Prose outside the JSON structure.",
+    "Any mention of eradication or recovery steps (those belong to later chapters).",
+    "Vague descriptions of the threat without specific technical indicators.",
+    "Exceeding the 450-word limit.",
+    "Any indication that the system is already fully restored."
+  ],
+  "ending_hook": "The network segment is now silent, but the silence is heavy; the team knows the attacker is still inside, waiting for the isolation to lift, and the clock is ticking down the remaining hours of the 24-hour window."
+}
+```

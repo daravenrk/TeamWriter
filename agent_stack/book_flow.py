@@ -3,6 +3,7 @@
 # - Log all major stage transitions, returns, and errors
 import argparse
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -11,6 +12,7 @@ from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
 
 from .lock_manager import AgentLockManager
+from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, ChapterSpecValidationError, StageQualityGateError
 from .orchestrator import OrchestratorAgent
 from .writing_assistant import generate_names, generate_technology, generate_personalities, generate_dates_history
 
@@ -81,7 +83,7 @@ def read_json(path: Path, default=None):
         return default
     try:
         return json.loads(raw)
-    except Exception:
+    except json.JSONDecodeError:
         return default
 
 
@@ -100,6 +102,19 @@ def append_jsonl(path: Path, payload):
     with file_lock(path):
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
+
+
+def append_run_event(path: Path, event: str, details: dict):
+    if path is None:
+        return
+    append_jsonl(
+        path,
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": event,
+            "details": details,
+        },
+    )
 
 
 def parse_json_block(raw: str, fallback=None):
@@ -137,8 +152,9 @@ def build_contract(role: str, objective: str, constraints, inputs, output_format
 
 def build_resource_reference_block(context_store: dict) -> str:
     refs = context_store.get("_resource_refs") if isinstance(context_store, dict) else None
+    framework_refs = context_store.get("_framework_refs") if isinstance(context_store, dict) else None
     snapshot = context_store.get("_resource_snapshot") if isinstance(context_store, dict) else None
-    if not refs:
+    if not refs and not framework_refs:
         return ""
 
     lines = [
@@ -161,7 +177,132 @@ def build_resource_reference_block(context_store: dict) -> str:
         lines.append("- Current snapshot:")
         lines.append(json.dumps(compact, indent=2))
 
+    if isinstance(framework_refs, dict) and framework_refs:
+        lines.extend(
+            [
+                "BOOK FRAMEWORK REFERENCES:",
+                f"- framework_skeleton_json: {framework_refs.get('framework_skeleton', '')}",
+                f"- arc_tracker_json: {framework_refs.get('arc_tracker', '')}",
+                f"- progress_index_json: {framework_refs.get('progress_index', '')}",
+                f"- agent_context_status_jsonl: {framework_refs.get('agent_context_status', '')}",
+                "- Use these references to keep continuity, pacing, and unresolved arc state aligned.",
+            ]
+        )
+
     return "\n".join(lines)
+
+
+def _normalize_list(value):
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def build_framework_skeleton(brief: dict, outline_payload: dict, chapter_spec: dict, chapter_number: int) -> dict:
+    structure = outline_payload.get("book_structure") if isinstance(outline_payload, dict) else {}
+    sections = chapter_spec.get("sections") if isinstance(chapter_spec, dict) else []
+    section_entries = []
+    for idx, item in enumerate(sections or [], start=1):
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("name") or f"Section {idx}")
+            goal = str(item.get("objective") or item.get("goal") or "")
+        else:
+            title = str(item or f"Section {idx}")
+            goal = ""
+        section_entries.append({"index": idx, "title": title, "goal": goal})
+
+    return {
+        "book_identity": {
+            "title_working": brief.get("title_working"),
+            "genre": brief.get("genre"),
+            "audience": brief.get("audience"),
+            "tone": brief.get("tone"),
+            "target_word_count": brief.get("target_word_count"),
+            "page_target": brief.get("page_target"),
+        },
+        "design_framework": {
+            "constraints": _normalize_list(brief.get("constraints")),
+            "acceptance_criteria": _normalize_list(brief.get("acceptance_criteria")),
+            "book_structure": structure,
+            "master_outline_markdown": str(outline_payload.get("master_outline_markdown") or ""),
+        },
+        "chapter_skeleton": {
+            "chapter_number": chapter_number,
+            "chapter_title": chapter_spec.get("chapter_title"),
+            "purpose": chapter_spec.get("purpose"),
+            "ending_hook": chapter_spec.get("ending_hook"),
+            "target_words": chapter_spec.get("target_words"),
+            "sections": section_entries,
+            "must_include": _normalize_list(chapter_spec.get("must_include")),
+            "must_avoid": _normalize_list(chapter_spec.get("must_avoid")),
+        },
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def update_arc_tracker(existing: dict, *, chapter_number: int, chapter_title: str, section_title: str, next_writer_notes: dict, continuity_state: dict, canon_payload: dict, rubric_report: dict):
+    tracker = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    tracker.setdefault("story_arcs", [])
+    tracker.setdefault("character_arcs", [])
+    tracker.setdefault("open_loops", [])
+    tracker.setdefault("chapter_progress", [])
+
+    loop_items = canon_payload.get("open_loops") if isinstance(canon_payload, dict) else []
+    tracker["open_loops"] = _normalize_list(loop_items)
+
+    notes = next_writer_notes if isinstance(next_writer_notes, dict) else {}
+    state_updates = continuity_state.get("section_updates") if isinstance(continuity_state, dict) else []
+    state_updates = state_updates if isinstance(state_updates, list) else []
+
+    timeline_events = _normalize_list(notes.get("timeline_events"))
+    unresolved_questions = _normalize_list(notes.get("unresolved_questions"))
+    character_updates = _normalize_list(notes.get("character_state_updates"))
+
+    if timeline_events:
+        tracker["story_arcs"].append(
+            {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "events": timeline_events,
+            }
+        )
+    if character_updates:
+        tracker["character_arcs"].append(
+            {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "updates": character_updates,
+            }
+        )
+
+    tracker["chapter_progress"].append(
+        {
+            "chapter_number": chapter_number,
+            "chapter_title": chapter_title,
+            "section_title": section_title,
+            "continuity_updates_count": len(state_updates),
+            "timeline_events": timeline_events,
+            "unresolved_questions": unresolved_questions,
+            "rubric_scores": (rubric_report or {}).get("scores") if isinstance(rubric_report, dict) else {},
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    tracker["last_updated"] = datetime.utcnow().isoformat()
+    return tracker
+
+
+def write_agent_context_status(path: Path, payload: dict):
+    append_jsonl(
+        path,
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": "agent_context_status",
+            "details": payload,
+        },
+    )
 
 
 def gate_chapter_spec(spec):
@@ -224,6 +365,43 @@ def gate_publisher_brief(report):
         return False, "constraints must be a list with at least 5 items"
     if not isinstance(acceptance, list) or len(acceptance) < 5:
         return False, "acceptance_criteria must be a list with at least 5 items"
+
+    return True, "ok"
+
+
+def gate_research_dossier(text):
+    content = str(text or "")
+    lowered = content.lower()
+    has_facts = "facts" in lowered
+    if has_facts:
+        return True, "ok"
+    return False, "research output missing facts section"
+
+
+def gate_architect_outline(payload):
+    if not isinstance(payload, dict):
+        return False, "invalid architect payload"
+
+    # Normalize common alias keys so valid responses are not rejected for naming variance.
+    alias_keys = [
+        "master_outline_markdown",
+        "master_outline",
+        "outline_markdown",
+        "master_outline_md",
+    ]
+    for key in alias_keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            payload["master_outline_markdown"] = value
+            break
+
+    outline_ok = isinstance(payload.get("master_outline_markdown"), str) and bool(payload.get("master_outline_markdown", "").strip())
+    if not outline_ok:
+        return False, "master_outline_markdown missing"
+
+    structure = payload.get("book_structure")
+    if not isinstance(structure, (dict, list)):
+        return False, "book_structure missing"
 
     return True, "ok"
 
@@ -563,6 +741,42 @@ def build_retro_markdown(retro: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def load_recent_jsonl(path: Path, limit: int = 50):
+    if not path.exists():
+        return []
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    tail = raw_lines[-max(1, int(limit)):]
+    rows = []
+    for line in tail:
+        item = parse_json_block(line, fallback=None)
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def build_quality_failure_review_markdown(entries: list) -> str:
+    lines = [
+        "# Quality Failure Review",
+        "",
+        "Recent quality gate failures from perpetual tracking log.",
+        "",
+    ]
+    if not entries:
+        lines.append("- No recent quality gate failures recorded.")
+        return "\n".join(lines) + "\n"
+
+    for item in entries:
+        lines.append(
+            "- "
+            + f"stage={item.get('stage', '')}, "
+            + f"profile={item.get('profile', '')}, "
+            + f"model={item.get('model', '')}, "
+            + f"attempt={item.get('attempt', '')}, "
+            + f"message={item.get('gate_message', '')}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def run_stage(
     *,
     orchestrator,
@@ -581,6 +795,8 @@ def run_stage(
     verbose=False,
 ):
     stage_instantiated_at = datetime.utcnow().isoformat()
+    run_journal_path = context_store.get("_run_journal_path") if isinstance(context_store, dict) else None
+    run_journal_path = Path(run_journal_path) if run_journal_path else None
 
     lock_before = lock_manager.get_lock_status(name="changes_log")
     lock_manager.log_agent_change(
@@ -596,11 +812,143 @@ def run_stage(
             "stage_instantiated",
             {"stage": stage_id, "instantiated_at": stage_instantiated_at},
         )
+    append_run_event(
+        run_journal_path,
+        "stage_instantiated",
+        {
+            "stage": stage_id,
+            "agent": agent_name,
+            "profile": profile_name,
+            "instantiated_at": stage_instantiated_at,
+        },
+    )
 
     last_raw = ""
     last_error = ""
     last_feedback = None
     parsed = None
+    recovery_attempts = 1
+
+    def persist_output(payload):
+        if output_path is None:
+            return
+        with lock_manager.edit_lock(name="publisher_store"):
+            if parse_json:
+                write_json(output_path, payload)
+            else:
+                write_text(output_path, str(payload))
+
+    def finalize_success(*, payload, raw_output, attempt, attempt_started_at, attempt_completed_at, recovered, gate_message, recovery_profile=None):
+        persist_output(payload)
+
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "event": "stage_success",
+                    "instantiated_at": stage_instantiated_at,
+                    "attempt": attempt,
+                    "attempt_started_at": attempt_started_at,
+                    "attempt_completed_at": attempt_completed_at,
+                    "raw_output": raw_output,
+                    "parsed_output": payload if parse_json else None,
+                    "gate_ok": True,
+                    "gate_message": gate_message,
+                    "recovered": recovered,
+                    "recovery_profile": recovery_profile,
+                    "output_path": str(output_path) if output_path else None,
+                },
+            )
+
+        context_store[stage_id] = {
+            "agent": agent_name,
+            "profile": profile_name,
+            "output_path": str(output_path) if output_path else None,
+            "lock_after": lock_manager.get_lock_status(name="changes_log"),
+            "recovered": recovered,
+        }
+
+        handoff_dir = context_store.get("_handoff_dir")
+        if handoff_dir:
+            handoff_payload = {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "output_path": str(output_path) if output_path else None,
+                "lock_after": context_store[stage_id]["lock_after"],
+                "publisher_visible": True,
+                "recovered": recovered,
+            }
+            write_json(Path(handoff_dir) / f"{stage_id}.json", handoff_payload)
+            handoff_md = [
+                f"# Stage Handoff: {stage_id}",
+                "",
+                f"- Agent: {agent_name}",
+                f"- Profile: {profile_name}",
+                f"- Output Path: {str(output_path) if output_path else 'inline'}",
+                f"- Recovered: {recovered}",
+                "",
+                "## LLM Response",
+                "",
+            ]
+            if parse_json:
+                handoff_md.extend([
+                    "```json",
+                    json.dumps(payload, indent=2),
+                    "```",
+                ])
+            else:
+                handoff_md.append(str(payload))
+            write_text(Path(handoff_dir) / f"{stage_id}.md", "\n".join(handoff_md) + "\n")
+
+        lock_manager.log_agent_change(
+            changes_log,
+            agent_name,
+            "stage_complete",
+            {
+                "stage": stage_id,
+                "attempt": attempt,
+                "output_path": str(output_path) if output_path else None,
+                "lock_after": context_store[stage_id]["lock_after"],
+                "report_to_publisher": True,
+                "recovered": recovered,
+                "recovery_profile": recovery_profile,
+            },
+        )
+        append_run_event(
+            run_journal_path,
+            "stage_complete",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "attempt": attempt,
+                "output_path": str(output_path) if output_path else None,
+                "recovered": recovered,
+                "recovery_profile": recovery_profile,
+            },
+        )
+        return payload
+
+    def build_recovery_prompt(current_prompt):
+        feedback_block = ""
+        if isinstance(last_feedback, dict) and last_feedback:
+            feedback_block = "\n\nLAST STRUCTURED OUTPUT:\n" + json.dumps(last_feedback, indent=2)
+        elif last_feedback is not None:
+            feedback_block = "\n\nLAST OUTPUT:\n" + str(last_feedback)
+        raw_block = f"\n\nLAST RAW OUTPUT:\n{last_raw}" if last_raw else ""
+        return (
+            current_prompt
+            + feedback_block
+            + raw_block
+            + "\n\nRECOVERY INSTRUCTION:\n"
+            + "Your last attempt failed. Repair the output so it fully satisfies the required format and all quality constraints."
+            + f"\nFailure reason: {last_error or 'unknown failure'}"
+            + "\nDo not explain the failure. Return only the corrected final output."
+        )
 
     for attempt in range(1, max_retries + 2):
         resource_block = build_resource_reference_block(context_store)
@@ -632,7 +980,7 @@ def run_stage(
                 profile_name=profile_name,
                 stream_override=False,
             )
-        except Exception:
+        except AgentStackError:
             resolved_plan = None
 
         # Diagnostics: log prompt and context before agent call
@@ -667,6 +1015,18 @@ def run_stage(
                 "profile": ((resolved_plan or {}).get("profile") or {}).get("name"),
             },
         )
+        append_run_event(
+            run_journal_path,
+            "stage_attempt_start",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "attempt": attempt,
+                "route": (resolved_plan or {}).get("route"),
+                "model": (resolved_plan or {}).get("model"),
+            },
+        )
 
         try:
             raw = orchestrator.handle_request_with_overrides(
@@ -674,7 +1034,9 @@ def run_stage(
                 profile_name=profile_name,
                 stream_override=False,
             )
-        except Exception as e:
+        except AgentStackError as e:
+            last_error = f"[{e.code}] {e}"
+            last_feedback = {"error": str(e), "error_code": e.code}
             if diagnostics_path is not None:
                 append_jsonl(
                     diagnostics_path,
@@ -685,11 +1047,86 @@ def run_stage(
                         "attempt": attempt,
                         "event": "agent_call_error",
                         "error": str(e),
+                        "error_code": e.code,
                         "prompt": prompt_with_feedback,
                         "context_store": dict(context_store),
                     },
                 )
-            raise
+            lock_manager.log_agent_change(
+                changes_log,
+                agent_name,
+                "stage_result",
+                {
+                    "stage": stage_id,
+                    "attempt": attempt,
+                    "gate_ok": False,
+                    "gate_message": last_error,
+                },
+            )
+            append_run_event(
+                run_journal_path,
+                "stage_attempt_error",
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": attempt,
+                    "error": str(e),
+                    "error_code": e.code,
+                },
+            )
+            continue
+        except Exception as e:
+            wrapped_error = AgentUnexpectedError(
+                f"Stage attempt failed unexpectedly: {e}",
+                details={
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": attempt,
+                },
+            )
+            last_error = f"[{wrapped_error.code}] {wrapped_error}"
+            last_feedback = {"error": str(wrapped_error), "error_code": wrapped_error.code}
+            if diagnostics_path is not None:
+                append_jsonl(
+                    diagnostics_path,
+                    {
+                        "stage": stage_id,
+                        "agent": agent_name,
+                        "profile": profile_name,
+                        "attempt": attempt,
+                        "event": "agent_call_error",
+                        "error": str(wrapped_error),
+                        "error_code": wrapped_error.code,
+                        "prompt": prompt_with_feedback,
+                        "context_store": dict(context_store),
+                    },
+                )
+            lock_manager.log_agent_change(
+                changes_log,
+                agent_name,
+                "stage_result",
+                {
+                    "stage": stage_id,
+                    "attempt": attempt,
+                    "gate_ok": False,
+                    "gate_message": last_error,
+                },
+            )
+            append_run_event(
+                run_journal_path,
+                "stage_attempt_error",
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": attempt,
+                    "error": str(wrapped_error),
+                    "error_code": wrapped_error.code,
+                },
+            )
+            continue
         attempt_completed_at = datetime.utcnow().isoformat()
         last_raw = raw
         parsed = parse_json_block(raw, fallback={}) if parse_json else raw
@@ -710,29 +1147,48 @@ def run_stage(
                 "gate_message": gate_message,
             },
         )
+        append_run_event(
+            run_journal_path,
+            "stage_attempt_result",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "attempt": attempt,
+                "gate_ok": gate_ok,
+                "gate_message": gate_message,
+            },
+        )
 
         if gate_ok:
-            if verbose and diagnostics_path is not None:
-                append_jsonl(
-                    diagnostics_path,
-                    {
-                        "stage": stage_id,
-                        "agent": agent_name,
-                        "profile": profile_name,
-                        "instantiated_at": stage_instantiated_at,
-                        "attempt": attempt,
-                        "attempt_started_at": attempt_started_at,
-                        "attempt_completed_at": attempt_completed_at,
-                        "prompt": prompt_with_feedback,
-                        "raw_output": raw,
-                        "parsed_output": parsed if parse_json else None,
-                        "gate_ok": gate_ok,
-                        "gate_message": gate_message,
-                    },
-                )
-            break
+            orchestrator.record_quality_gate_success(
+                stage=stage_id,
+                agent=agent_name,
+                profile=profile_name,
+                model=(resolved_plan or {}).get("model"),
+                run_journal_path=str(run_journal_path) if run_journal_path else None,
+                attempt=attempt,
+            )
+            return finalize_success(
+                payload=parsed,
+                raw_output=raw,
+                attempt=attempt,
+                attempt_started_at=attempt_started_at,
+                attempt_completed_at=attempt_completed_at,
+                recovered=False,
+                gate_message=gate_message,
+            )
 
         last_error = gate_message
+        orchestrator.record_quality_gate_failure(
+            stage=stage_id,
+            agent=agent_name,
+            profile=profile_name,
+            model=(resolved_plan or {}).get("model"),
+            gate_message=gate_message,
+            run_journal_path=str(run_journal_path) if run_journal_path else None,
+            attempt=attempt,
+        )
         last_feedback = parsed
         if verbose and diagnostics_path is not None:
             append_jsonl(
@@ -752,145 +1208,168 @@ def run_stage(
                     "gate_message": gate_message,
                 },
             )
-    else:
-        # Log stage failure before raising exception
+    recovery_profile_name = profile_name
+    for recovery_attempt in range(1, recovery_attempts + 1):
+        recovery_prompt = build_recovery_prompt(prompt)
+        recovery_started_at = datetime.utcnow().isoformat()
+        append_run_event(
+            run_journal_path,
+            "stage_recovery_start",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": recovery_profile_name,
+                "attempt": recovery_attempt,
+                "failure_reason": last_error,
+            },
+        )
         lock_manager.log_agent_change(
             changes_log,
             agent_name,
-            "stage_failure",
+            "stage_recovery_start",
             {
                 "stage": stage_id,
-                "attempt": max_retries + 1,
-                "gate_ok": False,
-                "gate_message": last_error,
+                "attempt": recovery_attempt,
+                "profile": recovery_profile_name,
+                "failure_reason": last_error,
             },
         )
-        if diagnostics_path is not None:
-            append_jsonl(
-                diagnostics_path,
-                {
-                    "stage": stage_id,
-                    "agent": agent_name,
-                    "profile": profile_name,
-                    "event": "stage_failure",
-                    "attempt": max_retries + 1,
-                    "gate_ok": False,
-                    "gate_message": last_error,
-                },
+        try:
+            raw = orchestrator.handle_request_with_overrides(
+                recovery_prompt,
+                profile_name=recovery_profile_name,
+                stream_override=False,
             )
-        raise RuntimeError(f"{stage_id} failed quality gate after retries: {last_error}")
-
-        if output_path is not None:
-            try:
-                with lock_manager.edit_lock(name="publisher_store"):
-                    if parse_json:
-                        write_json(output_path, parsed)
-                    else:
-                        write_text(output_path, str(parsed))
-                if diagnostics_path is not None:
-                    append_jsonl(
-                        diagnostics_path,
-                        {
-                            "stage": stage_id,
-                            "agent": agent_name,
-                            "profile": profile_name,
-                            "event": "output_saved",
-                            "output_path": str(output_path),
-                            "parsed": parsed if parse_json else None,
-                        },
-                    )
-            except Exception as e:
-                if diagnostics_path is not None:
-                    append_jsonl(
-                        diagnostics_path,
-                        {
-                            "stage": stage_id,
-                            "agent": agent_name,
-                            "profile": profile_name,
-                            "event": "output_save_error",
-                            "output_path": str(output_path),
-                            "error": str(e),
-                        },
-                    )
-                raise
-
-    try:
-        context_store[stage_id] = {
-            "agent": agent_name,
-            "profile": profile_name,
-            "output_path": str(output_path) if output_path else None,
-            "lock_after": lock_manager.get_lock_status(name="changes_log"),
-        }
-        if diagnostics_path is not None:
-            append_jsonl(
-                diagnostics_path,
+        except AgentStackError as e:
+            last_error = f"[{e.code}] {e}"
+            last_feedback = {"error": str(e), "error_code": e.code}
+            append_run_event(
+                run_journal_path,
+                "stage_recovery_error",
                 {
                     "stage": stage_id,
                     "agent": agent_name,
-                    "profile": profile_name,
-                    "event": "context_store_update",
-                    "context_store": dict(context_store),
-                },
-            )
-    except Exception as e:
-        if diagnostics_path is not None:
-            append_jsonl(
-                diagnostics_path,
-                {
-                    "stage": stage_id,
-                    "agent": agent_name,
-                    "profile": profile_name,
-                    "event": "context_store_update_error",
+                    "profile": recovery_profile_name,
+                    "attempt": recovery_attempt,
                     "error": str(e),
+                    "error_code": e.code,
                 },
             )
-        raise
+            continue
+        except Exception as e:
+            wrapped_error = AgentUnexpectedError(
+                f"Stage recovery failed unexpectedly: {e}",
+                details={
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": recovery_profile_name,
+                    "attempt": recovery_attempt,
+                },
+            )
+            last_error = f"[{wrapped_error.code}] {wrapped_error}"
+            last_feedback = {"error": str(wrapped_error), "error_code": wrapped_error.code}
+            append_run_event(
+                run_journal_path,
+                "stage_recovery_error",
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": recovery_profile_name,
+                    "attempt": recovery_attempt,
+                    "error": str(wrapped_error),
+                    "error_code": wrapped_error.code,
+                },
+            )
+            continue
 
-    handoff_dir = context_store.get("_handoff_dir")
-    if handoff_dir:
-        handoff_payload = {
-            "stage": stage_id,
-            "agent": agent_name,
-            "profile": profile_name,
-            "output_path": str(output_path) if output_path else None,
-            "lock_after": context_store[stage_id]["lock_after"],
-            "publisher_visible": True,
-        }
-        write_json(Path(handoff_dir) / f"{stage_id}.json", handoff_payload)
-        # Flat-file handoff channel for downstream agents.
-        handoff_md = [
-            f"# Stage Handoff: {stage_id}",
-            "",
-            f"- Agent: {agent_name}",
-            f"- Profile: {profile_name}",
-            f"- Output Path: {str(output_path) if output_path else 'inline'}",
-            "",
-            "## LLM Response",
-            "",
-        ]
-        if parse_json:
-            handoff_md.extend([
-                "```json",
-                json.dumps(parsed, indent=2),
-                "```",
-            ])
-        else:
-            handoff_md.append(str(parsed))
-        write_text(Path(handoff_dir) / f"{stage_id}.md", "\n".join(handoff_md) + "\n")
+        recovery_completed_at = datetime.utcnow().isoformat()
+        last_raw = raw
+        parsed = parse_json_block(raw, fallback={}) if parse_json else raw
+        gate_ok = True
+        gate_message = "ok"
+        if gate_fn:
+            gate_ok, gate_message = gate_fn(parsed)
+        append_run_event(
+            run_journal_path,
+            "stage_recovery_result",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": recovery_profile_name,
+                "attempt": recovery_attempt,
+                "gate_ok": gate_ok,
+                "gate_message": gate_message,
+            },
+        )
+        if gate_ok:
+            orchestrator.record_quality_gate_success(
+                stage=stage_id,
+                agent=agent_name,
+                profile=recovery_profile_name,
+                model=None,
+                run_journal_path=str(run_journal_path) if run_journal_path else None,
+                attempt=max_retries + recovery_attempt,
+            )
+            return finalize_success(
+                payload=parsed,
+                raw_output=raw,
+                attempt=max_retries + recovery_attempt + 1,
+                attempt_started_at=recovery_started_at,
+                attempt_completed_at=recovery_completed_at,
+                recovered=True,
+                gate_message=gate_message,
+                recovery_profile=recovery_profile_name,
+            )
+        last_error = gate_message
+        orchestrator.record_quality_gate_failure(
+            stage=stage_id,
+            agent=agent_name,
+            profile=recovery_profile_name,
+            model=None,
+            gate_message=gate_message,
+            run_journal_path=str(run_journal_path) if run_journal_path else None,
+            attempt=max_retries + recovery_attempt,
+        )
+        last_feedback = parsed
 
     lock_manager.log_agent_change(
         changes_log,
         agent_name,
-        "stage_complete",
+        "stage_failure",
         {
             "stage": stage_id,
-            "output_path": str(output_path) if output_path else None,
-            "lock_after": context_store[stage_id]["lock_after"],
-            "report_to_publisher": True,
+            "attempt": max_retries + recovery_attempts + 1,
+            "gate_ok": False,
+            "gate_message": last_error,
         },
     )
-
-    return parsed
+    append_run_event(
+        run_journal_path,
+        "stage_failure",
+        {
+            "stage": stage_id,
+            "agent": agent_name,
+            "profile": profile_name,
+            "gate_message": last_error,
+        },
+    )
+    if diagnostics_path is not None:
+        append_jsonl(
+            diagnostics_path,
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "event": "stage_failure",
+                "attempt": max_retries + recovery_attempts + 1,
+                "gate_ok": False,
+                "gate_message": last_error,
+            },
+        )
+    raise StageQualityGateError(
+        f"{stage_id} failed quality gate after retries: {last_error}",
+        details={"stage": stage_id, "agent": agent_name, "profile": profile_name, "last_error": last_error},
+    )
 
 
 def run_flow(args):
@@ -915,6 +1394,66 @@ def run_flow(args):
     book_root = output_root / book_slug
     runs_root = book_root / "runs"
     ensure_dir(runs_root)
+    framework_root = book_root / "framework"
+    ensure_dir(framework_root)
+
+    framework_skeleton_path = framework_root / "framework_skeleton.json"
+    arc_tracker_path = framework_root / "arc_tracker.json"
+    progress_index_path = framework_root / "progress_index.json"
+    agent_context_status_path = framework_root / "agent_context_status.jsonl"
+
+    if not framework_skeleton_path.exists():
+        write_json(
+            framework_skeleton_path,
+            {
+                "book_identity": {
+                    "title_working": args.title,
+                    "genre": args.genre,
+                    "audience": args.audience,
+                    "tone": args.tone,
+                    "target_word_count": args.target_word_count,
+                    "page_target": args.page_target,
+                },
+                "design_framework": {
+                    "constraints": [],
+                    "acceptance_criteria": [],
+                    "book_structure": {},
+                    "master_outline_markdown": "",
+                },
+                "chapter_skeleton": {
+                    "chapter_number": args.chapter_number,
+                    "chapter_title": args.chapter_title,
+                    "purpose": args.section_goal,
+                    "ending_hook": "",
+                    "target_words": args.writer_words,
+                    "sections": [],
+                    "must_include": [],
+                    "must_avoid": [],
+                },
+                "generated_at": datetime.utcnow().isoformat(),
+            },
+        )
+    if not arc_tracker_path.exists():
+        write_json(
+            arc_tracker_path,
+            {
+                "story_arcs": [],
+                "character_arcs": [],
+                "open_loops": [],
+                "chapter_progress": [],
+                "last_updated": datetime.utcnow().isoformat(),
+            },
+        )
+    if not progress_index_path.exists():
+        write_json(
+            progress_index_path,
+            {
+                "book": {"title": args.title},
+                "completed_chapters": [],
+                "last_run": None,
+                "last_updated": datetime.utcnow().isoformat(),
+            },
+        )
 
     # Stable per-book history log for all requests tied to the same title.
     book_history_log = book_root / "book_history.jsonl"
@@ -942,7 +1481,13 @@ def run_flow(args):
         ensure_dir(path)
 
     changes_log = run_dir / "changes.log"
-    diagnostics_log = (dirs["diagnostics"] / "agent_diagnostics.jsonl") if args.verbose else None
+    diagnostics_always = str(os.environ.get("BOOK_FLOW_DIAGNOSTICS_ALWAYS", "true")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    diagnostics_log = (dirs["diagnostics"] / "agent_diagnostics.jsonl") if (args.verbose or diagnostics_always) else None
     if not changes_log.exists():
         write_text(changes_log, "")
 
@@ -965,6 +1510,18 @@ def run_flow(args):
         },
     }
     context_store["_handoff_dir"] = str(dirs["handoff"])
+    run_journal = run_dir / "run_journal.jsonl"
+    context_store["_run_journal_path"] = str(run_journal)
+    append_run_event(
+        run_journal,
+        "run_start",
+        {
+            "title": args.title,
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+        },
+    )
 
     resource_tracker_path = Path(
         str(
@@ -991,6 +1548,12 @@ def run_flow(args):
         "resource_events": str(resource_events_path),
         "ui_state": str(ui_state_path),
         "ui_events": str(ui_events_path),
+    }
+    context_store["_framework_refs"] = {
+        "framework_skeleton": str(framework_skeleton_path),
+        "arc_tracker": str(arc_tracker_path),
+        "progress_index": str(progress_index_path),
+        "agent_context_status": str(agent_context_status_path),
     }
     context_store["_resource_snapshot"] = read_json(resource_tracker_path, default={})
     write_json(dirs["handoff"] / "resource_references.json", {
@@ -1053,7 +1616,7 @@ def run_flow(args):
             try:
                 with open(correction_path, "r", encoding="utf-8") as f:
                     user_data = json.load(f)
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 user_data = {}
         for field in missing:
             # 1. User input
@@ -1087,7 +1650,7 @@ def run_flow(args):
                     if constraints:
                         brief[field] = constraints
                         continue
-                except Exception:
+                except (AgentStackError, json.JSONDecodeError, TypeError, ValueError):
                     pass
                 brief[field] = ["Must be original", "No plagiarism", "Consistent tone", "Meets genre expectations", "Engages target audience"]
             elif field == "acceptance_criteria":
@@ -1102,11 +1665,24 @@ def run_flow(args):
                     if criteria:
                         brief[field] = criteria
                         continue
-                except Exception:
+                except (AgentStackError, json.JSONDecodeError, TypeError, ValueError):
                     pass
                 brief[field] = ["All sections present", "No major plot holes", "Meets word count", "Adheres to brief", "Passes editorial review"]
     context_store["permanent_memory"] = {"book_brief": brief}
     write_json(dirs["canon"] / "context_store.json", context_store)
+    write_agent_context_status(
+        agent_context_status_path,
+        {
+            "phase": "publisher_brief_complete",
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+            "expectations": {
+                "constraints": _normalize_list(brief.get("constraints")),
+                "acceptance_criteria": _normalize_list(brief.get("acceptance_criteria")),
+            },
+        },
+    )
 
     # 2) Research
     research_contract = build_contract(
@@ -1128,7 +1704,7 @@ def run_flow(args):
         prompt=research_contract,
         output_path=dirs["research"] / "research_dossier.md",
         parse_json=False,
-        gate_fn=lambda text: ("facts" in text.lower(), "research output missing facts section"),
+        gate_fn=gate_research_dossier,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -1138,9 +1714,18 @@ def run_flow(args):
     architect_contract = build_contract(
         role="Concept Architect Agent",
         objective="Create master outline and book structure.",
-        constraints=["Return JSON only", "Include master_outline_markdown and book_structure"],
+        constraints=[
+            "Return JSON only",
+            "Include top-level keys master_outline_markdown, book_structure, pacing_notes",
+            "master_outline_markdown must be non-empty markdown text",
+            "book_structure must be an object or array",
+            "Do not wrap output in markdown code fences",
+        ],
         inputs={"book_brief": brief, "research_dossier": research_md},
-        output_format='JSON with keys: master_outline_markdown, book_structure, pacing_notes',
+        output_format=(
+            'JSON object with keys: master_outline_markdown, book_structure, pacing_notes. '
+            'Example: {"master_outline_markdown":"# Outline...","book_structure":{"acts":[]},"pacing_notes":"..."}'
+        ),
         failure_conditions=["missing master outline", "missing structure", "invalid JSON"],
     )
     outline_payload = run_stage(
@@ -1154,7 +1739,7 @@ def run_flow(args):
         prompt=architect_contract,
         output_path=dirs["outline"] / "book_structure.json",
         parse_json=True,
-        gate_fn=lambda obj: (bool(obj.get("master_outline_markdown")), "master_outline_markdown missing"),
+        gate_fn=gate_architect_outline,
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -1185,6 +1770,28 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+    )
+
+    framework_skeleton = build_framework_skeleton(
+        brief=brief,
+        outline_payload=outline_payload,
+        chapter_spec=chapter_spec,
+        chapter_number=args.chapter_number,
+    )
+    write_json(framework_skeleton_path, framework_skeleton)
+    write_agent_context_status(
+        agent_context_status_path,
+        {
+            "phase": "framework_skeleton_updated",
+            "chapter_number": args.chapter_number,
+            "chapter_title": chapter_spec.get("chapter_title"),
+            "section_title": args.section_title,
+            "expectations": {
+                "must_include": _normalize_list(chapter_spec.get("must_include")),
+                "must_avoid": _normalize_list(chapter_spec.get("must_avoid")),
+                "ending_hook": chapter_spec.get("ending_hook"),
+            },
+        },
     )
 
 
@@ -1245,7 +1852,10 @@ def run_flow(args):
     # 6) Writer + section consistency review per section
     chapter_sections = chapter_spec.get("sections") or []
     if len(chapter_sections) < 2:
-        raise RuntimeError("Chapter spec must provide at least 2 sections for sequencing/assembly consistency checks")
+        raise ChapterSpecValidationError(
+            "Chapter spec must provide at least 2 sections for sequencing/assembly consistency checks",
+            details={"section_count": len(chapter_sections)},
+        )
 
     section_texts = []
     section_summaries = []
@@ -1674,6 +2284,20 @@ def run_flow(args):
             "rubric_scores": rubric_report.get("scores", {}),
         },
     )
+    write_agent_context_status(
+        agent_context_status_path,
+        {
+            "phase": "next_writer_handoff",
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+            "expectations": {
+                "focus_topics": _normalize_list(next_writer_notes.get("focus_topics")),
+                "continuity_watch": _normalize_list(next_writer_notes.get("continuity_watch")),
+                "must_carry_forward": _normalize_list(next_writer_notes.get("must_carry_forward")),
+            },
+        },
+    )
 
     # 10) Continuity audit
     continuity_contract = build_contract(
@@ -1700,7 +2324,7 @@ def run_flow(args):
         prompt=continuity_contract,
         output_path=dirs["reviews"] / "continuity_report.json",
         parse_json=True,
-        gate_fn=lambda obj: (not obj.get("blocking_issues"), "blocking continuity issues found"),
+        gate_fn=lambda obj: (isinstance(obj, dict) and "blocking_issues" in obj and "patch_tasks" in obj, "continuity report missing required fields"),
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
@@ -1719,9 +2343,12 @@ def run_flow(args):
     # --- Publisher QA with retry on revision request ---
     publisher_qa = None
     publisher_attempts = 0
-    max_publisher_retries = max(1, args.max_retries)
+    max_publisher_retries = max(1, args.max_retries + 1)
     last_publisher_prompt = publisher_qa_contract
+    current_manuscript = proofread
+    forced_completion = False
     while publisher_attempts < max_publisher_retries:
+        publisher_attempts += 1
         publisher_qa = run_stage(
             orchestrator=orchestrator,
             lock_manager=lock_manager,
@@ -1733,7 +2360,7 @@ def run_flow(args):
             prompt=last_publisher_prompt,
             output_path=dirs["reviews"] / "publisher_report.json",
             parse_json=True,
-            gate_fn=gate_publisher,
+            gate_fn=lambda obj: (isinstance(obj, dict) and bool(str(obj.get("decision", "")).strip()), "publisher decision missing"),
             max_retries=1,  # Only one attempt per outer loop
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
@@ -1741,23 +2368,146 @@ def run_flow(args):
         decision = str(publisher_qa.get("decision", "")).upper()
         if decision == "APPROVE":
             break
-        # If revision requested, check for user/AI correction (simulate with section_goal update)
-        correction_path = Path("/home/daravenrk/dragonlair/book_project/webui_correction.json")
-        correction = None
-        if correction_path.exists():
-            try:
-                with open(correction_path, "r", encoding="utf-8") as f:
-                    correction_data = json.load(f)
-                    correction = correction_data.get("correction")
-            except Exception:
-                correction = None
-        if correction:
-            # Inject correction into context and prompt for retry
-            last_publisher_prompt = publisher_qa_contract + f"\n\n[User Correction: {correction}]"
-        else:
-            # No correction available, break to avoid infinite loop
-            break
-        publisher_attempts += 1
+        append_run_event(
+            run_journal,
+            "publisher_revision_cycle",
+            {
+                "attempt": publisher_attempts,
+                "decision": decision,
+                "required_fixes": publisher_qa.get("required_fixes", []),
+            },
+        )
+
+        autofix_contract = build_contract(
+            role="Book Editor Recovery Agent",
+            objective="Revise the manuscript so publisher and continuity issues are corrected and the chapter can complete successfully.",
+            constraints=[
+                "Return markdown only",
+                "Apply all required_fixes and patch_tasks",
+                "Preserve chapter intent, canon, and factual continuity",
+                "Do not explain changes outside the manuscript",
+            ],
+            inputs={
+                "manuscript": current_manuscript,
+                "publisher_report": publisher_qa,
+                "continuity_report": continuity,
+                "chapter_spec": chapter_spec,
+                "rubric_report": rubric_report,
+            },
+            output_format="Markdown revised chapter ready for copy edit and proofreading",
+            failure_conditions=["required fixes omitted", "new contradictions introduced", "non-markdown response"],
+        )
+        revised_manuscript = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id=f"publisher_autofix_{publisher_attempts:02d}",
+            agent_name="book-editor",
+            profile_name=args.editor_profile,
+            prompt=autofix_contract,
+            output_path=dirs["drafts_ch"] / f"publisher_autofix_{publisher_attempts:02d}.md",
+            parse_json=False,
+            gate_fn=lambda text: (len(str(text).split()) >= int(args.writer_words * 0.65), "autofix manuscript too short"),
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        copy_edited = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id=f"publisher_autofix_copy_{publisher_attempts:02d}",
+            agent_name="book-copy-editor",
+            profile_name="book-copy-editor",
+            prompt=build_contract(
+                role="Copy Editor Agent",
+                objective="Correct grammar and mechanics after publisher-mandated revisions.",
+                constraints=["Return markdown only", "Preserve meaning", "Fix mechanics and consistency"],
+                inputs={"polished": revised_manuscript, "style_guide": canon_payload.get("style_guide", "")},
+                output_format="Markdown copy-edited chapter",
+                failure_conditions=["meaning drift", "new contradictions", "mechanical defects remain"],
+            ),
+            output_path=dirs["drafts_ch"] / f"publisher_autofix_copy_{publisher_attempts:02d}.md",
+            parse_json=False,
+            gate_fn=lambda text: (len(str(text).split()) >= int(args.writer_words * 0.65), "autofix copy-edited chapter too short"),
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        proofread = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id=f"publisher_autofix_proof_{publisher_attempts:02d}",
+            agent_name="book-proofreader",
+            profile_name="book-proofreader",
+            prompt=build_contract(
+                role="Proofreader Agent",
+                objective="Run final typo and punctuation repair after publisher revisions.",
+                constraints=["Return markdown only", "No structural rewrites", "No new facts"],
+                inputs={"copy_edited": copy_edited},
+                output_format="Markdown proofread chapter",
+                failure_conditions=["typos remain", "punctuation defects", "narrative changes introduced"],
+            ),
+            output_path=dirs["drafts_ch"] / f"publisher_autofix_proof_{publisher_attempts:02d}.md",
+            parse_json=False,
+            gate_fn=lambda text: (len(str(text).split()) >= int(args.writer_words * 0.65), "autofix proofread chapter too short"),
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        current_manuscript = proofread
+        continuity_contract = build_contract(
+            role="Continuity / QA Agent",
+            objective="Audit revised chapter for continuity and canon violations.",
+            constraints=["Return JSON only", "Include blocking_issues, warnings, patch_tasks"],
+            inputs={
+                "polished": current_manuscript,
+                "canon": canon_payload,
+                "open_loops": canon_payload.get("open_loops", []),
+                "rubric_report": rubric_report,
+            },
+            output_format='JSON with keys: blocking_issues, warnings, patch_tasks, summary',
+            failure_conditions=["invalid JSON", "missing issue lists", "non-actionable patches"],
+        )
+        continuity = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id=f"continuity_recheck_{publisher_attempts:02d}",
+            agent_name="book-continuity",
+            profile_name="book-continuity",
+            prompt=continuity_contract,
+            output_path=dirs["reviews"] / f"continuity_report_{publisher_attempts:02d}.json",
+            parse_json=True,
+            gate_fn=lambda obj: (isinstance(obj, dict) and "blocking_issues" in obj and "patch_tasks" in obj, "continuity report missing required fields"),
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+        )
+        last_publisher_prompt = build_contract(
+            role="Publisher QA Agent",
+            objective="Approve or request revision for final chapter output.",
+            constraints=["Return JSON only", "Set decision to APPROVE or REVISE", "Provide required_fixes"],
+            inputs={"polished": current_manuscript, "continuity_report": continuity, "chapter_spec": chapter_spec, "rubric_report": rubric_report},
+            output_format='JSON with keys: decision, scores, notes, required_fixes, summary',
+            failure_conditions=["invalid JSON", "missing decision", "missing required_fixes on REVISE"],
+        )
+
+    if publisher_qa and str(publisher_qa.get("decision", "")).upper() != "APPROVE":
+        forced_completion = True
+        append_run_event(
+            run_journal,
+            "forced_completion",
+            {
+                "publisher_attempts": publisher_attempts,
+                "final_decision": publisher_qa.get("decision"),
+            },
+        )
 
     # Persistent memory updates and final export
     chapter_summary = {
@@ -1774,13 +2524,60 @@ def run_flow(args):
     write_json(dirs["canon"] / "rolling_memory.json", rolling_memory)
     write_json(dirs["canon"] / "context_store.json", context_store)
 
-    write_text(dirs["final"] / "manuscript_v1.md", proofread)
-    write_text(dirs["final"] / "manuscript_v2.md", proofread)
+    arc_tracker_existing = read_json(arc_tracker_path, default={})
+    arc_tracker = update_arc_tracker(
+        arc_tracker_existing,
+        chapter_number=args.chapter_number,
+        chapter_title=args.chapter_title,
+        section_title=args.section_title,
+        next_writer_notes=next_writer_notes,
+        continuity_state=continuity_state,
+        canon_payload=canon_payload,
+        rubric_report=rubric_report,
+    )
+    write_json(arc_tracker_path, arc_tracker)
+
+    progress_index = read_json(progress_index_path, default={})
+    chapters = progress_index.get("completed_chapters") if isinstance(progress_index, dict) else []
+    chapters = chapters if isinstance(chapters, list) else []
+    chapters.append(
+        {
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+            "publisher_decision": publisher_qa.get("decision"),
+            "run_dir": str(run_dir),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    progress_index["completed_chapters"] = chapters
+    progress_index["last_run"] = str(run_dir)
+    progress_index["last_updated"] = datetime.utcnow().isoformat()
+    write_json(progress_index_path, progress_index)
+
+    write_agent_context_status(
+        agent_context_status_path,
+        {
+            "phase": "chapter_complete",
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+            "expectations": {
+                "publisher_decision": publisher_qa.get("decision"),
+                "open_loops": _normalize_list(canon_payload.get("open_loops")),
+                "next_unresolved_questions": _normalize_list(next_writer_notes.get("unresolved_questions")),
+            },
+        },
+    )
+
+    write_text(dirs["final"] / "manuscript_v1.md", current_manuscript)
+    write_text(dirs["final"] / "manuscript_v2.md", current_manuscript)
 
     validation = validate_required_artifacts(run_dir, expected_section_count=len(chapter_sections))
     summary = {
         "run_dir": str(run_dir),
         "book_root": str(book_root),
+        "framework_root": str(framework_root),
         "runs_root": str(runs_root),
         "title": args.title,
         "chapter_number": args.chapter_number,
@@ -1788,11 +2585,25 @@ def run_flow(args):
         "section_title": args.section_title,
         "section_count": len(chapter_sections),
         "publisher_decision": publisher_qa.get("decision"),
+        "publisher_attempts": publisher_attempts,
+        "forced_completion": forced_completion,
         "artifact_validation": validation,
         "merge_stats": merge_stats,
         "context_tracking_strategy": context_tracking_strategy,
         "changes_log": str(changes_log),
+        "run_journal": str(run_journal),
         "diagnostics_log": str(diagnostics_log) if diagnostics_log else None,
+        "framework_files": {
+            "framework_skeleton": str(framework_skeleton_path),
+            "arc_tracker": str(arc_tracker_path),
+            "progress_index": str(progress_index_path),
+            "agent_context_status": str(agent_context_status_path),
+        },
+        "agent_behavior_tracking": {
+            "quality_failures_log": str(orchestrator.quality_failures_log_path),
+            "reward_ledger": str(orchestrator.agent_rewards_path),
+            "reward_events": str(orchestrator.agent_reward_events_path),
+        },
         "verbose": bool(args.verbose),
     }
     write_json(run_dir / "run_summary.json", summary)
@@ -1802,6 +2613,16 @@ def run_flow(args):
     retro = build_retro_report(run_dir, summary)
     write_json(retro_dir / "retrospective.json", retro)
     write_text(retro_dir / "retrospective.md", build_retro_markdown(retro))
+    recent_quality_failures = load_recent_jsonl(orchestrator.quality_failures_log_path, limit=50)
+    write_json(retro_dir / "quality_failures_review.json", {
+        "source_log": str(orchestrator.quality_failures_log_path),
+        "count": len(recent_quality_failures),
+        "entries": recent_quality_failures,
+    })
+    write_text(
+        retro_dir / "quality_failures_review.md",
+        build_quality_failure_review_markdown(recent_quality_failures),
+    )
 
     parent_log_success = {
         "timestamp": datetime.utcnow().isoformat(),
@@ -1842,15 +2663,36 @@ def run_flow(args):
         }
         append_jsonl(changes_log, export_log)
     except Exception as export_err:
+        wrapped_export_err = BookExportError(
+            f"Book run export failed: {export_err}",
+            details={
+                "run_dir": str(run_dir),
+                "runs_root": str(runs_root),
+            },
+        )
         error_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "agent": "book-flow-parent",
             "action": "export_error",
-            "details": {"error": str(export_err)},
+            "details": {
+                "error": str(wrapped_export_err),
+                "error_code": wrapped_export_err.code,
+                "details": wrapped_export_err.details,
+            },
         }
         append_jsonl(changes_log, error_log)
 
     append_jsonl(changes_log, parent_log_success)
+    append_run_event(
+        run_journal,
+        "run_success",
+        {
+            "publisher_decision": publisher_qa.get("decision"),
+            "publisher_attempts": publisher_attempts,
+            "forced_completion": forced_completion,
+            "run_summary": str(run_dir / "run_summary.json"),
+        },
+    )
     print(json.dumps(summary, indent=2))
     return json.dumps(summary, indent=2)
 

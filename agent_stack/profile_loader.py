@@ -60,6 +60,8 @@ def _parse_frontmatter(frontmatter):
         parsed = _parse_float(data["temperature"])
         if parsed is not None:
             options["temperature"] = parsed
+    if "think" in data:
+        options["think"] = _parse_bool(data["think"])
     # Add num_gpus to options if present
     if "num_gpus" in data:
         parsed = _parse_int(data["num_gpus"])

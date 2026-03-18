@@ -25,9 +25,10 @@ services:
       AGENT_NVIDIA_ROUTE_NAME: "ollama_nvidia"
       AGENT_NVIDIA_ALLOW_MIXED_TINY_MODELS: "true"
       AGENT_NVIDIA_TINY_MAX_ACTIVE_MODELS: "2"
-      AGENT_NVIDIA_TINY_MODELS: "qwen3.5:4b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b"
+      AGENT_NVIDIA_TINY_MODELS: "qwen3.5:4b,qwen3.5:2b,qwen3.5:0.8b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b"
       AGENT_DEFAULT_MODEL_OLLAMA_AMD: "qwen3.5:27b"
       AGENT_DEFAULT_MODEL_OLLAMA_NVIDIA: "qwen3.5:4b"
+      AGENT_PROFILE_QUALITY_FALLBACKS: '{"book-proofreader":{"fallback_route":"ollama_nvidia","fallback_model":"qwen3.5:4b","min_chars":250,"min_ratio":0.3,"suspicious_phrases":["please provide","share the text","need the text","i need the chapter","as an ai"]},"book-copy-editor":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":300,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-line-editor":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":350,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-publisher":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:27b","min_chars":180,"required_terms":["APPROVE","REVISE"],"suspicious_phrases":["please provide","share the text","need the text","as an ai"]}}'
       AGENT_AMD_EPHEMERAL_OVERRIDE_ENABLED: "true"
       AGENT_AMD_EPHEMERAL_OVERRIDE_MODELS: "qwen2.5-coder:14b,qwen3.5:9b"
       AGENT_ENABLE_CROSS_ROUTE_FALLBACK: "false"
@@ -36,10 +37,11 @@ services:
       OPENCLAW_TOOL_PROFILE: "nvidia-lowlatency"
       OPENCLAW_PRIORITY_PROFILE: "nvidia-fast"
       OPENCLAW_PRIORITY_BY_DEFAULT: "true"
-      OPENCLAW_PRIORITY_MODELS: "qwen3.5:4b,dragonlair-active:latest"
-      OPENCLAW_MODEL_PROFILE_MAP: "{\"qwen3.5:4b\":\"nvidia-fast\",\"qwen2.5-coder:3b\":\"nvidia-lowlatency\",\"qwen3.5:27b\":\"amd-writer\",\"qwen2.5-coder:14b\":\"amd-longctx\",\"qwen3.5:9b\":\"amd-qwen35-9b-highctx\"}"
+      OPENCLAW_PRIORITY_MODELS: "qwen3.5:4b,qwen3.5:2b,qwen3.5:0.8b,dragonlair-active:latest"
+      OPENCLAW_MODEL_PROFILE_MAP: "{\"qwen3.5:4b\":\"nvidia-fast\",\"qwen3.5:2b\":\"joke-it-guy\",\"qwen3.5:0.8b\":\"joke-it-guy\",\"qwen2.5-coder:3b\":\"nvidia-lowlatency\",\"qwen3.5:27b\":\"amd-writer\",\"qwen2.5-coder:14b\":\"amd-longctx\",\"qwen3.5:9b\":\"amd-qwen35-9b-highctx\"}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - /home/daravenrk/dragonlair/agent_stack/agent_profiles:/app/agent_stack/agent_profiles:rw
       - /home/daravenrk/dragonlair/agent_stack/static:/app/agent_stack/static:rw
+      - /home/daravenrk/dragonlair/book_project:/home/daravenrk/dragonlair/book_project:rw

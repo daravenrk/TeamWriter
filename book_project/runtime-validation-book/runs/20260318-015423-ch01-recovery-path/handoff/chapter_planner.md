@@ -1,0 +1,84 @@
+# Stage Handoff: chapter_planner
+
+- Agent: book-chapter-planner
+- Profile: book-chapter-planner
+- Output Path: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/02_outline/chapter_specs/chapter_01.json
+- Recovered: False
+
+## LLM Response
+
+```json
+{
+  "chapter_number": 1,
+  "chapter_title": "Recovery Path",
+  "purpose": "To demonstrate the sequential progression through all gates of the orchestration pipeline, culminating in a verified resilient state under normal pressure.",
+  "target_words": 450,
+  "sections": [
+    {
+      "section_id": "s1",
+      "title": "Gate 1: Initialization",
+      "objective": "Establish the baseline system state with one active agent.",
+      "must_include": [
+        "System boot sequence",
+        "Confirmation of 1 running agent (qwen3.5:9b)",
+        "Handoff directory path: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff"
+      ],
+      "must_avoid": [
+        "Narrative digressions",
+        "Excessive jargon without context"
+      ]
+    },
+    {
+      "section_id": "s2",
+      "title": "Gate 2 & 3: Configuration & Dependencies",
+      "objective": "Verify stability and resolve all required dependencies.",
+      "must_include": [
+        "Configuration consistency check",
+        "Dependency resolution confirmation",
+        "Transition to active monitoring"
+      ],
+      "must_avoid": [
+        "Skipping verification steps"
+      ]
+    },
+    {
+      "section_id": "s3",
+      "title": "Gate 4 & 5: Startup & Health Check",
+      "objective": "Execute critical services and confirm health under normal pressure.",
+      "must_include": [
+        "Critical service startup",
+        "Comprehensive health checks",
+        "Final state: Pipeline verified, 0 failures"
+      ],
+      "must_avoid": [
+        "Incomplete health checks"
+      ]
+    },
+    {
+      "section_id": "s4",
+      "title": "Completion & Logging",
+      "objective": "Log the successful completion of the Recovery Path.",
+      "must_include": [
+        "Journal path reference: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl",
+        "Explicit confirmation of 'Recovery Path' goal completion"
+      ],
+      "must_avoid": [
+        "Missing journal reference"
+      ]
+    }
+  ],
+  "must_include": [
+    "Progression through all gates from Initialization to Recovery Path Completion",
+    "Explicit reference to the handoff directory",
+    "Explicit reference to the run journal path",
+    "Final resource state: Normal mode, 1 running agent, 0 failed agents"
+  ],
+  "must_avoid": [
+    "Prose outside the JSON structure",
+    "Word count exceeding 450 words",
+    "Any failure or error state in the final output",
+    "Vague descriptions of gate execution"
+  ],
+  "ending_hook": "The orchestration pipeline has successfully traversed all gates from Initialization to Recovery Path Completion. The system remains in Normal mode with one healthy agent (qwen3.5:9b) running, zero failures recorded, and the full verification log persisted at /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl. The Recovery Path section is complete."
+}
+```

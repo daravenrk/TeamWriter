@@ -1,0 +1,25 @@
+{
+  "title_working": "Interruption Drill Book",
+  "genre": "speculative fiction",
+  "audience": "adult",
+  "target_word_count": 125000,
+  "page_target": 450,
+  "tone": "cinematic and emotionally grounded",
+  "constraints": [
+    "Chapter 1 must establish the 'Interruption Path' mechanics within 500 words.",
+    "Total word count must not exceed 125,000 words by the final draft.",
+    "All chapter outputs must reference the arc_tracker.json for continuity validation.",
+    "Tone must remain consistent with 'cinematic and emotionally grounded' across all generated text.",
+    "Chapter 1 word count must not exceed 350 words as per writer_words input.",
+    "No plot holes or timeline inconsistencies allowed in the 'Interruption Path' section."
+  ],
+  "acceptance_criteria": [
+    "Chapter 1 text must be generated and saved to the specified run directory.",
+    "The generated text must be exactly 350 words or less.",
+    "The 'Interruption Path' section goal (exercise interruption detection and reconcile resume behavior) must be explicitly demonstrated in the text.",
+    "The output must update the progress_index.json to reflect Chapter 1 completion.",
+    "The arc_tracker.json must be updated to mark the 'Interruption Path' arc as active.",
+    "The framework_skeleton.json must be validated against the generated Chapter 1 content.",
+    "No JSON parsing errors or schema violations in the output."
+  ]
+}

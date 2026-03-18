@@ -1,0 +1,117 @@
+{
+  "updated_at": 1773805988.3003385,
+  "start_tokens": 6,
+  "max_tokens": 12,
+  "profiles": {
+    "amd-coder": {
+      "tokens": 6,
+      "created_at": 1773800074.0534172,
+      "updated_at": 1773800074.0534174
+    },
+    "amd-longctx": {
+      "tokens": 6,
+      "created_at": 1773800074.0534182,
+      "updated_at": 1773800074.0534184
+    },
+    "amd-qwen35-9b-highctx": {
+      "tokens": 6,
+      "created_at": 1773800074.0534186,
+      "updated_at": 1773800074.053419
+    },
+    "amd-writer": {
+      "tokens": 6,
+      "created_at": 1773800074.0534194,
+      "updated_at": 1773800074.0534194
+    },
+    "book-architect": {
+      "tokens": 11,
+      "created_at": 1773800074.0534198,
+      "updated_at": 1773805988.300338
+    },
+    "book-assembler": {
+      "tokens": 6,
+      "created_at": 1773800074.05342,
+      "updated_at": 1773800074.0534203
+    },
+    "book-canon": {
+      "tokens": 6,
+      "created_at": 1773800074.0534208,
+      "updated_at": 1773800074.0534208
+    },
+    "book-chapter-planner": {
+      "tokens": 9,
+      "created_at": 1773800074.053423,
+      "updated_at": 1773804718.4421988
+    },
+    "book-continuity": {
+      "tokens": 6,
+      "created_at": 1773800074.0534236,
+      "updated_at": 1773800074.0534236
+    },
+    "book-copy-editor": {
+      "tokens": 6,
+      "created_at": 1773800074.053424,
+      "updated_at": 1773800074.0534241
+    },
+    "book-developmental-editor": {
+      "tokens": 6,
+      "created_at": 1773800074.0534244,
+      "updated_at": 1773800074.0534244
+    },
+    "book-editor": {
+      "tokens": 6,
+      "created_at": 1773800074.0534248,
+      "updated_at": 1773800074.0534248
+    },
+    "book-line-editor": {
+      "tokens": 6,
+      "created_at": 1773800074.0534253,
+      "updated_at": 1773800074.0534256
+    },
+    "book-proofreader": {
+      "tokens": 6,
+      "created_at": 1773800074.0534256,
+      "updated_at": 1773800074.053426
+    },
+    "book-publisher": {
+      "tokens": 6,
+      "created_at": 1773800074.0534263,
+      "updated_at": 1773800074.0534263
+    },
+    "book-publisher-brief": {
+      "tokens": 12,
+      "created_at": 1773800074.0534265,
+      "updated_at": 1773805563.1450236
+    },
+    "book-researcher": {
+      "tokens": 11,
+      "created_at": 1773800074.0534267,
+      "updated_at": 1773805680.6979752
+    },
+    "book-writer": {
+      "tokens": 6,
+      "created_at": 1773800074.0534272,
+      "updated_at": 1773800074.0534272
+    },
+    "joke-it-guy": {
+      "tokens": 6,
+      "created_at": 1773800074.0534275,
+      "updated_at": 1773800074.0534275
+    },
+    "nvidia-fast": {
+      "tokens": 6,
+      "created_at": 1773800074.0534277,
+      "updated_at": 1773800074.053428
+    },
+    "nvidia-lowlatency": {
+      "tokens": 6,
+      "created_at": 1773800074.0534282,
+      "updated_at": 1773800074.0534282
+    },
+    "writing-assistant": {
+      "tokens": 6,
+      "created_at": 1773800074.0534284,
+      "updated_at": 1773800074.0534286
+    }
+  }
+}

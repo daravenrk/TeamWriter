@@ -1,6 +1,9 @@
 import json
 import os
 import time
+import queue
+import atexit
+import threading
 from typing import Optional
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,6 +15,58 @@ class EndpointPolicy:
     min_interval_seconds: float = 1.5
     max_inflight: int = 1
     wait_timeout_seconds: Optional[float] = 900.0
+
+
+class IntermediateLogAgent:
+    """Asynchronous log writer that avoids blocking request/shutdown paths."""
+
+    def __init__(self, lock_manager, max_queue=2048):
+        self.lock_manager = lock_manager
+        self.queue = queue.Queue(maxsize=max(1, int(max_queue)))
+        self.stop_event = threading.Event()
+        self.written_count = 0
+        self.dropped_count = 0
+        self.error_count = 0
+        self.worker = threading.Thread(target=self._run, name="dragonlair-log-agent", daemon=True)
+        self.worker.start()
+
+    def submit(self, log_path, entry):
+        try:
+            self.queue.put_nowait((str(log_path), entry))
+            return True
+        except queue.Full:
+            self.dropped_count += 1
+            return False
+
+    def _run(self):
+        while not self.stop_event.is_set() or not self.queue.empty():
+            try:
+                log_path, entry = self.queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                ok = self.lock_manager._write_log_entry_sync(log_path, entry)
+                if ok:
+                    self.written_count += 1
+                else:
+                    self.error_count += 1
+            except Exception:
+                self.error_count += 1
+            finally:
+                self.queue.task_done()
+
+    def stop(self, timeout_seconds=0.25):
+        self.stop_event.set()
+        self.worker.join(timeout=max(0.0, float(timeout_seconds)))
+
+    def stats(self):
+        return {
+            "queued": self.queue.qsize(),
+            "written": self.written_count,
+            "dropped": self.dropped_count,
+            "errors": self.error_count,
+            "alive": self.worker.is_alive(),
+        }
 
 
 class AgentLockManager:
@@ -28,6 +83,16 @@ class AgentLockManager:
         os.makedirs(self.lock_root, exist_ok=True)
         self.state_path = os.path.join(self.lock_root, "endpoint_state.json")
         self.state_lock_path = os.path.join(self.lock_root, "state.lock")
+        self.changelog_async_enabled = str(
+            os.environ.get("AGENT_CHANGELOG_ASYNC", "true")
+        ).lower() in {"1", "true", "yes", "on"}
+        self.changelog_lock_timeout_seconds = float(
+            os.environ.get("AGENT_CHANGELOG_LOCK_TIMEOUT_SECONDS", "0.05")
+        )
+        self.changelog_queue_max = max(
+            1,
+            int(os.environ.get("AGENT_CHANGELOG_QUEUE_MAX", "2048")),
+        )
         raw_allowed = str(
             os.environ.get(
                 "AGENT_CHANGELOG_ALLOWED_AGENTS",
@@ -35,6 +100,8 @@ class AgentLockManager:
             )
         )
         self.allowed_log_agents = {item.strip() for item in raw_allowed.split(",") if item.strip()}
+        self._log_agent = IntermediateLogAgent(self, max_queue=self.changelog_queue_max) if self.changelog_async_enabled else None
+        atexit.register(self._shutdown_log_agent)
 
     def _endpoint_key(self, endpoint):
         return endpoint.replace("://", "_").replace(":", "_").replace("/", "_")
@@ -73,8 +140,37 @@ class AgentLockManager:
             "lock_root": self.lock_root,
         }
 
+    def _shutdown_log_agent(self):
+        if self._log_agent is not None:
+            self._log_agent.stop(timeout_seconds=0.25)
+
+    def get_logging_runtime(self):
+        if self._log_agent is None:
+            return {
+                "async_enabled": False,
+                "lock_timeout_seconds": self.changelog_lock_timeout_seconds,
+            }
+        runtime = self._log_agent.stats()
+        runtime["async_enabled"] = True
+        runtime["lock_timeout_seconds"] = self.changelog_lock_timeout_seconds
+        return runtime
+
+    def _write_log_entry_sync(self, log_path, entry):
+        try:
+            os.makedirs(os.path.dirname(str(log_path)), exist_ok=True)
+            with self.edit_lock(
+                name="changes_log",
+                timeout_seconds=self.changelog_lock_timeout_seconds,
+                poll_seconds=0.01,
+            ):
+                with open(log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry) + "\n")
+            return True
+        except TimeoutError:
+            return False
+
     def log_agent_change(self, log_path, agent, action, details):
-        """Log an agent action to a shared changes log under a lock."""
+        """Log an agent action using non-blocking queue + best-effort write."""
         import datetime
 
         if self.allowed_log_agents and agent not in self.allowed_log_agents:
@@ -89,9 +185,11 @@ class AgentLockManager:
         }
 
         os.makedirs(os.path.dirname(str(log_path)), exist_ok=True)
-        with self.edit_lock(name="changes_log"):
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
+        if self._log_agent is not None and self._log_agent.submit(log_path, entry):
+            return
+
+        # Queue unavailable/full or async disabled: write best-effort with short lock timeout.
+        self._write_log_entry_sync(log_path, entry)
 
     @contextmanager
     def edit_lock(self, name="agent_edit", timeout_seconds=20.0, poll_seconds=0.1):

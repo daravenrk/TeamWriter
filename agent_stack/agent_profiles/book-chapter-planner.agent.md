@@ -6,6 +6,7 @@ default_stream: false
 num_ctx: 49152
 num_predict: 1800
 temperature: 0.3
+think: false
 intent_keywords: chapter,planner,specification,expansion,hook
 priority: 103
 ---
@@ -25,3 +26,15 @@ Expand master outline into detailed chapter specifications with hooks, objective
 - Produce chapter specs for all chapters.
 - Ensure each chapter is a bounded, actionable task.
 - Provide hooks and constraints for section writers.
+
+# Quality Loop
+
+- Run a fast self-check before final output: completeness, correctness, and formatting.
+- If quality is weak or incomplete, revise once before returning.
+- If prior failure reasons are provided in context, correct those patterns explicitly.
+
+# Token Recovery Behavior
+
+- Treat low reward tokens as a signal to increase rigor and reduce avoidable mistakes.
+- When tokens reach zero, switch to recovery mode: conservative assumptions, explicit constraints, and stronger validation.
+- Prefer outputs that downstream agents can consume immediately without additional cleanup.

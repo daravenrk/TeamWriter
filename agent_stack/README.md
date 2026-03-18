@@ -148,6 +148,18 @@ Environment variables:
 
 - `AGENT_SERVER_MODE=openclaw-client`
 
+Change-log lock best practices (non-blocking logging):
+
+- `AGENT_CHANGELOG_ASYNC=true` (default): enables intermediate async logging agent.
+- `AGENT_CHANGELOG_LOCK_TIMEOUT_SECONDS=0.05` (default): short lock wait for log writes.
+- `AGENT_CHANGELOG_QUEUE_MAX=2048` (default): bounded queue to avoid unbounded memory growth.
+
+Behavior:
+
+- Agent work enqueues change-log events and returns immediately when possible.
+- Log writer flushes in a background thread with short lock timeouts.
+- On shutdown, logger stops quickly (best-effort flush) so agent termination is not delayed.
+
 OpenClaw-compatible inbound endpoints (OpenAI-form) in openclaw-client mode:
 
 - `GET /v1/models`

@@ -1,0 +1,60 @@
+{
+  "book": {
+    "title": "Test Book Flight",
+    "genre": "speculative fiction",
+    "audience": "adult",
+    "tone": "cinematic and emotionally grounded",
+    "premise": "A test of the book flow pipeline",
+    "target_word_count": 125000,
+    "page_target": 450
+  },
+  "chapter": {
+    "number": 1,
+    "title": "Chapter One",
+    "section_title": "Opening",
+    "section_goal": "Introduce characters and setting",
+    "writer_words": 1400
+  },
+  "_handoff_dir": "/home/daravenrk/dragonlair/book_project/test-book-flight/runs/20260317-210814-ch01-opening/handoff",
+  "_resource_refs": {
+    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+  },
+  "_resource_snapshot": {},
+  "publisher_brief": {
+    "agent": "book-publisher-brief",
+    "profile": "book-publisher-brief",
+    "output_path": "/home/daravenrk/dragonlair/book_project/test-book-flight/runs/20260317-210814-ch01-opening/00_brief/book_brief.json",
+    "lock_after": {
+      "name": "changes_log",
+      "active": false,
+      "lock_root": "/tmp/dragonlair_agent_stack"
+    }
+  },
+  "permanent_memory": {
+    "book_brief": {
+      "title_working": "Test Book Flight",
+      "genre": "speculative fiction",
+      "audience": "adult",
+      "target_word_count": 125000,
+      "page_target": 450,
+      "tone": "cinematic and emotionally grounded",
+      "constraints": [
+        "Total manuscript must not exceed 130,000 words",
+        "Chapter 1 must not exceed 1,600 words",
+        "All chapters must maintain consistent POV alignment",
+        "Resource tracker must be updated after every chapter completion",
+        "WebUI state must reflect current chapter progress before handoff"
+      ],
+      "acceptance_criteria": [
+        "Chapter 1 word count is exactly 1,400 words",
+        "Chapter 1 introduces all primary characters by name and role",
+        "Chapter 1 establishes the core setting rules without exposition dumps",
+        "Resource tracker JSON shows 'status': 'completed' for chapter 1",
+        "WebUI state JSON contains 'currentChapter': 1 and 'status': 'draft'"
+      ]
+    }
+  }
+}

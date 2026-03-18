@@ -1,0 +1,314 @@
+{
+  "book": {
+    "title": "Runtime Validation Book",
+    "genre": "techno-thriller",
+    "audience": "adult",
+    "tone": "clear and grounded",
+    "premise": "A systems engineer verifies a resilient orchestration pipeline under stress.",
+    "target_word_count": 2000,
+    "page_target": 12
+  },
+  "chapter": {
+    "number": 1,
+    "title": "Smoke Test Chapter",
+    "section_title": "Recovery Path",
+    "section_goal": "Demonstrate progression through all gates and produce a complete section.",
+    "writer_words": 450
+  },
+  "_handoff_dir": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-023812-ch01-recovery-path/handoff",
+  "_run_journal_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-023812-ch01-recovery-path/run_journal.jsonl",
+  "_resource_refs": {
+    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+  },
+  "_framework_refs": {
+    "framework_skeleton": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/framework/framework_skeleton.json",
+    "arc_tracker": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/framework/arc_tracker.json",
+    "progress_index": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/framework/progress_index.json",
+    "agent_context_status": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/framework/agent_context_status.jsonl"
+  },
+  "_resource_snapshot": {
+    "generated_at": 1773801492.451988,
+    "reason": "status_payload",
+    "mode": "normal",
+    "switch": {
+      "mode": "normal",
+      "last_switch_at": 0.0
+    },
+    "pressure_mode": {
+      "active": false,
+      "last_depth": 0,
+      "last_update": 1773801482.2442455,
+      "mode": "normal"
+    },
+    "queue": {
+      "status_counts": {
+        "queued": 0,
+        "running": 2,
+        "completed": 0,
+        "failed": 0,
+        "cancelled": 0
+      },
+      "route_active_counts": {
+        "ollama_amd": 2
+      },
+      "model_active_counts": {
+        "qwen3.5:9b": 2
+      },
+      "nvidia_depth": 0
+    },
+    "agents": {
+      "summary": {
+        "idle": 2,
+        "running": 0,
+        "healthy": 0,
+        "hung": 0,
+        "failed": 0,
+        "hibernated": 0,
+        "quarantined": 0,
+        "total_agents": 2
+      },
+      "health": {
+        "server_mode": "openclaw-client",
+        "timeout_seconds": 180.0,
+        "heartbeat_timeout_seconds": 1125.0,
+        "route_timeout_seconds": {
+          "ollama_amd": 900.0,
+          "ollama_nvidia": 900.0
+        },
+        "route_max_inflight": {
+          "ollama_amd": 1,
+          "ollama_nvidia": 3
+        },
+        "endpoint_max_inflight": {
+          "ollama_amd": 1,
+          "ollama_nvidia": 3
+        },
+        "global_max_active": 3,
+        "logging_runtime": {
+          "queued": 0,
+          "written": 0,
+          "dropped": 0,
+          "errors": 0,
+          "alive": true,
+          "async_enabled": true,
+          "lock_timeout_seconds": 0.05
+        },
+        "enable_cross_route_fallback": false,
+        "quarantine_seconds": 60,
+        "hibernation": {
+          "enabled": true,
+          "idle_seconds": 240.0,
+          "store_path": "/home/daravenrk/dragonlair/book_project/agent_hibernation_state.json",
+          "unload_model": true
+        },
+        "rewards": {
+          "enabled": true,
+          "start_tokens": 6,
+          "max_tokens": 12,
+          "success_delta": 1,
+          "failure_delta": -1,
+          "depleted_profiles": [],
+          "profiles": {
+            "amd-coder": {
+              "tokens": 6,
+              "created_at": 1773800074.0534172,
+              "updated_at": 1773800074.0534174
+            },
+            "amd-longctx": {
+              "tokens": 6,
+              "created_at": 1773800074.0534182,
+              "updated_at": 1773800074.0534184
+            },
+            "amd-qwen35-9b-highctx": {
+              "tokens": 6,
+              "created_at": 1773800074.0534186,
+              "updated_at": 1773800074.053419
+            },
+            "amd-writer": {
+              "tokens": 6,
+              "created_at": 1773800074.0534194,
+              "updated_at": 1773800074.0534194
+            },
+            "book-architect": {
+              "tokens": 6,
+              "created_at": 1773800074.0534198,
+              "updated_at": 1773800074.0534198
+            },
+            "book-assembler": {
+              "tokens": 6,
+              "created_at": 1773800074.05342,
+              "updated_at": 1773800074.0534203
+            },
+            "book-canon": {
+              "tokens": 6,
+              "created_at": 1773800074.0534208,
+              "updated_at": 1773800074.0534208
+            },
+            "book-chapter-planner": {
+              "tokens": 6,
+              "created_at": 1773800074.053423,
+              "updated_at": 1773800074.0534232
+            },
+            "book-continuity": {
+              "tokens": 6,
+              "created_at": 1773800074.0534236,
+              "updated_at": 1773800074.0534236
+            },
+            "book-copy-editor": {
+              "tokens": 6,
+              "created_at": 1773800074.053424,
+              "updated_at": 1773800074.0534241
+            },
+            "book-developmental-editor": {
+              "tokens": 6,
+              "created_at": 1773800074.0534244,
+              "updated_at": 1773800074.0534244
+            },
+            "book-editor": {
+              "tokens": 6,
+              "created_at": 1773800074.0534248,
+              "updated_at": 1773800074.0534248
+            },
+            "book-line-editor": {
+              "tokens": 6,
+              "created_at": 1773800074.0534253,
+              "updated_at": 1773800074.0534256
+            },
+            "book-proofreader": {
+              "tokens": 6,
+              "created_at": 1773800074.0534256,
+              "updated_at": 1773800074.053426
+            },
+            "book-publisher": {
+              "tokens": 6,
+              "created_at": 1773800074.0534263,
+              "updated_at": 1773800074.0534263
+            },
+            "book-publisher-brief": {
+              "tokens": 6,
+              "created_at": 1773800074.0534265,
+              "updated_at": 1773800074.0534265
+            },
+            "book-researcher": {
+              "tokens": 6,
+              "created_at": 1773800074.0534267,
+              "updated_at": 1773800074.053427
+            },
+            "book-writer": {
+              "tokens": 6,
+              "created_at": 1773800074.0534272,
+              "updated_at": 1773800074.0534272
+            },
+            "joke-it-guy": {
+              "tokens": 6,
+              "created_at": 1773800074.0534275,
+              "updated_at": 1773800074.0534275
+            },
+            "nvidia-fast": {
+              "tokens": 6,
+              "created_at": 1773800074.0534277,
+              "updated_at": 1773800074.053428
+            },
+            "nvidia-lowlatency": {
+              "tokens": 6,
+              "created_at": 1773800074.0534282,
+              "updated_at": 1773800074.0534282
+            },
+            "writing-assistant": {
+              "tokens": 6,
+              "created_at": 1773800074.0534284,
+              "updated_at": 1773800074.0534286
+            }
+          },
+          "quality_failures_log": "/home/daravenrk/dragonlair/book_project/quality_gate_failures.jsonl",
+          "reward_ledger": "/home/daravenrk/dragonlair/book_project/agent_reward_ledger.json"
+        },
+        "agents": {
+          "ollama_amd": {
+            "state": "idle",
+            "last_heartbeat_at": null,
+            "last_started_at": null,
+            "last_completed_at": null,
+            "last_duration_seconds": null,
+            "last_error": null,
+            "current_profile": null,
+            "current_model": null,
+            "current_task_excerpt": null,
+            "last_system_prompt_excerpt": null,
+            "last_response_preview": null,
+            "hung_count": 0,
+            "failed_count": 0,
+            "success_count": 0,
+            "quarantined_until": 0.0,
+            "profile_tokens": null,
+            "token_depleted": false
+          },
+          "ollama_nvidia": {
+            "state": "idle",
+            "last_heartbeat_at": null,
+            "last_started_at": null,
+            "last_completed_at": null,
+            "last_duration_seconds": null,
+            "last_error": null,
+            "current_profile": null,
+            "current_model": null,
+            "current_task_excerpt": null,
+            "last_system_prompt_excerpt": null,
+            "last_response_preview": null,
+            "hung_count": 0,
+            "failed_count": 0,
+            "success_count": 0,
+            "quarantined_until": 0.0,
+            "profile_tokens": null,
+            "token_depleted": false
+          }
+        }
+      }
+    },
+    "references": {
+      "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+      "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+      "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+      "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+    }
+  },
+  "publisher_brief": {
+    "agent": "book-publisher-brief",
+    "profile": "book-publisher-brief",
+    "output_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-023812-ch01-recovery-path/00_brief/book_brief.json",
+    "lock_after": {
+      "name": "changes_log",
+      "active": false,
+      "lock_root": "/tmp/dragonlair_agent_stack"
+    },
+    "recovered": false
+  },
+  "permanent_memory": {
+    "book_brief": {
+      "title_working": "Runtime Validation Book",
+      "genre": "techno-thriller",
+      "audience": "adult",
+      "target_word_count": 2000,
+      "page_target": 12,
+      "tone": "clear and grounded",
+      "constraints": [
+        "Maintain strict continuity with existing arc_tracker.json and framework_skeleton.json.",
+        "Ensure Chapter 1 ('Smoke Test Chapter') adheres to the 'Recovery Path' section goal.",
+        "Do not exceed 450 words for this chapter output.",
+        "All technical systems referenced must match the active profiles in agent_context_status.jsonl.",
+        "Preserve the 'normal' mode state and ensure no pressure_mode activation."
+      ],
+      "acceptance_criteria": [
+        "Output must be a valid JSON object containing all required keys.",
+        "Chapter text must demonstrate progression through all gates as defined in the section_goal.",
+        "Word count must be between 400 and 460 words.",
+        "No narrative analysis or prose outside the JSON structure.",
+        "Continuity checks against arc_tracker.json must pass without flagging unresolved loops.",
+        "Next step must explicitly reference the handoff directory for downstream agent processing."
+      ]
+    }
+  }
+}

@@ -24,3 +24,15 @@ Maintain book's long-term memory, including canon, timeline, character profiles,
 - Provide structured memory for drafting agents.
 - Update canon artifacts after each chapter.
 - Prevent continuity drift and contradictions.
+
+# Quality Loop
+
+- Run a fast self-check before final output: completeness, correctness, and formatting.
+- If quality is weak or incomplete, revise once before returning.
+- If prior failure reasons are provided in context, correct those patterns explicitly.
+
+# Token Recovery Behavior
+
+- Treat low reward tokens as a signal to increase rigor and reduce avoidable mistakes.
+- When tokens reach zero, switch to recovery mode: conservative assumptions, explicit constraints, and stronger validation.
+- Prefer outputs that downstream agents can consume immediately without additional cleanup.

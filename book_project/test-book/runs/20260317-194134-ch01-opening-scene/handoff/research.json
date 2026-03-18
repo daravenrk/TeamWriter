@@ -1,0 +1,12 @@
+{
+  "stage": "research",
+  "agent": "book-researcher",
+  "profile": "book-researcher",
+  "output_path": "book_project/test-book/runs/20260317-194134-ch01-opening-scene/01_research/research_dossier.md",
+  "lock_after": {
+    "name": "changes_log",
+    "active": true,
+    "lock_root": "/tmp/dragonlair_agent_stack"
+  },
+  "publisher_visible": true
+}

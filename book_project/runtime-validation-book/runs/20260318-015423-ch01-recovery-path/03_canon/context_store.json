@@ -1,0 +1,185 @@
+{
+  "book": {
+    "title": "Runtime Validation Book",
+    "genre": "techno-thriller",
+    "audience": "adult",
+    "tone": "clear and grounded",
+    "premise": "A systems engineer verifies a resilient orchestration pipeline under stress.",
+    "target_word_count": 2000,
+    "page_target": 12
+  },
+  "chapter": {
+    "number": 1,
+    "title": "Smoke Test Chapter",
+    "section_title": "Recovery Path",
+    "section_goal": "Demonstrate progression through all gates and produce a complete section.",
+    "writer_words": 450
+  },
+  "_handoff_dir": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff",
+  "_run_journal_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl",
+  "_resource_refs": {
+    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+  },
+  "_resource_snapshot": {
+    "generated_at": 1773798863.540296,
+    "reason": "status_payload",
+    "mode": "normal",
+    "switch": {
+      "mode": "normal",
+      "last_switch_at": 0.0
+    },
+    "pressure_mode": {
+      "active": false,
+      "last_depth": 0,
+      "last_update": 1773798863.534404,
+      "mode": "normal"
+    },
+    "queue": {
+      "status_counts": {
+        "queued": 0,
+        "running": 1,
+        "completed": 0,
+        "failed": 0,
+        "cancelled": 0
+      },
+      "route_active_counts": {
+        "ollama_amd": 1
+      },
+      "model_active_counts": {
+        "qwen3.5:9b": 1
+      },
+      "nvidia_depth": 0
+    },
+    "agents": {
+      "summary": {
+        "idle": 2,
+        "running": 0,
+        "healthy": 0,
+        "hung": 0,
+        "failed": 0,
+        "hibernated": 0,
+        "quarantined": 0,
+        "total_agents": 2
+      },
+      "health": {
+        "server_mode": "openclaw-client",
+        "timeout_seconds": 180.0,
+        "heartbeat_timeout_seconds": 1125.0,
+        "route_timeout_seconds": {
+          "ollama_amd": 900.0,
+          "ollama_nvidia": 900.0
+        },
+        "route_max_inflight": {
+          "ollama_amd": 1,
+          "ollama_nvidia": 3
+        },
+        "endpoint_max_inflight": {
+          "ollama_amd": 1,
+          "ollama_nvidia": 3
+        },
+        "global_max_active": 3,
+        "logging_runtime": {
+          "queued": 0,
+          "written": 0,
+          "dropped": 0,
+          "errors": 0,
+          "alive": true,
+          "async_enabled": true,
+          "lock_timeout_seconds": 0.05
+        },
+        "enable_cross_route_fallback": false,
+        "quarantine_seconds": 60,
+        "hibernation": {
+          "enabled": true,
+          "idle_seconds": 240.0,
+          "store_path": "/home/daravenrk/dragonlair/book_project/agent_hibernation_state.json",
+          "unload_model": true
+        },
+        "agents": {
+          "ollama_amd": {
+            "state": "idle",
+            "last_heartbeat_at": null,
+            "last_started_at": null,
+            "last_completed_at": null,
+            "last_duration_seconds": null,
+            "last_error": null,
+            "current_profile": null,
+            "current_model": null,
+            "current_task_excerpt": null,
+            "last_system_prompt_excerpt": null,
+            "last_response_preview": null,
+            "hung_count": 0,
+            "failed_count": 0,
+            "success_count": 0,
+            "quarantined_until": 0.0
+          },
+          "ollama_nvidia": {
+            "state": "idle",
+            "last_heartbeat_at": null,
+            "last_started_at": null,
+            "last_completed_at": null,
+            "last_duration_seconds": null,
+            "last_error": null,
+            "current_profile": null,
+            "current_model": null,
+            "current_task_excerpt": null,
+            "last_system_prompt_excerpt": null,
+            "last_response_preview": null,
+            "hung_count": 0,
+            "failed_count": 0,
+            "success_count": 0,
+            "quarantined_until": 0.0
+          }
+        }
+      }
+    },
+    "references": {
+      "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
+      "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
+      "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
+      "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
+    }
+  },
+  "publisher_brief": {
+    "agent": "book-publisher-brief",
+    "profile": "book-publisher-brief",
+    "output_path": "/home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/00_brief/book_brief.json",
+    "lock_after": {
+      "name": "changes_log",
+      "active": false,
+      "lock_root": "/tmp/dragonlair_agent_stack"
+    },
+    "recovered": false
+  },
+  "permanent_memory": {
+    "book_brief": {
+      "title_working": "runtime-validation-book-ch01-recovery-path",
+      "genre": "techno-thriller",
+      "audience": "adult",
+      "target_word_count": 2000,
+      "page_target": 12,
+      "tone": "clear and grounded",
+      "constraints": [
+        "Chapter must demonstrate progression through all gates in the orchestration pipeline.",
+        "Chapter must produce a complete section titled 'Recovery Path'.",
+        "Writer word count must not exceed 450 words.",
+        "Content must align with the premise of a systems engineer verifying a resilient pipeline under stress.",
+        "Tone must remain clear and grounded, avoiding excessive jargon without context.",
+        "Resource state must reflect normal mode with 1 running agent (qwen3.5:9b) and 0 failed agents.",
+        "Handoff directory must be: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff",
+        "Run journal must be logged to: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl"
+      ],
+      "acceptance_criteria": [
+        "Output contains exactly 450 words or fewer.",
+        "Output explicitly references the recovery path progression.",
+        "Output confirms completion of the 'Recovery Path' section goal.",
+        "Output does not contain any prose outside the JSON structure.",
+        "Output is valid JSON parseable by downstream agents.",
+        "Output references resource paths: /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/handoff and /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-015423-ch01-recovery-path/run_journal.jsonl"
+      ]
+    }
+  }
+}

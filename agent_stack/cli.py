@@ -5,6 +5,19 @@ import sys
 import time
 from urllib import request
 
+# Additional imports for output saving and logging
+import datetime
+import pathlib
+import re
+import traceback
+
+# Helper for slugifying prompt text for directory names
+def slugify(text):
+    lowered = text.strip().lower()
+    lowered = re.sub(r"[^a-z0-9]+", "-", lowered)
+    lowered = re.sub(r"-+", "-", lowered).strip("-")
+    return lowered or "code-run"
+
 from .orchestrator import OrchestratorAgent
 
 
@@ -58,12 +71,90 @@ def cmd_plan(orchestrator, prompt, profile, stream):
 
 
 def cmd_once(orchestrator, prompt, profile, stream):
-    response = orchestrator.handle_request_with_overrides(
-        prompt,
-        profile_name=profile,
-        stream_override=stream,
-        on_stream=_print_stream if stream else None,
-    )
+    # Generate slug for prompt
+    start_time = datetime.datetime.utcnow()
+    timestamp = start_time.strftime("%Y-%m-%dT%H-%M-%SZ")
+    slug = slugify(prompt)[:32]
+    run_id = f"{timestamp}-{slug}"
+    out_dir = pathlib.Path(__file__).resolve().parent / "code_runs" / run_id
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"[ERROR] Could not create output directory: {out_dir}\n{e}")
+        traceback.print_exc()
+        return
+
+    try:
+        response = orchestrator.handle_request_with_overrides(
+            prompt,
+            profile_name=profile,
+            stream_override=stream,
+            on_stream=_print_stream if stream else None,
+        )
+    except Exception as e:
+        print(f"[ERROR] Orchestrator failed: {e}")
+        traceback.print_exc()
+        response = f"[ERROR] Orchestrator failed: {e}"
+
+    # Save main output
+    try:
+        result_file = out_dir / "result.txt"
+        if isinstance(response, str):
+            result_file.write_text(response)
+            result_preview = response[:200]
+            output_size_bytes = len(response.encode("utf-8"))
+        else:
+            # fallback for non-str outputs
+            result_file.write_text(str(response))
+            result_preview = str(response)[:200]
+            output_size_bytes = len(str(response).encode("utf-8"))
+        print(f"[INFO] Saved result to {result_file}")
+    except Exception as e:
+        print(f"[ERROR] Could not write result.txt: {e}")
+        traceback.print_exc()
+        result_preview = str(response)[:200]
+        output_size_bytes = 0
+
+    # Save metadata
+    try:
+        meta = {
+            "timestamp": timestamp,
+            "agent": profile or "amd-coder",
+            "profile": profile or "amd-coder",
+            "request": {
+                "prompt": prompt,
+                "parameters": {}
+            },
+            "result_file": "result.txt",
+            "result_preview": result_preview,
+            "status": "completed" if not str(response).startswith("[ERROR]") else "error",
+            "error": None if not str(response).startswith("[ERROR]") else str(response),
+            "run_id": run_id,
+            "parent_task": None,
+            "extra": {
+                "duration_seconds": (datetime.datetime.utcnow() - start_time).total_seconds(),
+                "output_size_bytes": output_size_bytes
+            }
+        }
+        meta_file = out_dir / "metadata.json"
+        meta_file.write_text(json.dumps(meta, indent=2))
+        print(f"[INFO] Saved metadata to {meta_file}")
+    except Exception as e:
+        print(f"[ERROR] Could not write metadata.json: {e}")
+        traceback.print_exc()
+
+    # Save collaborative Markdown log
+    try:
+        md_file = out_dir / "collab_log.md"
+        md_file.write_text(f"""# Code Run Log: {run_id}\n\n- **Timestamp:** {timestamp}\n- **Agent/Profile:** {profile or 'amd-coder'}\n- **Prompt:** {prompt[:120]}{'...' if len(prompt) > 120 else ''}\n- **Status:** {'completed' if not str(response).startswith('[ERROR]') else 'error'}\n- **Output Preview:**\n\n```
+{result_preview}
+```
+\n---\n\n*This log is auto-generated for audit and collaboration. See metadata.json for full details.*\n""")
+        print(f"[INFO] Saved collaborative log to {md_file}")
+    except Exception as e:
+        print(f"[ERROR] Could not write collab_log.md: {e}")
+        traceback.print_exc()
+
     if stream:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -72,31 +163,18 @@ def cmd_once(orchestrator, prompt, profile, stream):
 
 
 def cmd_chat(orchestrator, profile, stream):
-    print("Dragonlair Agent CLI chat mode. Type /help for commands, /quit to exit.")
+    print("Entering chat mode. Type 'exit' or 'quit' to leave.")
     while True:
         try:
-            prompt = input("> ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print()
+            prompt = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting chat mode.")
             break
-
         if not prompt:
             continue
-        if prompt in {"/quit", "/exit"}:
+        if prompt.lower() in {"exit", "quit"}:
+            print("Exiting chat mode.")
             break
-        if prompt == "/help":
-            print("/quit /exit /help /health /profiles /plan <text>")
-            continue
-        if prompt == "/health":
-            cmd_health(orchestrator)
-            continue
-        if prompt == "/profiles":
-            cmd_profiles(orchestrator)
-            continue
-        if prompt.startswith("/plan "):
-            cmd_plan(orchestrator, prompt[6:].strip(), profile, stream)
-            continue
-
         response = orchestrator.handle_request_with_overrides(
             prompt,
             profile_name=profile,
@@ -109,11 +187,9 @@ def cmd_chat(orchestrator, profile, stream):
         else:
             print(response)
 
-
 def cmd_server_status(api_url):
     data = _api_get(api_url, "/api/status")
     print(json.dumps(data, indent=2))
-
 
 def cmd_server_watch(api_url, interval):
     while True:
@@ -183,7 +259,7 @@ def main():
     submit_p.add_argument("--direction", default=None, help="Steering direction text")
     submit_p.add_argument("--profile", dest="submit_profile", default=None, help="Profile override")
 
-    cancel_parser = subparsers.add_parser("cancel", help="Cancel a running or queued task by task_id")
+    cancel_parser = sub.add_parser("cancel", help="Cancel a running or queued task by task_id")
     cancel_parser.add_argument("task_id", help="Task ID to cancel")
 
     args = parser.parse_args()
@@ -191,43 +267,43 @@ def main():
     if args.stream and args.no_stream:
         raise SystemExit("Use either --stream or --no-stream, not both")
 
-    stream = None
-    if args.stream:
-        stream = True
-    elif args.no_stream:
+    stream = True if args.stream else None
+    if args.no_stream:
         stream = False
-
-    orchestrator = OrchestratorAgent()
-
-    if args.command == "profiles":
-        cmd_profiles(orchestrator)
-        return
-    if args.command == "health":
-        cmd_health(orchestrator)
-        return
-    if args.command == "plan":
-        cmd_plan(orchestrator, args.prompt, args.profile, stream)
-        return
-    if args.command == "once":
-        cmd_once(orchestrator, args.prompt, args.profile, stream)
-        return
-    if args.command == "chat":
-        cmd_chat(orchestrator, args.profile, stream)
-        return
-    if args.command == "server-status":
-        cmd_server_status(args.api_url)
-        return
-    if args.command == "server-watch":
-        cmd_server_watch(args.api_url, args.interval)
-        return
-    if args.command == "server-submit":
-        profile = args.submit_profile if getattr(args, "submit_profile", None) else args.profile
-        cmd_server_submit(args.api_url, args.prompt, args.direction, profile)
-        return
     if args.command == "cancel":
         cmd_cancel(args.api_url, args.task_id)
         return
-
+    elif args.command == "once":
+        # Import OrchestratorAgent here to avoid circular import if needed
+        orchestrator = OrchestratorAgent()
+        cmd_once(orchestrator, args.prompt, args.profile, stream)
+        return
+    elif args.command == "profiles":
+        orchestrator = OrchestratorAgent()
+        cmd_profiles(orchestrator)
+        return
+    elif args.command == "health":
+        orchestrator = OrchestratorAgent()
+        cmd_health(orchestrator)
+        return
+    elif args.command == "plan":
+        orchestrator = OrchestratorAgent()
+        cmd_plan(orchestrator, args.prompt, args.profile, stream)
+        return
+    elif args.command == "server-status":
+        cmd_server_status(args.api_url)
+        return
+    elif args.command == "server-watch":
+        cmd_server_watch(args.api_url, args.interval)
+        return
+    elif args.command == "server-submit":
+        profile = args.submit_profile if getattr(args, "submit_profile", None) else args.profile
+        cmd_server_submit(args.api_url, args.prompt, args.direction, profile)
+        return
+    elif args.command == "chat":
+        orchestrator = OrchestratorAgent()
+        cmd_chat(orchestrator, args.profile, stream)
+        return
     raise SystemExit(f"Unknown command: {args.command}")
 
 

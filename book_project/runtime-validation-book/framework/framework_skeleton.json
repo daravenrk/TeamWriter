@@ -1,0 +1,142 @@
+{
+  "book_identity": {
+    "title_working": "Runtime Validation Book",
+    "genre": "techno-thriller",
+    "audience": "adult",
+    "tone": "clear and grounded",
+    "target_word_count": 2000,
+    "page_target": 12
+  },
+  "design_framework": {
+    "constraints": [
+      "Chapter 1 must demonstrate the full progression through all orchestration gates.",
+      "Section 'Recovery Path' must conclude with a verified complete state.",
+      "Word count for Chapter 1 must not exceed 450 words.",
+      "All technical terms must be defined inline to maintain 'clear and grounded' tone.",
+      "Continuity with Chapter 0 must be verified via arc_tracker.json before drafting.",
+      "No plot holes regarding the resilience pipeline logic."
+    ],
+    "acceptance_criteria": [
+      "Output file at /home/daravenrk/dragonlair/book_project/runtime-validation-book/runs/20260318-031001-ch01-recovery-path/chapter_01_draft.json",
+      "Draft word count between 400 and 450 words.",
+      "arc_tracker.json updated with Chapter 1 completion status and next milestone.",
+      "progress_index.json incremented for Chapter 1.",
+      "No references to unresolved arcs from previous chapters.",
+      "All gate states in the narrative match the 'completed' or 'verified' status defined in the premise."
+    ],
+    "book_structure": {
+      "title": "Runtime Validation Book",
+      "genre": "techno-thriller",
+      "total_chapters": 3,
+      "target_word_count": 2000,
+      "acts": [
+        {
+          "act_number": 1,
+          "name": "The Initialization Sequence",
+          "chapters": [
+            {
+              "chapter_number": 1,
+              "title": "Smoke Test Chapter",
+              "word_count_target": 425,
+              "gates_covered": [
+                0,
+                1,
+                2,
+                3,
+                4
+              ],
+              "gate_definitions_required": true,
+              "continuity_source": "arc_tracker.json",
+              "status": "planned"
+            }
+          ],
+          "milestone": "Gate 4 Triggered"
+        },
+        {
+          "act_number": 2,
+          "name": "The Recovery Path",
+          "chapters": [
+            {
+              "chapter_number": 2,
+              "title": "Resilience Activation",
+              "word_count_target": 650,
+              "focus": "Gate 4 Execution",
+              "continuity_source": "arc_tracker.json",
+              "status": "planned"
+            }
+          ],
+          "milestone": "System Stabilization"
+        },
+        {
+          "act_number": 3,
+          "name": "Validation and Closure",
+          "chapters": [
+            {
+              "chapter_number": 3,
+              "title": "Verified State",
+              "word_count_target": 925,
+              "focus": "Recovery Path Conclusion",
+              "continuity_source": "arc_tracker.json",
+              "status": "planned"
+            }
+          ],
+          "milestone": "Verified Complete State"
+        }
+      ],
+      "unresolved_arcs": [],
+      "technical_terms_to_define": [
+        "Orchestration Gates",
+        "Resilience Pipeline Logic"
+      ]
+    },
+    "master_outline_markdown": "# Master Outline: Runtime Validation Book\n\n## Act I: The Initialization Sequence\n**Premise**: The system enters a critical state requiring full orchestration validation to ensure resilience pipeline integrity.\n**Goal**: Demonstrate the sequential progression through all four orchestration gates (Initialization, Authentication, Authorization, Data Integrity) to establish a verified baseline for recovery.\n\n### Chapter 1: Smoke Test Chapter\n**Focus**: Execution of Gates 0-3 and the trigger for Gate 4.\n**Key Events**:\n1. **Gate 0 (Initialization)**: System boots, loading core resilience modules. *Definition*: The act of bringing dormant components to an active state.\n2. **Gate 1 (Authentication)**: User credentials are validated against internal security protocols. *Definition*: The verification of identity to prevent unauthorized entry.\n3. **Gate 2 (Authorization)**: Role-based access control determines operational permissions. *Definition*: The process of granting specific privileges based on verified identity.\n4. **Gate 3 (Data Integrity Check)**: Algorithms scan data consistency to ensure no corruption exists. *Definition*: The logical verification that data remains unaltered and coherent.\n5. **Gate 4 Trigger**: Upon successful passage of Gates 0-3, the system initiates the Recovery Execution protocol.\n**Word Count Constraint**: Strictly between 400 and 450 words.\n**Tone**: Clear, grounded, technical but accessible.\n\n## Act II: The Recovery Path\n**Premise**: The system has passed validation and is now executing the recovery procedures defined in the resilience pipeline logic.\n**Goal**: Complete the Recovery Path to a verified state, ensuring no unresolved arcs from previous chapters remain.\n\n### Chapter 2: Resilience Activation\n**Focus**: Execution of Gate 4 and stabilization of the system.\n**Key Events**:\n1. **Gate 4 (Recovery Execution)**: Active recovery procedures begin, utilizing the logic established in Chapter 1.\n2. **State Verification**: Confirmation that the system has reached a 'complete' state.\n**Continuity Check**: Must reference the 'completed' status of Gates 0-3 from Chapter 1 without introducing new unresolved plot holes.\n\n## Act III: Validation and Closure\n**Premise**: The system is stable; the narrative arc concludes with a confirmed operational state.\n**Goal**: Finalize the book structure, ensuring all technical terms are defined and the reader understands the resilience pipeline's function.\n\n### Chapter 3: Verified State\n**Focus**: Conclusion of the Recovery Path.\n**Key Events**:\n1. Final status report confirming the system is operational.\n2. Explicit definition of 'Orchestration Gates' and 'Resilience Pipeline Logic' as the core mechanisms of the story.\n**Acceptance Criteria**: Section 'Recovery Path' concludes with a verified complete state.\n"
+  },
+  "chapter_skeleton": {
+    "chapter_number": 1,
+    "chapter_title": "Smoke Test Chapter",
+    "purpose": "Execute the sequential validation of the resilience pipeline by progressing through Initialization, Authentication, Authorization, and Data Integrity gates to trigger the Recovery Execution protocol.",
+    "ending_hook": "The Recovery Execution protocol has been successfully initiated, and the system is now in the active recovery phase, awaiting stabilization confirmation.",
+    "target_words": 425,
+    "sections": [
+      {
+        "index": 1,
+        "title": "Initialization Gate",
+        "goal": ""
+      },
+      {
+        "index": 2,
+        "title": "Authentication Gate",
+        "goal": ""
+      },
+      {
+        "index": 3,
+        "title": "Authorization Gate",
+        "goal": ""
+      },
+      {
+        "index": 4,
+        "title": "Data Integrity Gate",
+        "goal": ""
+      },
+      {
+        "index": 5,
+        "title": "Recovery Execution Trigger",
+        "goal": ""
+      }
+    ],
+    "must_include": [
+      "Explicit inline definitions for 'Initialization', 'Authentication', 'Authorization', 'Data Integrity', and 'Recovery Execution'.",
+      "Narrative progression showing the direct cause-and-effect relationship between gate completion and the next gate's activation.",
+      "Confirmation that Gate 4 is triggered only after Gates 0-3 are fully processed.",
+      "Reference to the 'arc_tracker.json' confirming Gate 0-3 states as 'completed'."
+    ],
+    "must_avoid": [
+      "Detailed exposition on the internal logic of the algorithms (keep it high-level to fit word count).",
+      "Introduction of new conflicts or unresolved arcs.",
+      "Exceeding the 450-word limit.",
+      "Referencing unresolved arcs from previous chapters (none exist per current state).",
+      "Ambiguous gate statuses (must be 'completed' or 'verified')."
+    ]
+  },
+  "generated_at": "2026-03-18T03:29:41.986580"
+}

@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-03-17T18-06-47Z",
+  "agent": "amd-coder",
+  "profile": "amd-coder",
+  "request": {
+    "prompt": "smoke test artifact generation",
+    "parameters": {}
+  },
+  "result_file": "result.txt",
+  "result_preview": "FAKE RESPONSE for: smoke test artifact generation",
+  "status": "completed",
+  "error": null,
+  "run_id": "2026-03-17T18-06-47Z-smoke-test-artifact-generation",
+  "parent_task": null,
+  "extra": {
+    "duration_seconds": 0.001459,
+    "output_size_bytes": 49
+  }
+}

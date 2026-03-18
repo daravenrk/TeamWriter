@@ -1,0 +1,36 @@
+# Stage Handoff: publisher_brief
+
+- Agent: book-publisher-brief
+- Profile: book-publisher-brief
+- Output Path: /home/daravenrk/dragonlair/book_project/interruption-drill-book/runs/20260318-023649-ch01-interruption-path/00_brief/book_brief.json
+- Recovered: False
+
+## LLM Response
+
+```json
+{
+  "title_working": "Interruption Drill Book",
+  "genre": "speculative fiction",
+  "audience": "adult",
+  "target_word_count": 125000,
+  "page_target": 450,
+  "tone": "cinematic and emotionally grounded",
+  "constraints": [
+    "Chapter 1 must establish the 'Interruption Path' mechanics within 300 words.",
+    "Total word count must not exceed 125,000 words.",
+    "Page count must remain within 400-475 pages.",
+    "Tone must maintain cinematic pacing without excessive exposition.",
+    "All chapter outputs must reference framework_skeleton.json for arc alignment.",
+    "Continuity checks must pass against arc_tracker.json before chapter finalization.",
+    "Resource utilization must respect ollama_amd limits (max_inflight: 1) as per agent_context_status.jsonl."
+  ],
+  "acceptance_criteria": [
+    "Chapter 1 draft submitted with word count between 300 and 400 words.",
+    "Chapter 1 text explicitly references the 'Interruption Path' section goal.",
+    "No narrative contradictions found in arc_tracker.json upon review.",
+    "JSON output for this stage contains no missing keys or placeholder values.",
+    "Next step: Generate Chapter 2 outline based on Chapter 1's resolved interruption state.",
+    "Resource queue status must show 'running' count <= 1 for ollama_amd before proceeding."
+  ]
+}
+```

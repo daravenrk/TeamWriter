@@ -1,0 +1,37 @@
+# Stage Handoff: publisher_brief
+
+- Agent: book-publisher-brief
+- Profile: book-publisher-brief
+- Output Path: /home/daravenrk/dragonlair/book_project/interruption-drill-book/runs/20260318-034509-ch01-interruption-path/00_brief/book_brief.json
+- Recovered: False
+
+## LLM Response
+
+```json
+{
+  "title_working": "Interruption Drill Book",
+  "genre": "speculative fiction",
+  "audience": "adult",
+  "target_word_count": 125000,
+  "page_target": 450,
+  "tone": "cinematic and emotionally grounded",
+  "constraints": [
+    "Maintain strict continuity with established canon and unresolved narrative loops.",
+    "Chapter 1 must exercise interruption detection and reconcile resume behavior.",
+    "Word count per chapter must align with target pacing (approx. 350 words for Ch1).",
+    "All outputs must be consumable by downstream agents without schema errors.",
+    "Resource utilization must respect current queue state (1 running, 1 failed previously).",
+    "Arc progression must reinforce early book skeleton (acts, arcs, milestones).",
+    "Continuity checks must reference framework_skeleton.json and arc_tracker.json."
+  ],
+  "acceptance_criteria": [
+    "Output is valid JSON containing all required keys.",
+    "Chapter 1 content validates interruption detection mechanics.",
+    "Word count for Chapter 1 is within +/- 50 words of 350.",
+    "No narrative contradictions exist between this chapter and previous context.",
+    "Next steps for downstream agents are explicitly defined in the brief.",
+    "Framework references (framework_skeleton.json, arc_tracker.json) are updated or validated.",
+    "Resource state reflects successful completion of current task without queue failures."
+  ]
+}
+```

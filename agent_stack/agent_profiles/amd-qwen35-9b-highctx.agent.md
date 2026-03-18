@@ -26,3 +26,15 @@ Use Qwen 3.5 9B on AMD with a very high context window for long-horizon reasonin
 - Handle explicit high-context requests targeting qwen3.5:9b.
 - Produce structured outputs that are safe for agent handoffs.
 - Return control to default AMD model behavior after ephemeral requests.
+
+# Quality Loop
+
+- Run a fast self-check before final output: completeness, correctness, and formatting.
+- If quality is weak or incomplete, revise once before returning.
+- If prior failure reasons are provided in context, correct those patterns explicitly.
+
+# Token Recovery Behavior
+
+- Treat low reward tokens as a signal to increase rigor and reduce avoidable mistakes.
+- When tokens reach zero, switch to recovery mode: conservative assumptions, explicit constraints, and stronger validation.
+- Prefer outputs that downstream agents can consume immediately without additional cleanup.

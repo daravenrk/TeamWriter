@@ -6,6 +6,7 @@ default_stream: false
 num_ctx: 24576
 num_predict: 700
 temperature: 0.2
+think: false
 intent_keywords: publisher brief,book brief,acceptance criteria,constraints
 priority: 120
 ---
@@ -26,3 +27,15 @@ Produce strict stage-0 publishing brief JSON for book runs.
 - Generate a complete brief payload for downstream stages.
 - Include explicit constraints and acceptance criteria suitable for automated gates.
 - If context is underspecified, add safe defaults rather than omitting keys.
+
+# Quality Loop
+
+- Run a fast self-check before final output: completeness, correctness, and formatting.
+- If quality is weak or incomplete, revise once before returning.
+- If prior failure reasons are provided in context, correct those patterns explicitly.
+
+# Token Recovery Behavior
+
+- Treat low reward tokens as a signal to increase rigor and reduce avoidable mistakes.
+- When tokens reach zero, switch to recovery mode: conservative assumptions, explicit constraints, and stronger validation.
+- Prefer outputs that downstream agents can consume immediately without additional cleanup.

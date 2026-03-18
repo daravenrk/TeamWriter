@@ -1,0 +1,15 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local logs and debug outputs
+*.log
+book_test_output.log
+book_flow_rerun.log
+
+# Ad-hoc backup artifacts
+*.bak-*
+*.bak
+
+# VS Code server artifacts (outside repo root typically, keep safe)
+.vscode-server/

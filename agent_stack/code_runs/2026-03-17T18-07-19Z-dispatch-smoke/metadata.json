@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-03-17T18-07-19Z",
+  "agent": "amd-coder",
+  "profile": "amd-coder",
+  "request": {
+    "prompt": "dispatch smoke",
+    "parameters": {}
+  },
+  "result_file": "result.txt",
+  "result_preview": "fake-response-ok",
+  "status": "completed",
+  "error": null,
+  "run_id": "2026-03-17T18-07-19Z-dispatch-smoke",
+  "parent_task": null,
+  "extra": {
+    "duration_seconds": 0.000332,
+    "output_size_bytes": 16
+  }
+}
