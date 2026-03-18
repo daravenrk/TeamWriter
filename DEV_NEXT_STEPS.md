@@ -418,6 +418,11 @@ These should be completed once publisher outputs successfully:
   - Execute a full chapter run with current retries/fallbacks and capture run journal + diagnostics
   - Confirm schema validation failures surface actionable gate messages and recover through retries when possible
   - Record pass/fail results and next fixes back into `DEV_NEXT_STEPS.md`
+  - **Current run-dir behavior (verified in code on 2026-03-18)**:
+    - `book_flow.py` does **not** clear prior run artifacts at run start.
+    - It creates a stable per-book root at `book_project/<slug>/`, preserves `framework/` and `book_history.jsonl`, and creates a **new timestamped** run dir under `runs/<timestamp>-chNN-<section-slug>/` for each invocation.
+    - This is useful for audit/history, but it means isolated validation directories like `book_project/todo73-e2e/` accumulate old attempts unless explicitly cleaned.
+    - If operator intent is "fresh validation run with no prior artifacts in the target output dir", that must be implemented explicitly; it is not the current behavior.
   - **Execution result (2026-03-18, Attempt 1 / FAILED)**:
     - Command executed with isolated writable output dir: `--output-dir /home/daravenrk/dragonlair/book_project/todo73-e2e`
     - Run dir: `book_project/todo73-e2e/todo-73-e2e-validation/runs/20260318-174723-ch01-the-first-stable-loop`
@@ -430,6 +435,33 @@ These should be completed once publisher outputs successfully:
     - Ensure a clean, non-quarantined route/model pair for `book-publisher-brief` (or add fallback route/model for this profile)
     - Add run-level terminal event emission for CLI `book_flow.py` failures so every run closes with explicit `run_success` or `run_failure`
     - Re-run Todo 73 and require completion through `publisher_qa` with final manuscript artifacts present
+  - **Execution result (2026-03-18, Attempt 2 / FAILED)**:
+    - Failure stage remained `publisher_brief`, but the failure mode changed from quarantine to timeout/hung behavior on local CLI path.
+    - Root cause found: local `book_flow.py` route timeouts and Ollama HTTP timeouts were not aligned with container defaults, and `ThreadPoolExecutor` shutdown blocked after timeout.
+    - Fixes landed in `orchestrator.py` and `ollama_subagent.py` so both routes now default to `900s` on local CLI and timeout exits no longer block on executor shutdown.
+  - **Execution result (2026-03-18, Attempts 3-5 / FAILED, but informative)**:
+    - Timeout/quarantine blocker was removed; `publisher_brief` started returning model output within normal runtime windows.
+    - New failures surfaced in order:
+      - `cli_runtime_activity.json` and lock file ownership/permission mismatch could crash CLI runs during telemetry updates.
+      - `publisher_brief` fallback repair logic could not run because strict schema validation aborted inside `run_stage(...)` first.
+      - `research` repeatedly failed its quality gate with `research output missing facts section`.
+    - Fixes landed in `book_flow.py` to:
+      - make CLI telemetry write failures non-fatal,
+      - allow `publisher_brief` local repair/fill logic to execute before hard schema rejection,
+      - relax research gate heading strictness and enable substantive-output acceptance fallback.
+  - **Execution result (2026-03-18, Attempt 6 / FAILED)**:
+    - `publisher_brief` passed cleanly and the run advanced to `research`, confirming the prior timeout/publisher blockers were resolved.
+    - `research` still failed after retries and recovery, indicating the remaining blocker is now stage contract quality rather than infra/runtime stability.
+  - **Execution result (2026-03-18, Attempt 7 / IN PROGRESS / latest code path)**:
+    - New default-on debug payload logging was added so every stage attempt/recovery can persist raw output to diagnostics for offline analysis.
+    - Next evaluation should be performed from `run_journal.jsonl` + `diagnostics/agent_diagnostics.jsonl` rather than process watching.
+  - **Current Todo 73 analysis summary**:
+    - Infra timeout mismatch: fixed.
+    - Executor timeout shutdown blocking: fixed.
+    - CLI telemetry permission crash: fixed by making updates warning-only.
+    - Publisher brief schema rigidity: mitigated.
+    - Research stage contract/gate robustness: still the active content-quality blocker.
+    - Pre-run cleanup of isolated validation dirs: not implemented; currently a process/documentation gap.
 
 - **Todo 74**: Add structured run summary artifact per chapter run
   - At the end of each `run_book_chapter()`, write a `run_summary.json` into the run dir with stage outcomes, gate verdicts, retry counts, token totals, and wall-clock durations per stage
@@ -617,6 +649,35 @@ These should be completed once publisher outputs successfully:
   - Replace the split in-memory orchestrator state with shared runtime telemetry or a single service-owned execution path so route state, current profile/model, and quarantine/hung transitions are visible regardless of whether a run starts from WebUI/API or direct CLI.
   - Ensure Live Agents, route health, and task diagnostics read from the same source of truth.
   - Add a regression case that starts a direct CLI `book_flow` run and verifies the operator surfaces either show the activity or clearly label it as out-of-band.
+
+- **Todo 108**: Add explicit pre-run cleanup policy for isolated validation/output dirs
+  - Add a first-class cleanup mode for runs where operator intent is a fresh workspace, not historical accumulation.
+  - Minimum behavior:
+    - if `--clean-output-dir` is set, remove prior `runs/` contents and stale per-run artifacts under the selected book slug before creating the new run dir,
+    - preserve or optionally reset long-lived state separately (`framework/`, `book_history.jsonl`, `progress_index.json`, `arc_tracker.json`),
+    - emit a `run_cleanup_start` / `run_cleanup_complete` journal event naming what was removed.
+  - Add a safe default policy for Todo 73-style validation runs so isolated test output dirs do not silently accumulate old attempts.
+
+- **Todo 109**: Default full debug payload logging on all `book_flow` runs
+  - Persist `raw_output` and parsed payloads for every stage attempt and recovery to `diagnostics/agent_diagnostics.jsonl` by default.
+  - Keep `--no-debug` as an explicit opt-out rather than requiring `--debug` on every run.
+  - Update docs/operator guidance so run diagnosis is log-first: `run_journal.jsonl` for stage flow, diagnostics JSONL for payload inspection.
+
+- **Todo 110**: Add per-stage failed-output artifact snapshots for operator review
+  - On any quality gate failure, write the failing raw output and parsed payload to stable files inside the run dir, for example:
+    - `diagnostics/<stage>/attempt_01_raw.txt`
+    - `diagnostics/<stage>/attempt_01_parsed.json`
+    - `diagnostics/<stage>/attempt_01_gate.json`
+  - This avoids needing to parse large JSONL logs to inspect a specific failed attempt.
+  - Link these artifacts from UI/API run status where possible.
+
+- **Todo 111**: Add Todo 73 validation wrapper with clean-run and post-run summary behavior
+  - Add a host-side wrapper command/script for the canonical Todo 73 validation flow.
+  - Responsibilities:
+    - clean the isolated validation output dir before start,
+    - launch `book_flow` with default debug logging,
+    - print the final run dir and whether the terminal stage was success/failure,
+    - surface the most relevant artifact paths (`run_journal.jsonl`, diagnostics JSONL, run summary).
 
 - **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
   - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.

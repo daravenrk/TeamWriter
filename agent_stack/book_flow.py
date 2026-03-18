@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +93,78 @@ def read_json(path: Path, default=None):
 
 def write_json(path: Path, payload):
     write_text(path, json.dumps(payload, indent=2))
+
+
+def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
+    ensure_dir(runs_root)
+    ensure_dir(history_root)
+
+    summary = {
+        "archived_run_count": 0,
+        "deleted_run_count": 0,
+        "deleted_file_count": 0,
+        "archived_runs": [],
+        "deleted_files": [],
+    }
+
+    artifact_specs = [
+        ("run_journal.jsonl", "run_journal.jsonl"),
+        ("run_summary.json", "run_summary.json"),
+        ("changes.log", "changes.log"),
+        ("diagnostics/agent_diagnostics.jsonl", "diagnostics/agent_diagnostics.jsonl"),
+        ("07_retro/retrospective.json", "07_retro/retrospective.json"),
+        ("07_retro/retrospective.md", "07_retro/retrospective.md"),
+        ("07_retro/quality_failures_review.json", "07_retro/quality_failures_review.json"),
+        ("07_retro/quality_failures_review.md", "07_retro/quality_failures_review.md"),
+    ]
+
+    for item in sorted(runs_root.iterdir()):
+        if item.name.startswith("."):
+            continue
+
+        if item.is_dir():
+            archive_dir = history_root / item.name
+            if archive_dir.exists():
+                shutil.rmtree(archive_dir)
+            ensure_dir(archive_dir)
+
+            copied = []
+            for relative_src, relative_dest in artifact_specs:
+                src = item / relative_src
+                if not src.exists() or not src.is_file():
+                    continue
+                dest = archive_dir / relative_dest
+                ensure_dir(dest.parent)
+                shutil.copy2(src, dest)
+                copied.append(relative_dest)
+
+            write_json(
+                archive_dir / "archive_manifest.json",
+                {
+                    "archived_at": datetime.utcnow().isoformat(),
+                    "source_run_dir": str(item),
+                    "archived_files": copied,
+                },
+            )
+
+            shutil.rmtree(item)
+            summary["archived_run_count"] += 1
+            summary["deleted_run_count"] += 1
+            summary["archived_runs"].append(
+                {
+                    "run_name": item.name,
+                    "archive_dir": str(archive_dir),
+                    "archived_files": copied,
+                }
+            )
+            continue
+
+        if item.is_file():
+            item.unlink()
+            summary["deleted_file_count"] += 1
+            summary["deleted_files"].append(str(item))
+
+    return summary
 
 
 def update_cli_runtime_activity(path: Path, run_id: str, patch: dict, clear: bool = False):
@@ -1004,6 +1077,7 @@ def run_stage(
     max_retries=2,
     diagnostics_path=None,
     verbose=False,
+    debug=False,
 ):
     stage_instantiated_at = datetime.utcnow().isoformat()
     run_journal_path = context_store.get("_run_journal_path") if isinstance(context_store, dict) else None
@@ -1367,6 +1441,23 @@ def run_stage(
         last_raw = raw
         parsed = parse_json_block(raw, fallback={}) if parse_json else raw
 
+        if debug and diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": attempt,
+                    "event": "stage_attempt_payload",
+                    "attempt_started_at": attempt_started_at,
+                    "attempt_completed_at": attempt_completed_at,
+                    "prompt": prompt_with_feedback,
+                    "raw_output": raw,
+                    "parsed_output": parsed if parse_json else None,
+                },
+            )
+
         gate_ok = True
         gate_message = "ok"
         if parse_json and output_schema:
@@ -1524,6 +1615,22 @@ def run_stage(
         recovery_completed_at = datetime.utcnow().isoformat()
         last_raw = raw
         parsed = parse_json_block(raw, fallback={}) if parse_json else raw
+        if debug and diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": recovery_profile_name,
+                    "attempt": recovery_attempt,
+                    "event": "stage_recovery_payload",
+                    "attempt_started_at": recovery_started_at,
+                    "attempt_completed_at": recovery_completed_at,
+                    "prompt": recovery_prompt,
+                    "raw_output": raw,
+                    "parsed_output": parsed if parse_json else None,
+                },
+            )
         gate_ok = True
         gate_message = "ok"
         if parse_json and output_schema:
@@ -1713,6 +1820,19 @@ def run_flow(args):
     book_history_log = book_root / "book_history.jsonl"
     append_jsonl(book_history_log, parent_log)
 
+    run_history_root = book_root / "run_history"
+    cleanup_summary = archive_and_prune_old_runs(runs_root, run_history_root)
+    cleanup_summary["history_root"] = str(run_history_root)
+    append_jsonl(
+        book_history_log,
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": "book-flow-parent",
+            "action": "pre_run_cleanup",
+            "details": cleanup_summary,
+        },
+    )
+
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     run_name = f"{stamp}-ch{args.chapter_number:02d}-{slugify(args.section_title)}"
     run_dir = runs_root / run_name
@@ -1742,6 +1862,15 @@ def run_flow(args):
         "on",
     }
     diagnostics_log = (dirs["diagnostics"] / "agent_diagnostics.jsonl") if (args.verbose or diagnostics_always) else None
+    debug_env = str(os.environ.get("BOOK_FLOW_DEBUG", "true")).lower()
+    debug_mode = bool(args.debug)
+    if debug_env in {"0", "false", "no", "off"}:
+        debug_mode = False
+    elif debug_env in {"1", "true", "yes", "on"}:
+        debug_mode = True
+
+    if getattr(args, "no_debug", False):
+        debug_mode = False
     if not changes_log.exists():
         write_text(changes_log, "")
 
@@ -1777,6 +1906,11 @@ def run_flow(args):
     context_store["_handoff_dir"] = str(dirs["handoff"])
     run_journal = run_dir / "run_journal.jsonl"
     context_store["_run_journal_path"] = str(run_journal)
+    append_run_event(
+        run_journal,
+        "run_cleanup_complete",
+        cleanup_summary,
+    )
     append_run_event(
         run_journal,
         "run_start",
@@ -1891,6 +2025,7 @@ def run_flow(args):
             max_retries=1,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         missing = missing_publisher_fields(brief)
         # Fallback: always set title_working if missing, before breaking
@@ -2008,6 +2143,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 3) Architect
@@ -2044,6 +2180,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
     write_text(dirs["outline"] / "master_outline.md", str(outline_payload.get("master_outline_markdown", "")))
 
@@ -2072,6 +2209,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     framework_skeleton = build_framework_skeleton(
@@ -2134,6 +2272,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
     write_json(dirs["canon"] / "timeline.json", canon_payload.get("timeline", {}))
     write_json(dirs["canon"] / "character_bible.json", canon_payload.get("character_bible", {}))
@@ -2258,6 +2397,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         section_texts.append(section_text)
 
@@ -2291,6 +2431,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         section_summaries.append(
             {
@@ -2333,6 +2474,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 7) Assembler + assembly consistency review
@@ -2404,6 +2546,7 @@ def run_flow(args):
                 max_retries=args.max_retries,
                 diagnostics_path=diagnostics_log,
                 verbose=args.verbose,
+                debug=debug_mode,
             )
             next_level.append(
                 {
@@ -2451,6 +2594,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 8) Developmental editor with scoring gate
@@ -2483,6 +2627,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 9) Line editor
@@ -2509,6 +2654,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 9.5) Copy editor stage
@@ -2535,6 +2681,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 9.6) Proofreader stage
@@ -2561,6 +2708,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # 9.7) Rubric reviewer stage (10-point scoring + next-writer handoff)
@@ -2597,6 +2745,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     next_writer_notes = rubric_report.get("next_writer_notes", {})
@@ -2662,6 +2811,7 @@ def run_flow(args):
         max_retries=args.max_retries,
         diagnostics_path=diagnostics_log,
         verbose=args.verbose,
+        debug=debug_mode,
     )
 
     # Arc consistency check — verify open loops are persisted into next_writer_notes and
@@ -2749,6 +2899,7 @@ def run_flow(args):
             max_retries=1,  # Only one attempt per outer loop
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         decision = str(publisher_qa.get("decision", "")).upper()
         if decision == "APPROVE":
@@ -2797,6 +2948,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         copy_edited = run_stage(
             orchestrator=orchestrator,
@@ -2820,6 +2972,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         proofread = run_stage(
             orchestrator=orchestrator,
@@ -2843,6 +2996,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         current_manuscript = proofread
         continuity_contract = build_contract(
@@ -2873,6 +3027,7 @@ def run_flow(args):
             max_retries=args.max_retries,
             diagnostics_path=diagnostics_log,
             verbose=args.verbose,
+            debug=debug_mode,
         )
         last_publisher_prompt = build_contract(
             role="Publisher QA Agent",
@@ -3138,6 +3293,8 @@ def build_parser():
     p.add_argument("--max-retries", "--max_retries", dest="max_retries", type=int, default=2)
     p.add_argument("--merge-context-words", "--merge_context_words", dest="merge_context_words", type=int, default=3500)
     p.add_argument("-v", "--verbose", action="store_true", help="Enable detailed diagnostics logging")
+    p.add_argument("--debug", action="store_true", help="Persist raw and parsed outputs for every stage attempt and recovery (default: on)")
+    p.add_argument("--no-debug", action="store_true", help="Disable raw and parsed payload logging for this run")
 
     p.add_argument("--writer-profile", "--writer_profile", dest="writer_profile", default="book-writer")
     p.add_argument("--editor-profile", "--editor_profile", dest="editor_profile", default="book-editor")
