@@ -653,6 +653,53 @@ def build_fallback_architect_outline(brief: dict, chapter: dict, research_md: st
     }
 
 
+def build_fallback_chapter_spec(brief: dict, chapter: dict, outline_payload: dict) -> dict:
+    chapter_number = int((chapter or {}).get("number") or 1)
+    chapter_title = str((chapter or {}).get("title") or f"Chapter {chapter_number}")
+    section_title = str((chapter or {}).get("section_title") or "Core Section")
+    section_goal = str((chapter or {}).get("section_goal") or "Advance the chapter with clear forward motion.")
+    writer_words = int((chapter or {}).get("writer_words") or 700)
+    genre = str((brief or {}).get("genre") or "speculative fiction")
+    tone = str((brief or {}).get("tone") or "clear")
+    structure = (outline_payload or {}).get("book_structure") if isinstance(outline_payload, dict) else {}
+    chapter_frames = structure.get("chapter_frames") if isinstance(structure, dict) else []
+    frame_goal = ""
+    if isinstance(chapter_frames, list):
+        for item in chapter_frames:
+            if not isinstance(item, dict):
+                continue
+            if int(item.get("chapter_number") or 0) == chapter_number:
+                frame_goal = str(item.get("goal") or "")
+                break
+    goal = frame_goal or section_goal
+
+    return {
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "purpose": goal,
+        "target_words": writer_words,
+        "sections": [
+            {
+                "title": "Baseline System",
+                "goal": f"Establish the operating context, constraints, and tone for {chapter_title}.",
+            },
+            {
+                "title": section_title,
+                "goal": goal,
+            },
+        ],
+        "must_include": [
+            f"Maintain {genre} tone with {tone} delivery.",
+            "Show a clear escalation from observation to actionable concern.",
+        ],
+        "must_avoid": [
+            "Do not resolve the anomaly too early.",
+            "Do not contradict the fallback outline or publishing brief.",
+        ],
+        "ending_hook": "End with evidence strong enough that the protagonist must continue the investigation.",
+    }
+
+
 def gate_architect_outline(payload):
     if not isinstance(payload, dict):
         return False, "invalid architect payload"
@@ -2333,24 +2380,53 @@ def run_flow(args):
         output_format='JSON with keys: chapter_number, chapter_title, purpose, target_words, sections, must_include, must_avoid, ending_hook',
         failure_conditions=["vague sections", "missing ending hook", "invalid JSON"],
     )
-    chapter_spec = run_stage(
-        orchestrator=orchestrator,
-        lock_manager=lock_manager,
-        changes_log=changes_log,
-        context_store=context_store,
-        stage_id="chapter_planner",
-        agent_name="book-chapter-planner",
-        profile_name="book-chapter-planner",
-        prompt=planner_contract,
-        output_path=dirs["chapter_specs"] / "chapter_01.json",
-        parse_json=True,
-        output_schema="chapter_planner",
-        gate_fn=gate_chapter_spec,
-        max_retries=args.max_retries,
-        diagnostics_path=diagnostics_log,
-        verbose=args.verbose,
-        debug=debug_mode,
-    )
+    try:
+        chapter_spec = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id="chapter_planner",
+            agent_name="book-chapter-planner",
+            profile_name="book-chapter-planner",
+            prompt=planner_contract,
+            output_path=dirs["chapter_specs"] / "chapter_01.json",
+            parse_json=True,
+            output_schema="chapter_planner",
+            gate_fn=gate_chapter_spec,
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+            debug=debug_mode,
+        )
+    except StageQualityGateError as err:
+        if "chapter_number" not in str(err):
+            raise
+        chapter_spec = build_fallback_chapter_spec(
+            brief=brief,
+            chapter=context_store.get("chapter") or {},
+            outline_payload=outline_payload,
+        )
+        write_json(dirs["chapter_specs"] / "chapter_01.json", chapter_spec)
+        context_store["chapter_planner"] = {
+            "agent": "book-chapter-planner",
+            "profile": "book-chapter-planner",
+            "output_path": str(dirs["chapter_specs"] / "chapter_01.json"),
+            "fallback": True,
+            "fallback_reason": "payload missing required field 'chapter_number'",
+        }
+        append_run_event(
+            run_journal,
+            "stage_fallback_applied",
+            {
+                "stage": "chapter_planner",
+                "agent": "book-chapter-planner",
+                "profile": "book-chapter-planner",
+                "reason": "payload missing required field 'chapter_number'",
+                "fallback_type": "operator_generated_chapter_spec",
+                "output_path": str(dirs["chapter_specs"] / "chapter_01.json"),
+            },
+        )
 
     framework_skeleton = build_framework_skeleton(
         brief=brief,

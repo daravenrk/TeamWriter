@@ -461,7 +461,7 @@ These should be completed once publisher outputs successfully:
     - `publisher_brief` is now stable enough to pass on current validation runs.
     - `research` on AMD is still returning `raw_output: null` / empty output, but the pipeline now applies a deterministic fallback dossier and continues.
     - The current active blocker has moved downstream to `architect_outline`, where the NVIDIA architect model is repeatedly omitting `master_outline_markdown`.
-    - A local architect fallback/repair patch has been added in `book_flow.py`, but the current validation run has not yet produced a final post-patch success/failure result for that stage.
+    - The architect fallback/repair patch is now committed and pushed in `0f68621`, but it still needs validation in a fresh run.
     - Immediate next evaluation target: confirm whether the architect fallback advances the run into `chapter_planner`; if it does, the next todo should move to chapter planner / canon stage failures rather than revisiting earlier runtime issues.
   - **Current Todo 73 analysis summary**:
     - Infra timeout mismatch: fixed.
@@ -686,6 +686,31 @@ These should be completed once publisher outputs successfully:
     - launch `book_flow` with default debug logging,
     - print the final run dir and whether the terminal stage was success/failure,
     - surface the most relevant artifact paths (`run_journal.jsonl`, diagnostics JSONL, run summary).
+
+- **Todo 112**: Add stage-fallback counters and terminal fallback summary to `run_summary.json`
+  - Record per-stage fallback usage (`research`, `architect_outline`, and future stages) so operators can tell the difference between a clean pass and a fallback-assisted pass.
+  - Include fallback reason, fallback type, and whether downstream stages still succeeded.
+  - Surface the same summary in CLI output and `/api/status` so Todo 73 reruns do not require manual journal inspection for fallback accounting.
+
+- **Todo 113**: Move or ignore generated Todo 73 validation artifacts outside the normal git working set
+  - Current validation runs leave `book_project/todo73-e2e/` and `cli_runtime_activity.json` as persistent working-tree noise.
+  - Decide whether these artifacts belong in a fully ignored runtime root, a separate archive path, or an operator-managed export location.
+  - Goal: keep future validation reruns visible operationally without constantly polluting `git status`.
+
+- **Todo 114**: Add canon-stage stall watchdog with bounded fallback policy
+  - Canon now appears to be the next long-latency risk after chapter-planner fallback success.
+  - Add explicit watchdog behavior for `canon` with route-aware timeout thresholds and a deterministic fallback path that preserves continuity constraints.
+  - Emit `stage_watchdog_triggered` journal events with elapsed seconds, route/model, and selected mitigation.
+
+- **Todo 115**: Emit per-stage elapsed-time and timeout-budget telemetry
+  - Add elapsed seconds and configured timeout budget to each `stage_attempt_result` and `stage_recovery_result` event.
+  - Surface the same numbers in `run_summary.json` and `/api/status` so operators can quickly distinguish slow progress from hangs.
+  - Include p50/p95 per-stage latency rollups for validation runs.
+
+- **Todo 116**: Add resume-from-checkpoint rerun mode for long pipelines
+  - Add a guarded rerun mode that starts from the last successful stage artifact set (for example, resume at `canon` when upstream fallbacks are already locked).
+  - Require checksum/manifest validation of upstream artifacts before resume to avoid drift.
+  - Goal: reduce repetitive end-to-end reruns when validating fixes for a downstream stage.
 
 - **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
   - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.
