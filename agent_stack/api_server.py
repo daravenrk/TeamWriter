@@ -145,6 +145,9 @@ STRICT_MODE_VALIDATION = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "tru
 }
 UI_STATE_PATH = Path(os.environ.get("AGENT_UI_STATE_PATH", "/home/daravenrk/dragonlair/book_project/webui_state.json"))
 UI_EVENTS_PATH = Path(os.environ.get("AGENT_UI_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"))
+CLI_RUNTIME_ACTIVITY_PATH = Path(
+    os.environ.get("AGENT_CLI_RUNTIME_ACTIVITY_PATH", "/home/daravenrk/dragonlair/book_project/cli_runtime_activity.json")
+)
 RESOURCE_TRACKER_PATH = Path(
     os.environ.get("AGENT_RESOURCE_TRACKER_PATH", "/home/daravenrk/dragonlair/book_project/resource_tracker.json")
 )
@@ -213,6 +216,37 @@ def _write_json_atomic(path: Path, payload: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _load_cli_runtime_activity(stale_seconds: float = 1800.0) -> List[dict]:
+    if not CLI_RUNTIME_ACTIVITY_PATH.exists():
+        return []
+    try:
+        payload = json.loads(CLI_RUNTIME_ACTIVITY_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    runs = payload.get("active_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        return []
+    now = time.time()
+    filtered: List[dict] = []
+    dirty = False
+    for item in runs:
+        if not isinstance(item, dict):
+            dirty = True
+            continue
+        state = str(item.get("state") or "running")
+        updated_at = float(item.get("updated_at_epoch") or item.get("started_at_epoch") or 0.0)
+        if state not in {"running", "starting", "recovering"}:
+            dirty = True
+            continue
+        if updated_at and (now - updated_at) > stale_seconds:
+            dirty = True
+            continue
+        filtered.append(item)
+    if dirty:
+        _write_json_atomic(CLI_RUNTIME_ACTIVITY_PATH, {"active_runs": filtered})
+    return filtered
 
 
 def _task_record_to_dict(record: TaskRecord) -> dict:
@@ -427,6 +461,7 @@ def _build_resource_tracker_payload_locked(reason: str) -> dict:
     route_counts: Dict[str, int] = {}
     model_counts: Dict[str, int] = {}
     book_runtime_hints: Dict[str, dict] = {}
+    cli_runs = _load_cli_runtime_activity(stale_seconds=float(max(BOOK_RUN_STALL_SECONDS, 1800)))
 
     for rec in records:
         if rec.status not in {"queued", "running"}:
@@ -447,6 +482,14 @@ def _build_resource_tracker_payload_locked(reason: str) -> dict:
         if model:
             model_counts[model] = model_counts.get(model, 0) + 1
 
+    for item in cli_runs:
+        route = str(item.get("route") or "").strip()
+        if route:
+            route_counts[route] = route_counts.get(route, 0) + 1
+        model = str(item.get("model") or "").strip()
+        if model:
+            model_counts[model] = model_counts.get(model, 0) + 1
+
     health_report = orchestrator.get_agent_health_report()
     pressure = dict(_pressure_mode)
     pressure["mode"] = "pressure" if pressure.get("active") else "normal"
@@ -462,6 +505,7 @@ def _build_resource_tracker_payload_locked(reason: str) -> dict:
             "route_active_counts": route_counts,
             "model_active_counts": model_counts,
             "nvidia_depth": _nvidia_pressure_depth(),
+            "out_of_band_run_count": len(cli_runs),
         },
         "agents": {
             "summary": _agent_health_summary(health_report),
@@ -787,6 +831,7 @@ def _build_status_payload(records: List[TaskRecord]):
                 break
 
     health_report = orchestrator.get_agent_health_report()
+    cli_runs = _load_cli_runtime_activity(stale_seconds=float(max(BOOK_RUN_STALL_SECONDS, 1800)))
 
     # Synthesize inflight running state from task queue route counts.
     # When a route has active (queued/running) tasks but the agent health shows idle,
@@ -829,6 +874,34 @@ def _build_status_payload(records: List[TaskRecord]):
                 stage = hint.get("stage") or "book-flow"
                 info["current_task_excerpt"] = f"stage={stage} task={active_task_ids[0][:8]}"
 
+    cli_by_route: Dict[str, List[dict]] = {}
+    for item in cli_runs:
+        route = str(item.get("route") or "").strip()
+        if route:
+            cli_by_route.setdefault(route, []).append(item)
+
+    for agent_name, items in cli_by_route.items():
+        info = agents_health.get(agent_name)
+        if not info or not items:
+            continue
+        sample = max(items, key=lambda entry: float(entry.get("updated_at_epoch") or entry.get("started_at_epoch") or 0.0))
+        current_display = str(info.get("display_state") or info.get("state") or "idle")
+        if current_display in {"idle", ""}:
+            info["display_state"] = "running"
+        info["route_inflight"] = max(int(info.get("route_inflight") or 0), len(items))
+        info["status_detail"] = (
+            f"out-of-band CLI book-flow ({len(items)} active)"
+            + (f" model={sample.get('model')}" if sample.get("model") else "")
+        )
+        info["activity_source"] = "cli-book-flow"
+        if sample.get("profile"):
+            info["current_profile"] = sample.get("profile")
+        if sample.get("model"):
+            info["current_model"] = sample.get("model")
+        stage = sample.get("stage") or "book-flow"
+        run_id = str(sample.get("run_id") or "")[:8]
+        info["current_task_excerpt"] = f"stage={stage} run={run_id} cli"
+
     resource_tracker = _resource_snapshot(reason="status_payload")
     return {
         "source": "flat_file",
@@ -843,6 +916,7 @@ def _build_status_payload(records: List[TaskRecord]):
         "latest_stage_event": latest_stage_event,
         "latest_ollama_call": _latest_ollama_ledger_entry(),
         "recent_quarantine_events": _recent_quarantine_events(),
+        "out_of_band_runs": cli_runs,
         "crontab_next_execution": _calculate_next_crontab_execution(),
     }
 

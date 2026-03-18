@@ -93,6 +93,44 @@ def read_json(path: Path, default=None):
 def write_json(path: Path, payload):
     write_text(path, json.dumps(payload, indent=2))
 
+
+def update_cli_runtime_activity(path: Path, run_id: str, patch: dict, clear: bool = False):
+    ensure_dir(path.parent)
+    with file_lock(path):
+        payload = {}
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                payload = {}
+        runs = payload.get("active_runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, list):
+            runs = []
+        existing = None
+        retained = []
+        for item in runs:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "") == run_id:
+                existing = dict(item)
+                continue
+            retained.append(item)
+        if not clear:
+            merged = existing or {"run_id": run_id}
+            merged.update(patch)
+            merged["run_id"] = run_id
+            merged["updated_at_epoch"] = time.time()
+            retained.append(merged)
+        path.write_text(json.dumps({"active_runs": retained}, indent=2), encoding="utf-8")
+
+
+def update_cli_runtime_activity_from_context(context_store: dict, patch: dict, clear: bool = False):
+    run_id = str(context_store.get("_cli_run_id") or "").strip()
+    path_raw = str(context_store.get("_cli_activity_path") or "").strip()
+    if not run_id or not path_raw:
+        return
+    update_cli_runtime_activity(Path(path_raw), run_id, patch, clear=clear)
+
 def append_analytics(path: Path, event: dict):
     ensure_dir(path.parent)
     with file_lock(path):
@@ -1084,6 +1122,17 @@ def run_stage(
                 "recovery_profile": recovery_profile,
             },
         )
+        update_cli_runtime_activity_from_context(
+            context_store,
+            {
+                "source": "cli-book-flow",
+                "state": "running",
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "status_detail": f"stage complete: {stage_id}",
+            },
+        )
         return payload
 
     def build_recovery_prompt(current_prompt):
@@ -1178,6 +1227,20 @@ def run_stage(
                 "attempt": attempt,
                 "route": (resolved_plan or {}).get("route"),
                 "model": (resolved_plan or {}).get("model"),
+            },
+        )
+        update_cli_runtime_activity_from_context(
+            context_store,
+            {
+                "source": "cli-book-flow",
+                "state": "running",
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "route": (resolved_plan or {}).get("route"),
+                "model": (resolved_plan or {}).get("model"),
+                "attempt": attempt,
+                "status_detail": f"stage attempt {attempt}: {stage_id}",
             },
         )
 
@@ -1512,6 +1575,18 @@ def run_stage(
             "gate_message": last_error,
         },
     )
+    update_cli_runtime_activity_from_context(
+        context_store,
+        {
+            "source": "cli-book-flow",
+            "state": "failed",
+            "stage": stage_id,
+            "agent": agent_name,
+            "profile": profile_name,
+            "last_error": last_error,
+            "status_detail": f"stage failure: {stage_id}",
+        },
+    )
     if diagnostics_path is not None:
         append_jsonl(
             diagnostics_path,
@@ -1668,6 +1743,17 @@ def run_flow(args):
             "writer_words": args.writer_words,
         },
     }
+    cli_activity_path = Path(
+        str(
+            getattr(
+                args,
+                "cli_activity_path",
+                "/home/daravenrk/dragonlair/book_project/cli_runtime_activity.json",
+            )
+        )
+    )
+    context_store["_cli_run_id"] = run_name
+    context_store["_cli_activity_path"] = str(cli_activity_path)
     context_store["_handoff_dir"] = str(dirs["handoff"])
     run_journal = run_dir / "run_journal.jsonl"
     context_store["_run_journal_path"] = str(run_journal)
@@ -1679,6 +1765,21 @@ def run_flow(args):
             "chapter_number": args.chapter_number,
             "chapter_title": args.chapter_title,
             "section_title": args.section_title,
+        },
+    )
+    update_cli_runtime_activity(
+        cli_activity_path,
+        run_name,
+        {
+            "source": "cli-book-flow",
+            "state": "running",
+            "title": args.title,
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+            "run_dir": str(run_dir),
+            "started_at_epoch": time.time(),
+            "status_detail": "run started",
         },
     )
 
@@ -2975,6 +3076,7 @@ def run_flow(args):
             "run_summary": str(run_dir / "run_summary.json"),
         },
     )
+    update_cli_runtime_activity_from_context(context_store, {}, clear=True)
     print(json.dumps(summary, indent=2))
     return json.dumps(summary, indent=2)
 

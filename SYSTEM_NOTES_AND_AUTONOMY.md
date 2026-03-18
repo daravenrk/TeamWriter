@@ -5,28 +5,32 @@
 ### Endpoints
 - AMD endpoint: `http://127.0.0.1:11435` (`ollama_amd`)
 - NVIDIA endpoint: `http://127.0.0.1:11434` (`ollama_nvidia`)
+- Agent API/UI: `http://127.0.0.1:11888` (`dragonlair_agent_stack`)
+- Fetcher: `http://127.0.0.1:11999` (`fetcher`)
 
-### External Network Testing
-Use server IP `192.168.86.36` from other LAN hosts.
+### Exposure Policy
+- `11434`, `11435`, and `11999` are local-only by default and should not be exposed on LAN/WAN.
+- `11888` may be exposed to trusted LAN clients when operator access is required.
+- In production, place `11888` behind a reverse proxy/TLS and source-IP controls.
 
 NVIDIA non-stream:
 ```sh
-curl -sS http://192.168.86.36:11434/api/generate -d '{"model":"llama3.2:1b","prompt":"reply with ok","stream":false}'
+curl -sS http://127.0.0.1:11434/api/generate -d '{"model":"llama3.2:1b","prompt":"reply with ok","stream":false}'
 ```
 
 NVIDIA stream:
 ```sh
-curl -sS http://192.168.86.36:11434/api/generate -d '{"model":"llama3.2:1b","prompt":"reply with ok","stream":true}'
+curl -sS http://127.0.0.1:11434/api/generate -d '{"model":"llama3.2:1b","prompt":"reply with ok","stream":true}'
 ```
 
 AMD non-stream:
 ```sh
-curl -sS http://192.168.86.36:11435/api/generate -d '{"model":"qwen2.5-coder:14b","prompt":"reply with ok","stream":false}'
+curl -sS http://127.0.0.1:11435/api/generate -d '{"model":"qwen2.5-coder:14b","prompt":"reply with ok","stream":false}'
 ```
 
 AMD stream:
 ```sh
-curl -sS http://192.168.86.36:11435/api/generate -d '{"model":"qwen2.5-coder:14b","prompt":"reply with ok","stream":true}'
+curl -sS http://127.0.0.1:11435/api/generate -d '{"model":"qwen2.5-coder:14b","prompt":"reply with ok","stream":true}'
 ```
 
 ## 2) Agent Stack Architecture

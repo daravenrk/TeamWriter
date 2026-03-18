@@ -11,12 +11,26 @@
 - **Toolkit:** All scripts and controls are in `/home/daravenrk/dragonlair/bin`
 - **Model plans and lists:** `/home/daravenrk/dragonlair/model-sets/`
 
-## Port Matrix (Current)
+## Port Matrix + Exposure Policy
 
-- `11434` -> `ollama_nvidia` (NVIDIA Ollama endpoint)
-- `11435` -> `ollama_amd` (AMD Ollama endpoint)
-- `11888` -> `dragonlair_agent_stack` (API + Web UI)
-- `11999` -> `fetcher` (research fetch service)
+| Host port | Service | Bind default | Purpose | Exposure policy |
+|---|---|---|---|---|
+| `11434` | `ollama_nvidia` | `127.0.0.1` | NVIDIA Ollama route | Local-only (do not expose on LAN/WAN) |
+| `11435` | `ollama_amd` | `127.0.0.1` | AMD Ollama route | Local-only (do not expose on LAN/WAN) |
+| `11888` | `dragonlair_agent_stack` | `0.0.0.0` | Web UI + API | LAN-optional; restrict in prod |
+| `11999` | `fetcher` | `127.0.0.1` | Research fetch service | Local-only (non-public helper service) |
+
+### Mode-specific guidance
+
+- **Dev (single host):** keep defaults; use `127.0.0.1` for Ollama + fetcher, and open `11888` only if needed.
+- **LAN mode:** only `11888` should be reachable from other hosts; keep `11434`, `11435`, and `11999` local.
+- **Prod mode:** prefer reverse-proxy/TLS in front of `11888`; keep all backend/model ports local-only.
+
+### Firewall baseline
+
+- Allow inbound TCP `11888` only for trusted source ranges when remote access is required.
+- Deny inbound TCP `11434`, `11435`, and `11999`.
+- Keep SSH (`22`) restricted to trusted admins.
 
 Notes:
 - VS Code "Ports" can show auto-forwarded entries that are not currently listening processes.

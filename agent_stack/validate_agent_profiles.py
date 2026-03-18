@@ -29,6 +29,10 @@ ALLOWED_FRONTMATTER_KEYS = {
     "retry_limit",
     "allowed_routes",
     "model_allowlist",
+    "adaptive_strategy",
+    "adaptive_candidates",
+    "adaptive_min_ctx",
+    "adaptive_max_ctx",
 }
 PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 PLACEHOLDER_PATTERN = re.compile(r"\b(todo|tbd|fixme)\b", re.IGNORECASE)

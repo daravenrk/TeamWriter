@@ -104,4 +104,5 @@ pull-models --env nvidia --file ~/dragonlair/model-sets/nvidia-writing-balanced-
 
 - AMD endpoint: `http://127.0.0.1:11435` (container `ollama_amd`)
 - NVIDIA endpoint: `http://127.0.0.1:11434` (container `ollama_nvidia`)
+- Exposure policy: keep `11434`, `11435`, and `11999` local-only; expose only `11888` when LAN access is explicitly needed.
 - `pull-models` skips already installed models by default (`SKIP_EXISTING=1`).

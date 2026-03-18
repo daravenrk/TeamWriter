@@ -5,11 +5,17 @@ services:
       dockerfile: Dockerfile.fetcher
     container_name: fetcher
     restart: unless-stopped
-    command: ["--serve", "--bind", "0.0.0.0", "--port", "11999", "--out-dir", "/app/research"]
+    command: ["--serve", "--bind", "127.0.0.1", "--port", "11999", "--out-dir", "/app/research"]
     ports:
-      - "0.0.0.0:11999:11999"
+      - "127.0.0.1:11999:11999"
     volumes:
       - /home/daravenrk/dragonlair/book_project/01_research:/app/research
     environment:
       FETCHER_OUTPUT_DIR: /app/research
       FETCHER_TIMEOUT_SECONDS: "30"
+    networks:
+      - dragonlair-net
+
+networks:
+  dragonlair-net:
+    external: true

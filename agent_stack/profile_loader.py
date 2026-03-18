@@ -81,6 +81,35 @@ def _parse_frontmatter(frontmatter):
     else:
         data["model_allowlist"] = []
 
+    # Adaptive model-selection fields.
+    # adaptive_strategy: "fast" | "quality" | "balanced" — drives how the orchestrator
+    #   weights speed vs output quality when choosing among adaptive_candidates.
+    # adaptive_candidates: comma-separated model names the orchestrator may pick from.
+    # adaptive_min_ctx / adaptive_max_ctx: allowed num_ctx range the orchestrator may
+    #   shrink or grow to match observed prompt complexity.
+    if "adaptive_strategy" in data:
+        strat = str(data["adaptive_strategy"]).strip().lower()
+        data["adaptive_strategy"] = strat if strat in {"fast", "quality", "balanced"} else "balanced"
+    else:
+        data["adaptive_strategy"] = None  # not opted in
+
+    if "adaptive_candidates" in data:
+        data["adaptive_candidates"] = _parse_csv(data["adaptive_candidates"])
+    else:
+        data["adaptive_candidates"] = []
+
+    if "adaptive_min_ctx" in data:
+        parsed = _parse_int(data["adaptive_min_ctx"])
+        data["adaptive_min_ctx"] = parsed if parsed is not None and parsed > 0 else None
+    else:
+        data["adaptive_min_ctx"] = None
+
+    if "adaptive_max_ctx" in data:
+        parsed = _parse_int(data["adaptive_max_ctx"])
+        data["adaptive_max_ctx"] = parsed if parsed is not None and parsed > 0 else None
+    else:
+        data["adaptive_max_ctx"] = None
+
     options = {}
     if "num_ctx" in data:
         parsed = _parse_int(data["num_ctx"])

@@ -404,15 +404,32 @@ These should be completed once publisher outputs successfully:
   - Compare Dragonlair decisions against Claude artifacts for control-plane reliability, autonomous recovery, schema safety, and writing-pipeline quality
   - Produce a concrete gap report with prioritized "adopt", "adapt", and "reject" actions tied to Dragonlair backlog items
 
-- **Todo 72**: Complete open-port audit and least-exposure hardening
-  - Inventory active listeners (`11434`, `11435`, `11888`, `11999`, plus infra ports) and map each to owner service, dependency path, and operator need
-  - Recommend and implement least-exposure bindings where safe (prefer localhost or internal Docker network for non-public services)
-  - Add operator docs for which ports are required in dev/LAN/prod modes and include firewall guidance
+- **Completed (2026-03-18) / Todo 72**: Complete open-port audit and least-exposure hardening
+  - Active listeners verified: `11434`, `11435`, `11888`, `11999`, plus infra ports (`22`, loopback DNS)
+  - Applied least-exposure bindings:
+    - `ollama_nvidia`: `127.0.0.1:11434:11434`
+    - `ollama_amd`: `127.0.0.1:11435:11434`
+    - `fetcher`: `127.0.0.1:11999:11999`
+    - `dragonlair_agent_stack`: retained `0.0.0.0:11888:11888` for optional LAN UI access
+  - Added shared Docker network (`dragonlair-net`) and moved agent->Ollama calls to internal service names (`http://ollama_nvidia:11434`, `http://ollama_amd:11434`) instead of host-mapped ports
+  - Added operator-facing port matrix, dev/LAN/prod exposure policy, and firewall guidance to user docs
 
 - **Todo 73**: Run one full end-to-end book flow after schema enforcement changes
   - Execute a full chapter run with current retries/fallbacks and capture run journal + diagnostics
   - Confirm schema validation failures surface actionable gate messages and recover through retries when possible
   - Record pass/fail results and next fixes back into `DEV_NEXT_STEPS.md`
+  - **Execution result (2026-03-18, Attempt 1 / FAILED)**:
+    - Command executed with isolated writable output dir: `--output-dir /home/daravenrk/dragonlair/book_project/todo73-e2e`
+    - Run dir: `book_project/todo73-e2e/todo-73-e2e-validation/runs/20260318-174723-ch01-the-first-stable-loop`
+    - Failure stage: `publisher_brief`
+    - Gate message: `[AGENT_QUARANTINED] Agent ollama_nvidia is quarantined`
+    - Journal evidence: two `stage_attempt_error` events (`AGENT_HUNG`), followed by `stage_recovery_error` (`AGENT_QUARANTINED`) and terminal `stage_failure`
+    - Artifacts captured: `run_journal.jsonl`, `diagnostics/agent_diagnostics.jsonl`, `handoff/resource_references.json`
+    - Missing terminal artifacts: no `06_final/manuscript_v1.md`, no `run_summary.json`, and no journal-level `run_success`/`run_failure` event
+  - **Next fixes before Attempt 2**:
+    - Ensure a clean, non-quarantined route/model pair for `book-publisher-brief` (or add fallback route/model for this profile)
+    - Add run-level terminal event emission for CLI `book_flow.py` failures so every run closes with explicit `run_success` or `run_failure`
+    - Re-run Todo 73 and require completion through `publisher_qa` with final manuscript artifacts present
 
 - **Todo 74**: Add structured run summary artifact per chapter run
   - At the end of each `run_book_chapter()`, write a `run_summary.json` into the run dir with stage outcomes, gate verdicts, retry counts, token totals, and wall-clock durations per stage
@@ -589,6 +606,27 @@ These should be completed once publisher outputs successfully:
 
   - Surface AMD and NVIDIA route activity as first-class UI fields instead of relying only on per-agent rows.
   - Show active count, effective stage route, effective model, and whether the information is queue-derived or agent-health-derived so the operator can see why a route is marked active.
+
+- **Todo 106**: Review Live Agents intent vs. operator expectation for direct CLI book-flow runs
+  - Clarify whether the Live Agents panel is intended to show only API-managed task activity or all route/model activity on the host, including direct `python -m agent_stack.book_flow` runs.
+  - Current finding: `book_flow.py` instantiates its own `OrchestratorAgent()` while the WebUI reads health from the separate global orchestrator in `api_server.py`, so direct CLI runs can consume GPU and never appear in Live Agents.
+  - Decide and document the contract explicitly: either keep Live Agents scoped to API/server-managed work, or add shared runtime state so CLI book-flow runs surface as first-class live activity.
+  - If the intent is API-only, add an operator-facing note in the UI explaining that direct CLI runs are out-of-band and may not appear there.
+
+- **Todo 107**: Unify orchestrator runtime telemetry between `api_server.py` and direct `book_flow.py` execution
+  - Replace the split in-memory orchestrator state with shared runtime telemetry or a single service-owned execution path so route state, current profile/model, and quarantine/hung transitions are visible regardless of whether a run starts from WebUI/API or direct CLI.
+  - Ensure Live Agents, route health, and task diagnostics read from the same source of truth.
+  - Add a regression case that starts a direct CLI `book_flow` run and verifies the operator surfaces either show the activity or clearly label it as out-of-band.
+
+- **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
+  - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.
+  - Decide ownership policy for shared runtime artifacts and enforce it consistently so host CLI runs, containerized services, and recovery scripts do not fight over lock files.
+  - Add a startup/doctor check that flags root-owned runtime files before a long run begins.
+
+- **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures
+  - Current Todo 73 failed with terminal `stage_failure` but no guaranteed run-level `run_failure` event and no `run_summary.json`.
+  - Mirror the API-side run-terminal integrity guard for direct CLI flows so every run closes with `run_success` or `run_failure`, even when a stage raises out of the pipeline.
+  - Write `run_summary.json` on both success and failure paths with stage outcomes, retry counts, and failure reason.
 
 - **Todo 99**: Add profile-lint gate before stack startup
   - Run agent profile validation before or during `agent-stack-up` so invalid `.agent.md` frontmatter fails fast with a clear message before the API container is rebuilt.

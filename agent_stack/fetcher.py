@@ -112,21 +112,21 @@ def scrape_page(url: str, timeout: int, user_agent: str, selector: str | None, v
 
 
 def write_outputs(out_dir: str, url: str, result: dict) -> dict:
-        # Scraper analytics: log each fetch/scrape attempt
-        analytics_path = os.path.join(out_dir, "research_analytics.jsonl")
-        analytics_event = {
-            "timestamp": now_utc(),
-            "url": url,
-            "mode": result["mode"],
-            "content_type": result.get("content_type"),
-            "title": result.get("title"),
-            "status": "success",
-        }
-        try:
-            with open(analytics_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(analytics_event) + "\n")
-        except Exception:
-            pass
+    # Scraper analytics: log each fetch/scrape attempt.
+    analytics_path = os.path.join(out_dir, "research_analytics.jsonl")
+    analytics_event = {
+        "timestamp": now_utc(),
+        "url": url,
+        "mode": result["mode"],
+        "content_type": result.get("content_type"),
+        "title": result.get("title"),
+        "status": "success",
+    }
+    try:
+        with open(analytics_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(analytics_event) + "\n")
+    except Exception:
+        pass
     os.makedirs(out_dir, exist_ok=True)
     base_name = f"{now_utc()}_{slugify_url(url)}_{result['mode']}"
     text_path = os.path.join(out_dir, f"{base_name}.txt")

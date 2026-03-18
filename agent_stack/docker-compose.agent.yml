@@ -7,8 +7,8 @@ services:
     ports:
       - "0.0.0.0:11888:11888"
     environment:
-      OLLAMA_AMD_ENDPOINT: "http://host.docker.internal:11435"
-      OLLAMA_NVIDIA_ENDPOINT: "http://host.docker.internal:11434"
+      OLLAMA_AMD_ENDPOINT: "http://ollama_amd:11434"
+      OLLAMA_NVIDIA_ENDPOINT: "http://ollama_nvidia:11434"
       AGENT_SERVER_MODE: "openclaw-client"
       AGENT_STRICT_MODE_VALIDATION: "true"
       DRAGONLAIR_LOCK_ROOT: "/tmp/dragonlair_agent_stack"
@@ -45,3 +45,9 @@ services:
       - /home/daravenrk/dragonlair/agent_stack/agent_profiles:/app/agent_stack/agent_profiles:rw
       - /home/daravenrk/dragonlair/agent_stack/static:/app/agent_stack/static:rw
       - /home/daravenrk/dragonlair/book_project:/home/daravenrk/dragonlair/book_project:rw
+    networks:
+      - dragonlair-net
+
+networks:
+  dragonlair-net:
+    external: true
