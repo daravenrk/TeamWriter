@@ -479,6 +479,26 @@ These should be completed once publisher outputs successfully:
   - **`build_relevant_chapter_notes` fix**: Currently only scores backward-looking summaries. Extend it to also include forward-looking notes from the framework outline for planned but not-yet-written chapters, clearly tagged as `[FUTURE]` so the writer knows not to resolve them prematurely.
   - **Review-on-pass annotation contract**: Add a `review_annotations` field to rubric/developmental/continuity output schemas. When a review passes, write `review_annotations.story_elements` to `agent_context_status.jsonl` with phase `review_passed_annotation` so story state is externalized at the point of approval, not only at pipeline end.
 
+- **Todo 88**: Add Story Skeleton Pre-Run — high-context fast pass before any chapter writing begins
+  - **Concept**: Before any chapter is written, run a single dedicated high-context planning pass using a small, fast model (e.g. `qwen3.5:9b` on AMD at 192k ctx) to generate a complete **story skeleton** for the full book or series. This is deliberately low fidelity — the goal is speed and breadth, not quality. The skeleton becomes the authoritative planning artifact that all chapter runs reference throughout the pipeline.
+  - **What the skeleton produces** (one structured JSON artifact per book/series):
+    - `story_spine` — the single-sentence through-line of the entire story
+    - `major_beats` — ordered list of key story events with chapter assignments (e.g. `{beat: "dragon awakens", chapter: 3, type: "inciting_incident"}`)
+    - `open_loops` — every plot thread that opens during the book, with `opens_chapter`, `resolves_chapter` (or `"series"` if unresolved at book end), and `resolve_type` (`"answered"` / `"subverted"` / `"deferred"`)
+    - `character_arcs` — each named character's starting state, arc milestone per chapter, and ending state
+    - `chapter_frames` — one entry per chapter: purpose, what it must set up, what it must resolve, tone, and the 2-3 hardest constraints the writer faces
+    - `series_threads` — for multi-book series, threads that intentionally carry beyond this book
+  - **Integration points**:
+    - Skeleton is written to `book_project/<slug>/framework/story_skeleton.json` at the start of the first chapter run and re-used for all subsequent chapter runs in the same book
+    - `build_scene_briefing()` (Todo 87) draws `[FUTURE]` guidance from `chapter_frames` and `open_loops.resolves_chapter` — the writer always knows which loops are theirs to *open*, *sustain*, or *close*
+    - `arc_tracker.open_loops` is pre-populated from `story_skeleton.open_loops` tagged as `[PLANNED]` so the arc consistency scorer has ground truth from chapter 1
+    - Review agents (rubric, developmental, publisher QA) receive the `chapter_frames` entry for the current chapter as an explicit acceptance target alongside the existing criteria
+    - `framework_integrity_gate` (Todo 35) can validate the skeleton exists before chapter 1 begins
+  - **New CLI entry point**: `book-flow skeleton --title ... --premise ... --chapters N [--series]` — runs only the skeleton pass and saves the artifact; can be invoked separately before the first chapter run or auto-triggered when no skeleton exists
+  - **New agent profile**: `book-story-skeleton.agent.md` — routes to AMD (`ollama_amd`), uses `qwen3.5:9b` at `num_ctx: 192000`, low temperature (`0.3`), high `num_predict` to guarantee full coverage; persona is a "Story Architect" focused on structural planning, not prose quality
+  - **Output schema**: Add `story_skeleton` to `output_schemas.py` validating required top-level keys, minimum beat count, and that each open loop has `opens_chapter` and `resolves_chapter` set
+  - **Skeleton reuse policy**: If `story_skeleton.json` already exists for the book slug, re-use it without re-running the skeleton pass (operator can force-refresh with `--refresh-skeleton`)
+
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges
   - Export route/model labels carefully so the metric cardinality stays bounded and operationally safe
