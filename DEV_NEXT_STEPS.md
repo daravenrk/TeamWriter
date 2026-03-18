@@ -499,6 +499,64 @@ These should be completed once publisher outputs successfully:
   - **Output schema**: Add `story_skeleton` to `output_schemas.py` validating required top-level keys, minimum beat count, and that each open loop has `opens_chapter` and `resolves_chapter` set
   - **Skeleton reuse policy**: If `story_skeleton.json` already exists for the book slug, re-use it without re-running the skeleton pass (operator can force-refresh with `--refresh-skeleton`)
 
+- **Todo 89**: Add Series Layer — multi-book structural design, decomposition, and feasibility analysis
+  - **Concept**: When a story concept is large enough to span multiple books, add a series-level planning layer that runs before individual book skeletons (Todo 88). This layer decides how to split the full narrative, assigns story threads and character arcs to specific books, and validates the split is structurally sound before any writing begins.
+  - **Series skeleton artifact** (`series_project/<slug>/framework/series_skeleton.json`):
+    - `series_spine` — the overarching narrative arc that runs across all books
+    - `book_breakdown` — list of books with working title, purpose in the series, approximate word count target, and which story threads it opens/carries/closes
+    - `cross_book_threads` — plot loops and character arcs that span more than one book, with `opens_book`, `resolves_book`, and `relay_handoff` notes (what state must be passed to the next book's skeleton)
+    - `series_acceptance_criteria` — structural conditions the full series must satisfy (e.g. "every open loop from book 1 is resolved by book 3", "protagonist arc completes in final book")
+    - `book_n_seeds` — for each book, the minimal seed data needed to run that book's skeleton pass (premise fragment, inherited open loops, character starting states)
+  - **Feasibility analysis pass**: After the series skeleton is generated, run a second fast high-context pass (`book-series-feasibility` agent profile) that checks: are there enough story threads to fill each book's page target? Are any cross-book handoffs logically impossible? Do character arcs have enough room to pay off? Output a structured `feasibility_report.json` with `passed`, `concerns`, and `structural_blockers`.
+  - **Series integrity gate**: Block individual book skeleton passes if `feasibility_report.json` has `structural_blockers`. Emit actionable diagnostics naming the specific thread, character arc, or book assignment that is infeasible.
+  - **Book ordering and dependency**: Generate an execution plan (`series_execution_plan.json`) that lists books in recommended writing order with dependency annotations — some books may need to be written before others to lock in canon that later books inherit.
+  - **New CLI entry points**: `book-flow series-skeleton` and `book-flow series-feasibility`; both feed into the existing `book-flow skeleton` for each individual book.
+  - **New agent profiles**: `book-series-architect.agent.md` (AMD 9B at 192k ctx, series decomposition persona) and `book-series-feasibility.agent.md` (AMD 9B at 192k ctx, structural analyst persona)
+
+- **Todo 90**: Add Living Skeleton — rewrite skeleton after each accepted chapter to lock written content as law
+  - **Concept**: The story skeleton (Todo 88) starts as a plan. After each chapter is reviewed and accepted (publisher QA gate passes), the skeleton is rewritten with the actual accepted content merged in. Anything the writer produced that passed review is now **law** — it overrides the original plan in that chapter's frame. Future chapters continue to use the plan, but the plan's past chapters are replaced by ground truth. This creates a continuously improving guide that reflects the story as it was actually told.
+  - **Living skeleton fields per chapter frame**:
+    - `status`: `"planned"` → `"in_progress"` → `"accepted"` (locked)
+    - `planned_content`: original skeleton guidance (preserved for audit)
+    - `accepted_content`: summary of what was actually written and accepted — major events, character state changes, open loops opened/progressed/closed, tone achieved
+    - `law_items`: specific facts extracted from accepted text that all future chapters must treat as immutable (character decisions, revealed facts, timeline events)
+    - `delta_notes`: differences between plan and accepted content, flagged for any future chapter that relied on the original plan
+  - **Trigger**: Runs automatically after publisher QA approves a chapter. A lightweight extraction pass (AMD 9B, low `num_predict`) reads the accepted manuscript and rubric/canon artifacts to fill `accepted_content` and `law_items`.
+  - **Propagation**: After skeleton rewrite, re-run arc consistency pre-check (no Ollama call — pure JSON comparison) to detect if any future chapter's `chapter_frames` plan now conflicts with newly locked law items. Emit warnings as `skeleton_delta_warnings.jsonl` into the book framework dir.
+  - **Series integration**: For series books, propagate `law_items` from the final accepted chapter of book N into `book_n+1_seeds` in the series skeleton, so the next book inherits ground truth rather than planned state.
+  - **New agent profile**: `book-skeleton-updater.agent.md` — AMD 9B at 128k ctx, extraction persona only, minimal temperature (0.1), high precision output; receives accepted manuscript + original skeleton chapter frame, returns structured `accepted_content` and `law_items`
+
+- **Todo 91**: Add Style Reformatting Layer — generate alternative book structures from accepted chronological draft
+  - **Concept**: The writing pipeline produces a complete, chronologically ordered story first (this is always the primary artifact). After the full book is accepted, a separate style reformatting pass generates alternative structural presentations of the same story — non-linear timelines, multiple POV arrangements, epistolary formats, etc. Each style variant is a structural reorganization of accepted content, not a rewrite of prose.
+  - **Research required (defer implementation until research is complete)**:
+    - Survey established literary structural styles: in-medias-res, frame narrative, parallel timelines, unreliable narrator structures, epistolary, mosaic/fragmented, reverse chronology, braided narrative, dual timeline
+    - For each style: define the algorithmic transformation rules (which chapters move where, what framing text must be generated, what is added vs. reordered), the acceptance criteria (does it preserve all open loops? does it maintain character arc integrity?), and the target reader experience
+    - Identify which styles are safe to generate algorithmically (pure reordering) vs. require new prose generation (frame text, chapter headers, interstitial bridges)
+    - Produce a `style_catalogue.md` in the repo documenting each style, its transformation rules, and its quality gate requirements
+  - **Style reformatting pipeline** (after research):
+    - Input: accepted chronological manuscript + accepted living skeleton
+    - For each target style: generate a `style_variant_plan.json` (which chapters reorder to which positions, what bridge text is needed), validate structural integrity (no open loop introduced after its resolution point, character state consistency), generate bridge/framing prose where needed, produce final styled manuscript
+    - Each style variant is a separate output in `06_final/style_variants/<style_name>/`
+  - **Style acceptance gate**: Each variant must pass arc consistency check against the original living skeleton's `law_items` — no variant may alter the story's facts, only their presentation order
+
+- **Todo 92**: Add chronological-first writing enforcement to the pipeline
+  - **Concept**: Formalize the rule that all section writing happens in chapter-chronological order, regardless of any style intent. The structural design may plan a non-linear presentation, but the writer always drafts in story-time order. This is enforced, not advisory.
+  - Add a `chapter_sequence_validator` that checks the chapter number of each run against `progress_index.completed_chapters` before allowing execution — if chapter N is requested but chapter N-1 is not yet in the accepted state, reject the run with a clear error naming the missing prerequisite
+  - Add `chronological_order: true` as a required field in `story_skeleton.chapter_frames` so the presence of the skeleton itself signals the enforcement intent
+  - Expose an override flag (`--force-chapter-order`) for diagnostic/recovery use only, logged prominently to run journal
+
+- **Todo 93**: Add skeleton diff report after each chapter acceptance
+  - After the living skeleton is updated (Todo 90), produce a human-readable `skeleton_diff_<chapter>.md` in the book framework dir showing: what changed from planned to accepted, which future chapter frames are now affected, and which `law_items` were locked this chapter
+  - This gives the operator a per-chapter audit trail of how the story evolved from the original skeleton plan and where divergences accumulated
+
+- **Todo 94**: Add series execution orchestrator — run all books in a series sequentially with state handoff
+  - A higher-level CLI command `book-flow series-run` that reads the `series_execution_plan.json` (Todo 89) and orchestrates full runs of each book in dependency order, passing `relay_handoff` data and `law_items` from one book to the next automatically
+  - Supports resume: if book N is already complete, skip to book N+1 and inject the prior book's accepted state
+
+- **Todo 95**: Research and catalogue book presentation styles for Todo 91
+  - Dedicated research task: survey literary structural styles, define transformation rules for each, produce `style_catalogue.md` as the specification that Todo 91's implementation will execute against
+  - Deliverable is documentation only; no code changes
+
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges
   - Export route/model labels carefully so the metric cardinality stays bounded and operationally safe

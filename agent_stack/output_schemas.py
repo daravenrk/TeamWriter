@@ -277,6 +277,18 @@ STAGE_OUTPUT_SCHEMAS = {
             "summary": {"type": ["string", "array", "object"]},
         },
     },
+    "story_skeleton": {
+        "type": "object",
+        "required": ["story_spine", "major_beats", "open_loops", "character_arcs", "chapter_frames"],
+        "properties": {
+            "story_spine": {"type": "string", "minLength": 10},
+            "major_beats": {"type": "array", "minItems": 1},
+            "open_loops": {"type": "array"},
+            "character_arcs": {"type": "array"},
+            "chapter_frames": {"type": "array", "minItems": 1},
+            "series_threads": {"type": "array"},
+        },
+    },
 }
 
 
