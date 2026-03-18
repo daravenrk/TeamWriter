@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
 
 from .lock_manager import AgentLockManager
-from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, ChapterSpecValidationError, StageQualityGateError
+from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, ChapterSpecValidationError, FrameworkIntegrityError, StageQualityGateError
 from .orchestrator import OrchestratorAgent
 from .output_schemas import validate_stage_payload
 from .writing_assistant import generate_names, generate_technology, generate_personalities, generate_dates_history
@@ -294,6 +294,75 @@ def update_arc_tracker(existing: dict, *, chapter_number: int, chapter_title: st
     tracker["last_updated"] = datetime.utcnow().isoformat()
     return tracker
 
+
+# ---------------------------------------------------------------------------
+# Framework integrity gate (Todo 35)
+# ---------------------------------------------------------------------------
+_FRAMEWORK_REQUIRED: dict[str, list[str]] = {
+    "book_identity": ["title_working", "genre"],
+    "design_framework": ["acceptance_criteria"],
+    "chapter_skeleton": ["chapter_number", "chapter_title", "sections"],
+}
+
+_ARC_REQUIRED: list[str] = ["story_arcs", "character_arcs", "open_loops", "chapter_progress"]
+_PROGRESS_REQUIRED: list[str] = ["book", "completed_chapters"]
+
+
+def check_framework_integrity(
+    skeleton: dict,
+    arc_tracker: dict,
+    progress_index: dict,
+) -> None:
+    """Raise FrameworkIntegrityError if any critical framework fields are absent or empty.
+
+    Called after build_framework_skeleton() writes the skeleton so that the
+    pipeline does not proceed into expensive writing stages with a broken
+    design contract.
+    """
+    diagnostics: list[str] = []
+
+    # Validate framework skeleton sections
+    if not isinstance(skeleton, dict):
+        raise FrameworkIntegrityError(
+            "framework_skeleton is not a dict — cannot validate integrity.",
+            details={"skeleton_type": type(skeleton).__name__},
+        )
+
+    for section, fields in _FRAMEWORK_REQUIRED.items():
+        section_data = skeleton.get(section)
+        if not isinstance(section_data, dict):
+            diagnostics.append(f"framework_skeleton.{section}: missing or not a dict")
+            continue
+        for field in fields:
+            value = section_data.get(field)
+            if value is None or value == "" or value == [] or value == {}:
+                diagnostics.append(f"framework_skeleton.{section}.{field}: empty or missing")
+
+    # Validate arc tracker
+    if not isinstance(arc_tracker, dict):
+        diagnostics.append("arc_tracker: missing or not a dict")
+    else:
+        for field in _ARC_REQUIRED:
+            if field not in arc_tracker:
+                diagnostics.append(f"arc_tracker.{field}: missing key")
+
+    # Validate progress index
+    if not isinstance(progress_index, dict):
+        diagnostics.append("progress_index: missing or not a dict")
+    else:
+        for field in _PROGRESS_REQUIRED:
+            if field not in progress_index:
+                diagnostics.append(f"progress_index.{field}: missing key")
+
+    if diagnostics:
+        raise FrameworkIntegrityError(
+            f"Framework integrity gate failed with {len(diagnostics)} issue(s): "
+            + "; ".join(diagnostics),
+            details={"issues": diagnostics},
+        )
+
+
+# ---------------------------------------------------------------------------
 
 def write_agent_context_status(path: Path, payload: dict):
     append_jsonl(
@@ -1773,6 +1842,19 @@ def run_flow(args):
         },
     )
 
+    # Framework integrity gate — block draft progression if skeleton/arc/progress are malformed
+    _arc_snapshot = read_json(arc_tracker_path, default={})
+    _progress_snapshot = read_json(progress_index_path, default={})
+    check_framework_integrity(framework_skeleton, _arc_snapshot, _progress_snapshot)
+    append_run_event(
+        run_journal,
+        "framework_integrity_passed",
+        {
+            "chapter_number": args.chapter_number,
+            "chapter_title": chapter_spec.get("chapter_title"),
+            "skeleton_sections": len((framework_skeleton.get("chapter_skeleton") or {}).get("sections") or []),
+        },
+    )
 
     # 5) Canon manager
     canon_contract = build_contract(

@@ -67,6 +67,11 @@ class ChapterSpecValidationError(AgentStackError):
         super().__init__(message, code="CHAPTER_SPEC_VALIDATION_ERROR", details=details)
 
 
+class FrameworkIntegrityError(AgentStackError):
+    def __init__(self, message, details=None):
+        super().__init__(message, code="FRAMEWORK_INTEGRITY_ERROR", details=details)
+
+
 class BookExportError(AgentStackError):
     def __init__(self, message, details=None):
         super().__init__(message, code="BOOK_EXPORT_ERROR", details=details)

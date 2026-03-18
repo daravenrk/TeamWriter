@@ -183,9 +183,11 @@ These should be completed once publisher outputs successfully:
   - `run_stage(...)` now validates structured payloads against named schemas before custom quality gates run
   - Schema failures feed the existing retry loop, so missing fields automatically trigger corrective retries with actionable gate messages
 
-- **Todo 35**: Add framework integrity gate
-  - Block draft progression if framework skeleton or progress index is missing critical fields
-  - Emit actionable diagnostics that name missing design-framework components
+- **Completed (2026-03-18) / Todo 35**: Add framework integrity gate
+  - Added `FrameworkIntegrityError` to `exceptions.py` with code `FRAMEWORK_INTEGRITY_ERROR`
+  - Added `check_framework_integrity(skeleton, arc_tracker, progress_index)` in `book_flow.py` — validates required fields in `book_identity`, `design_framework`, `chapter_skeleton`, `arc_tracker`, and `progress_index`
+  - Gate is called after `build_framework_skeleton()` writes the skeleton, before the Canon stage; raises with a full diagnostic list of all missing/empty fields
+  - A `framework_integrity_passed` event is appended to `run_journal.jsonl` on success
 
 - **Todo 36**: Add arc consistency scorer
   - Score chapter outputs against active character/story arcs and unresolved loops
@@ -406,6 +408,34 @@ These should be completed once publisher outputs successfully:
   - Confirm schema validation failures surface actionable gate messages and recover through retries when possible
   - Record pass/fail results and next fixes back into `DEV_NEXT_STEPS.md`
 
+- **Todo 74**: Add structured run summary artifact per chapter run
+  - At the end of each `run_book_chapter()`, write a `run_summary.json` into the run dir with stage outcomes, gate verdicts, retry counts, token totals, and wall-clock durations per stage
+  - Expose this artifact via `/api/status` so the UI can show a post-run digest without parsing the full run journal
+
+- **Todo 75**: Harden context_store propagation with typed dataclass
+  - Replace the untyped `context_store` dict passed between stages with a `RunContext` dataclass or TypedDict
+  - Catch missing/misspelled context keys at type-check time instead of at runtime deep in a stage
+
+- **Todo 76**: Add writing-quality regression harness for model/profile changes
+  - Capture a golden-set of stage outputs from a known-good run, store as fixtures
+  - Run the harness after any model pull or profile change to flag quality regressions before the next full book run
+  - Track rubric scores over time to detect drift
+
+- **Todo 77**: Gate model pull on smoketest pass before committing to production route
+  - After `pull-amd` or `pull-nvidia`, run the `smoketest_coder_models.py` logic against writing/coder profiles
+  - Refuse to update the active model alias if the smoketest score falls below threshold
+
+- **Todo 78**: Add per-stage wall-clock budget enforcement
+  - Define optional `stage_timeout_seconds` in each stage's kwargs or profile policy
+  - If a stage exceeds its budget, record the overrun in the run journal and apply fallback (skip, degrade, or abort) rather than waiting indefinitely
+
+- **Todo 79**: Promote `changes.log` to structured JSONL and index it
+  - Replace the free-text `changes.log` written per-run with a structured JSONL of `{timestamp, stage, agent, field, before, after}` events
+  - Build a thin query helper so audits can filter changes by stage or agent across runs
+
+- **Todo 80**: Add automated .gitignore drift detection
+  - On each commit (pre-commit hook) or CI step, check that newly generated runtime artifacts are covered by `.gitignore`
+  - Alert operator if untracked runtime files appear that are not in the ignore list, preventing artifact creep back into the index
 
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges
