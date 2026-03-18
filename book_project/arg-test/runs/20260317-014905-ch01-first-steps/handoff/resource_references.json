@@ -1,9 +1,0 @@
-{
-  "refs": {
-    "resource_tracker": "/home/daravenrk/dragonlair/book_project/resource_tracker.json",
-    "resource_events": "/home/daravenrk/dragonlair/book_project/resource_events.jsonl",
-    "ui_state": "/home/daravenrk/dragonlair/book_project/webui_state.json",
-    "ui_events": "/home/daravenrk/dragonlair/book_project/webui_events.jsonl"
-  },
-  "snapshot": {}
-}
