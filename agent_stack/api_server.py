@@ -426,16 +426,26 @@ def _build_resource_tracker_payload_locked(reason: str) -> dict:
     status_counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
     route_counts: Dict[str, int] = {}
     model_counts: Dict[str, int] = {}
+    book_runtime_hints: Dict[str, dict] = {}
+
+    for rec in records:
+        if rec.status not in {"queued", "running"}:
+            continue
+        hint = _latest_book_stage_runtime_hint(rec)
+        if hint:
+            book_runtime_hints[rec.id] = hint
 
     for rec in records:
         if rec.status in status_counts:
             status_counts[rec.status] += 1
         if rec.status not in {"queued", "running"}:
             continue
-        route = rec.route or "unknown"
+        effective = _effective_runtime_target_for_record(rec, book_runtime_hints.get(rec.id))
+        route = effective.get("route") or rec.route or "unknown"
         route_counts[route] = route_counts.get(route, 0) + 1
-        if rec.model:
-            model_counts[rec.model] = model_counts.get(rec.model, 0) + 1
+        model = effective.get("model") or rec.model
+        if model:
+            model_counts[model] = model_counts.get(model, 0) + 1
 
     health_report = orchestrator.get_agent_health_report()
     pressure = dict(_pressure_mode)
@@ -520,12 +530,150 @@ def _recent_quarantine_events(limit: int = 12) -> List[dict]:
         return []
 
 
+def _latest_book_stage_runtime_hint(record: TaskRecord) -> Optional[dict]:
+    """Return the latest route/model/profile selected by an active book-flow stage.
+
+    The top-level `book-flow` task record only stores a coarse route/model guess.
+    The actual runtime target for the currently executing stage is logged into the
+    run's changes.log at `stage_start`.  The WebUI should reflect that effective
+    stage route, especially when NVIDIA is active inside a book-flow task.
+    """
+    if getattr(record, "profile", None) != "book-flow" or not getattr(record, "book_request", None):
+        return None
+    try:
+        req = BookFlowRequest(**record.book_request)
+    except ValidationError:
+        return None
+
+    run_dir = _latest_book_run_dir(req.output_dir, req.title)
+    if not run_dir:
+        return None
+    def _scan_lines(lines: List[str], source: str) -> Optional[dict]:
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # changes.log format
+            if source == "changes":
+                action = str(obj.get("action") or "")
+                if action != "stage_start":
+                    continue
+                details = obj.get("details") or {}
+                route = details.get("route")
+                model = details.get("model")
+                profile = details.get("profile") or obj.get("profile")
+                stage = details.get("stage")
+                if not any([route, model, profile, stage]):
+                    continue
+                return {
+                    "task_id": record.id,
+                    "run_dir": str(run_dir),
+                    "stage": stage,
+                    "agent": obj.get("agent"),
+                    "profile": profile,
+                    "route": route,
+                    "model": model,
+                    "attempt": details.get("attempt"),
+                    "ts": obj.get("timestamp"),
+                    "source": "changes.log",
+                }
+
+            # run_journal format
+            event = str(obj.get("event") or "")
+            if event != "stage_attempt_start":
+                continue
+            details = obj.get("details") or {}
+            route = details.get("route")
+            model = details.get("model")
+            profile = details.get("profile")
+            stage = details.get("stage")
+            agent = details.get("agent")
+            if not any([route, model, profile, stage]):
+                continue
+            return {
+                "task_id": record.id,
+                "run_dir": str(run_dir),
+                "stage": stage,
+                "agent": agent,
+                "profile": profile,
+                "route": route,
+                "model": model,
+                "attempt": details.get("attempt"),
+                "ts": obj.get("timestamp"),
+                "source": "run_journal.jsonl",
+            }
+
+        return None
+
+    changes_log = run_dir / "changes.log"
+    if changes_log.exists():
+        try:
+            hint = _scan_lines(changes_log.read_text(encoding="utf-8").splitlines(), "changes")
+            if hint:
+                return hint
+        except OSError:
+            pass
+
+    run_journal = run_dir / "run_journal.jsonl"
+    if run_journal.exists():
+        try:
+            hint = _scan_lines(run_journal.read_text(encoding="utf-8").splitlines(), "journal")
+            if hint:
+                return hint
+        except OSError:
+            pass
+
+    return None
+
+
+def _effective_runtime_target_for_record(record: TaskRecord, runtime_hint: Optional[dict]) -> dict:
+    effective_route = record.route
+    effective_model = record.model
+    effective_profile = record.profile
+
+    if runtime_hint:
+        if runtime_hint.get("route"):
+            effective_route = runtime_hint.get("route")
+        if runtime_hint.get("model"):
+            effective_model = runtime_hint.get("model")
+        if runtime_hint.get("profile"):
+            effective_profile = runtime_hint.get("profile")
+
+    return {
+        "route": effective_route,
+        "model": effective_model,
+        "profile": effective_profile,
+    }
+
+
 def _build_status_payload(records: List[TaskRecord]):
     queue_positions = _compute_queue_positions(records)
-    tasks = [
-        _task_to_dict(v, queue_position=queue_positions.get(v.id))
-        for v in sorted(records, key=lambda t: t.created_at, reverse=True)[:50]
-    ]
+    book_runtime_hints: Dict[str, dict] = {}
+    for rec in records:
+        if rec.status not in {"queued", "running"}:
+            continue
+        hint = _latest_book_stage_runtime_hint(rec)
+        if hint:
+            book_runtime_hints[rec.id] = hint
+
+    tasks = []
+    for v in sorted(records, key=lambda t: t.created_at, reverse=True)[:50]:
+        task = _task_to_dict(v, queue_position=queue_positions.get(v.id))
+        effective = _effective_runtime_target_for_record(v, book_runtime_hints.get(v.id))
+        if effective.get("route"):
+            task["route"] = effective.get("route")
+        if effective.get("model"):
+            task["model"] = effective.get("model")
+        if effective.get("profile") and task.get("profile") == "book-flow":
+            task["runtime_profile"] = effective.get("profile")
+        if book_runtime_hints.get(v.id):
+            task["runtime_stage"] = book_runtime_hints[v.id].get("stage")
+        tasks.append(task)
 
     counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
     for task in tasks:
@@ -538,7 +686,26 @@ def _build_status_payload(records: List[TaskRecord]):
     # Find latest actionable stage event and gate failure from changes.log for book-flow tasks.
     latest_failure = None
     latest_stage_event = None
-    for rec in records:
+    def _book_record_priority(rec: TaskRecord):
+        status = str(getattr(rec, "status", ""))
+        if status == "running":
+            bucket = 0
+        elif status == "queued":
+            bucket = 1
+        elif status == "failed":
+            bucket = 2
+        elif status == "completed":
+            bucket = 3
+        else:
+            bucket = 4
+        return (bucket, -float(getattr(rec, "created_at", 0.0) or 0.0))
+
+    prioritized_book_records = sorted(
+        [rec for rec in records if getattr(rec, "profile", None) == "book-flow" and getattr(rec, "book_request", None)],
+        key=_book_record_priority,
+    )
+
+    for rec in prioritized_book_records:
         if getattr(rec, "profile", None) == "book-flow" and getattr(rec, "book_request", None):
             req = BookFlowRequest(**rec.book_request)
             run_dir = _latest_book_run_dir(req.output_dir, req.title)
@@ -558,6 +725,8 @@ def _build_status_payload(records: List[TaskRecord]):
                                 "stage": details.get("stage"),
                                 "agent": obj.get("agent"),
                                 "profile": obj.get("profile"),
+                                "route": details.get("route"),
+                                "model": details.get("model"),
                                 "attempt": details.get("attempt"),
                                 "gate_ok": details.get("gate_ok"),
                                 "gate_message": details.get("gate_message"),
@@ -575,6 +744,45 @@ def _build_status_payload(records: List[TaskRecord]):
                             }
                         if latest_failure is not None and latest_stage_event is not None:
                             break
+                if latest_failure is None or latest_stage_event is None:
+                    run_journal = run_dir / "run_journal.jsonl"
+                    if run_journal.exists():
+                        for line in reversed(run_journal.read_text(encoding="utf-8").splitlines()):
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            event = str(obj.get("event") or "")
+                            details = obj.get("details") or {}
+
+                            if latest_stage_event is None and event in {"stage_attempt_start", "stage_result", "stage_failure"}:
+                                latest_stage_event = {
+                                    "action": event,
+                                    "stage": details.get("stage"),
+                                    "agent": details.get("agent"),
+                                    "profile": details.get("profile"),
+                                    "route": details.get("route"),
+                                    "model": details.get("model"),
+                                    "attempt": details.get("attempt"),
+                                    "gate_ok": details.get("gate_ok"),
+                                    "gate_message": details.get("gate_message"),
+                                    "ts": obj.get("timestamp"),
+                                }
+
+                            if latest_failure is None and event == "stage_failure":
+                                latest_failure = {
+                                    "stage": details.get("stage"),
+                                    "agent": details.get("agent"),
+                                    "profile": details.get("profile"),
+                                    "route": details.get("route"),
+                                    "model": details.get("model"),
+                                    "gate_message": details.get("gate_message"),
+                                    "attempt": details.get("attempt"),
+                                    "ts": obj.get("timestamp"),
+                                }
+
+                            if latest_failure is not None and latest_stage_event is not None:
+                                break
             if latest_failure is not None or latest_stage_event is not None:
                 break
 
@@ -586,8 +794,12 @@ def _build_status_payload(records: List[TaskRecord]):
     # dict only reflects in-RPC state which is momentarily idle between book-flow stages.
     route_active: Dict[str, List[str]] = {}
     for rec in records:
-        if rec.status in {"queued", "running"} and rec.route:
-            route_active.setdefault(rec.route, []).append(rec.id)
+        if rec.status not in {"queued", "running"}:
+            continue
+        effective = _effective_runtime_target_for_record(rec, book_runtime_hints.get(rec.id))
+        effective_route = effective.get("route")
+        if effective_route:
+            route_active.setdefault(effective_route, []).append(rec.id)
     # Also collect model per task-id for richer status_detail
     task_by_id: Dict[str, TaskRecord] = {rec.id: rec for rec in records}
     agents_health = (health_report or {}).get("agents") or {}
@@ -599,14 +811,23 @@ def _build_status_payload(records: List[TaskRecord]):
         if current_display in {"idle", ""}:
             # At least one task is active on this route — promote to running
             sample_task = task_by_id.get(active_task_ids[0])
+            effective = _effective_runtime_target_for_record(sample_task, book_runtime_hints.get(active_task_ids[0])) if sample_task else {}
             detail = f"inflight via task queue ({len(active_task_ids)} active)"
-            if sample_task and sample_task.model:
-                detail += f" model={sample_task.model}"
+            if effective.get("model"):
+                detail += f" model={effective.get('model')}"
             if sample_task and sample_task.status == "running":
                 detail += f" task={active_task_ids[0][:8]}"
             info["display_state"] = "running"
             info["status_detail"] = detail
             info["route_inflight"] = len(active_task_ids)
+            if effective.get("profile"):
+                info["current_profile"] = effective.get("profile")
+            if effective.get("model"):
+                info["current_model"] = effective.get("model")
+            hint = book_runtime_hints.get(active_task_ids[0])
+            if hint:
+                stage = hint.get("stage") or "book-flow"
+                info["current_task_excerpt"] = f"stage={stage} task={active_task_ids[0][:8]}"
 
     resource_tracker = _resource_snapshot(reason="status_payload")
     return {

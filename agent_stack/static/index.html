@@ -161,7 +161,7 @@
       <div id="counts"></div>
       <table>
         <thead>
-          <tr><th>ID</th><th>Status</th><th>Queue</th><th>Profile</th><th>Route</th><th>Model</th><th>Error</th></tr>
+          <tr><th>ID</th><th>Status</th><th>Queue</th><th>Profile</th><th>Runtime</th><th>Route</th><th>Model</th><th>Error</th></tr>
         </thead>
         <tbody id="tasks"></tbody>
       </table>
@@ -614,12 +614,17 @@ async function refreshStatus() {
 
   document.getElementById('health').textContent = JSON.stringify(data.health, null, 2);
   const summary = ((data.resource_tracker || {}).agents || {}).summary || {};
+  const routeActive = ((data.resource_tracker || {}).queue || {}).route_active_counts || {};
+  const amdActive = routeActive.ollama_amd || 0;
+  const nvidiaActive = routeActive.ollama_nvidia || 0;
   const rewards = (data.health && data.health.rewards) || {};
   const depletedProfiles = rewards.depleted_profiles || [];
   document.getElementById('healthSummary').textContent = [
     `agents=${summary.total_agents || 0}`,
     `healthy=${summary.healthy || 0}`,
     `running=${summary.running || 0}`,
+    `amd_active=${amdActive}`,
+    `nvidia_active=${nvidiaActive}`,
     `quarantined=${summary.quarantined || 0}`,
     `hung=${summary.hung || 0}`,
     `failed=${summary.failed || 0}`,
@@ -634,7 +639,10 @@ async function refreshStatus() {
   const tasks = data.tasks || [];
   for (const t of tasks) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${(t.id || '').slice(0,8)}</td><td>${pill(t.status || '')}</td><td>${t.queue_position || ''}</td><td>${t.profile || ''}</td><td>${t.route || ''}</td><td>${t.model || ''}</td><td>${t.error || ''}</td>`;
+    const runtimeLabel = t.runtime_stage
+      ? `${t.runtime_profile || t.profile || ''} @ ${t.runtime_stage}`
+      : (t.runtime_profile || '');
+    tr.innerHTML = `<td>${(t.id || '').slice(0,8)}</td><td>${pill(t.status || '')}</td><td>${t.queue_position || ''}</td><td>${t.profile || ''}</td><td>${runtimeLabel}</td><td>${t.route || ''}</td><td>${t.model || ''}</td><td>${t.error || ''}</td>`;
     tbody.appendChild(tr);
   }
 

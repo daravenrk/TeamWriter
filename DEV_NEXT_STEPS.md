@@ -557,6 +557,47 @@ These should be completed once publisher outputs successfully:
   - Dedicated research task: survey literary structural styles, define transformation rules for each, produce `style_catalogue.md` as the specification that Todo 91's implementation will execute against
   - Deliverable is documentation only; no code changes
 
+- **Completed (2026-03-18) / Todo 96**: Analyze AMD live agent detail visibility bug and fix or pivot
+  - Implemented status synthesis updates in `api_server.py` and WebUI runtime surfacing updates in `static/index.html` so effective route/model/profile details come from active runtime hints rather than stale top-level task metadata.
+  - Validation outcome: both NVIDIA and AMD live submissions now surface correct route activity and agent details (`route_active_counts`, `current_profile`, `current_model`, and active display state) during running windows.
+  - Follow-up note: direct `/api/tasks` diagnostics runs still show `runtime_stage=None` by design for single-stage calls; multi-stage `book-flow` runs now include stage-derived runtime hints and latest-stage route/model details in status payloads.
+
+- **Completed (2026-03-18) / Todo 97**: Add regression tests for live route/status synthesis
+  - Added executable regression script: `agent_stack/scripts/regression_status_synthesis.py`.
+  - The script submits NVIDIA and AMD diagnostics tasks, polls `/api/status`, validates route/model mapping and `resource_tracker.queue.route_active_counts`, and asserts route-agent identity fields (`current_profile`, `current_model`) are visible while inflight.
+  - Includes best-effort hung-agent recovery and task cancellation so the check is repeatable in active environments.
+
+- **Todo 101**: Commit the current working-tree batch before picking up new work
+  - Staged changes (from this session): `DEV_NEXT_STEPS.md`, `agent_stack/api_server.py`, `agent_stack/static/index.html`, `agent_stack/agent_profiles/book-skeleton-updater.agent.md`, `agent_stack/scripts/regression_status_synthesis.py`.
+  - Untracked runtime artifact `book_project/ollama_run_ledger.jsonl` — decide whether to add to `.gitignore` or commit as a tracked artifact.
+  - Write a commit message that groups the status-synthesis telemetry fixes, profile lint fix, and regression script as one logical batch.
+
+- **Todo 102**: Extend regression script to cover book-flow multi-stage `runtime_stage` field
+  - The current regression check (`agent_stack/scripts/regression_status_synthesis.py`) validates direct `/api/tasks` profile tasks but does not submit a `book-flow` task and assert that `runtime_stage` becomes non-null for a known pipeline stage.
+  - Add a third case with `profile=book-flow` that waits for `runtime_stage` to appear in the `/api/status` task payload and verifies route/model are sourced from stage-level hints (not top-level record defaults).
+
+- **Todo 103**: Surface route quarantine status as an operator-visible UI warning
+  - During AMD diagnostic sessions, the AMD agent silently entered quarantine state and the task failed without an obvious operator prompt. The WebUI should prominently show when a route is quarantined, the remaining quarantine duration, and the reason for the last quarantine event.
+  - Add a warning banner or highlighted row in the Route Health card whenever `quarantine_active: true` and `quarantine_remaining_seconds > 0`, distinct from the standard `running`/`idle`/`hibernated` states.
+
+- **Todo 104**: Add route hibernation telemetry to the WebUI agent health rows
+  - The NVIDIA agent showed `display_state: hibernated` with a `hibernated_at` timestamp during the AMD validation run. The current UI treats hibernated the same as idle for display purposes. Show time-since-hibernation, the hibernation trigger (manual vs. auto) if known, and a quick-exit control to wake the route when appropriate.
+
+- **Todo 105**: Add a `bin/regression` host-side wrapper for the regression suite
+  - Add a thin shell script at `bin/regression` that `exec`s `python3 agent_stack/scripts/regression_status_synthesis.py` with the correct working directory so operators can run the full regression check from the workspace root without activating a virtualenv or navigating into the stack.
+  - Extend to accept an optional `--profile` flag to narrow the test to a single route (e.g., `bin/regression --profile amd`).
+
+  - Surface AMD and NVIDIA route activity as first-class UI fields instead of relying only on per-agent rows.
+  - Show active count, effective stage route, effective model, and whether the information is queue-derived or agent-health-derived so the operator can see why a route is marked active.
+
+- **Todo 99**: Add profile-lint gate before stack startup
+  - Run agent profile validation before or during `agent-stack-up` so invalid `.agent.md` frontmatter fails fast with a clear message before the API container is rebuilt.
+  - Prevent a bad profile from taking the entire control plane offline during restart.
+
+- **Todo 100**: Add diagnostics submission lane when book mode is active
+  - Add an explicit, operator-only diagnostics endpoint or flag that allows low-impact test submissions (for route visibility checks) without disabling active book mode.
+  - Keep safeguards: rate-limit diagnostics tasks, tag them clearly in `/api/status`, and block content-writing jobs so diagnostic probing cannot interfere with production book runs.
+
 - **Todo 55**: Expose Prometheus metrics for Ollama economics and health
   - Add `/metrics` endpoint with request counters, latency histograms, inflight gauges, fallback counters, quality-gate counters, and per-profile token balance gauges
   - Export route/model labels carefully so the metric cardinality stays bounded and operationally safe

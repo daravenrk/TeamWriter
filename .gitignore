@@ -65,6 +65,7 @@ book_project/*_events.jsonl
 book_project/*_state.json
 book_project/*_tracker.json
 book_project/*_ledger.json
+book_project/*_ledger.jsonl
 book_project/quality_gate_failures.jsonl
 
 # Generated framework state files
