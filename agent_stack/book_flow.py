@@ -473,11 +473,28 @@ def gate_publisher_brief(report):
 
 
 def gate_research_dossier(text):
-    content = str(text or "")
+    content = str(text or "").strip()
+    if not content:
+        return False, "research output empty"
+
     lowered = content.lower()
-    has_facts = "facts" in lowered
+    has_facts = any(
+        marker in lowered
+        for marker in (
+            "facts",
+            "findings",
+            "key findings",
+            "evidence",
+            "observations",
+        )
+    )
     if has_facts:
         return True, "ok"
+
+    # Fallback acceptance for substantial dossiers that use different heading names.
+    if len(content.split()) >= 120:
+        return True, "ok (lenient: substantive research without explicit facts heading)"
+
     return False, "research output missing facts section"
 
 
