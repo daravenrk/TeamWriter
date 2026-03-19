@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 from .book_flow import run_flow, slugify
 from .exceptions import AgentStackError, AgentUnexpectedError, OpenClawProfileConfigError
 from .orchestrator import OrchestratorAgent
+from .validate_agent_profiles import lint_profiles, DEFAULT_MAX_SYSTEM_PROMPT_CHARS
 
 
 class SteerRequest(BaseModel):
@@ -2385,6 +2386,32 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
 
 # Bootstrap persisted tasks only after task runners are defined.
 _bootstrap_task_ledger()
+
+
+# Startup event: Print profile lint summary for operator visibility
+@app.on_event("startup")
+def _startup_print_profile_lint():
+    """Print a brief profile lint summary at startup for operator visibility."""
+    try:
+        profile_dir = Path(__file__).parent / "agent_profiles"
+        report = lint_profiles(
+            profile_dir=str(profile_dir),
+            max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHARS,
+        )
+        
+        status = "✓ PASS" if report["valid"] else "✗ FAIL"
+        print(f"[PROFILE-LINT] {status}: {report['profile_count']} profiles, "
+              f"{report['error_count']} errors, {report['warning_count']} warnings")
+        
+        if not report["valid"]:
+            print("[PROFILE-LINT] Errors:")
+            for profile in report["profiles"]:
+                if profile["errors"]:
+                    label = profile.get("name") or Path(profile["path"]).name
+                    for error in profile["errors"]:
+                        print(f"  - {label}: {error}")
+    except Exception as exc:
+        print(f"[PROFILE-LINT] Warning: startup lint summary failed ({exc})")
 
 
 @app.get("/")

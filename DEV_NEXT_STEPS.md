@@ -930,6 +930,47 @@ These should be completed once publisher outputs successfully:
   - **Common error scenarios table**: 6 troubleshooting rows covering typos, spaces, case sensitivity, empty results, and server errors
   - **Key guidance**: Error messages list valid stage names; copy-paste ready; case-insensitive for stages but strict for booleans
 
+### Suggested Next Todos (for evaluation)
+
+- **Todo 164**: Add fallback artifact expiry policy enforcement
+  - Extend Todo 137 staleness detection with automatic cleanup/archival of artifacts older than threshold
+  - Add operator command: `book-flow --audit-fallbacks --archive-stale` to safely move old artifacts to archive without deleting
+  - Document retention policy for production vs dev environments, with recovery procedures for archived artifacts
+  - Add warning in diagnostics when a run uses an artifact approaching expiry (e.g., >90% of FALLBACK_STALE_HOURS elapsed)
+
+- **Todo 165**: Add "repair fallback artifact" operator workflow and CLI commands
+  - Implement `book-flow --repair-fallback-artifact <book> <stage>` to validate and repair corrupted fallback metadata
+  - Add integrity recovery options: re-compute checksums, regenerate metadata from payload file, or restore from backup
+  - Update USER_GUIDE.md with step-by-step repair procedure for common fallback corruption scenarios
+  - Add dry-run mode to preview repairs before applying
+
+- **Todo 166**: Add fallback integrity audit command for offline analysis
+  - Implement `book-flow --audit-all-fallbacks` to scan all books and stages for stale/missing/corrupted artifacts
+  - Produce audit report showing: deployment status, staleness, checksum validity, metadata health, and recommendations
+  - Add filtering: `--stage=canon`, `--older-than=30d`, `--corrupted-only` for targeted diagnostics
+  - Export audit results as JSON for programmatic processing and monitoring integration
+
+- **Todo 99**: Add profile-lint gate before stack startup ⭐ QUICK WIN ✅ ENHANCED
+  - **Core gate already existed**: `validate_agent_profiles.py` was already running lint validation at orchestrator startup
+  - **Checks validate**: Required fields (name, route, model), type correctness (think=bool, temperature=0.0-2.0), integer ranges (num_ctx>0), duplicate names, unsupported routes, required markdown sections, system prompt size
+  - **Enhancement added**: Startup event in `api_server.py` prints brief lint summary at startup:
+    - `[PROFILE-LINT] ✓ PASS: 18 profiles, 0 errors, 0 warnings`
+    - Friendly visibility for operators running `agent-stack-up`
+    - Lists errors with profile name and specific issue for quick debugging
+  - **Result**: Prevents bad configurations from silently taking the control plane offline; operators see immediate feedback
+
+- **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs ⭐ OPERATIONAL BLOCKER
+  - Direct host-side book-flow runs blocked by root-owned artifacts (created by containerized services)
+  - Decide ownership policy: group-writable, host-user-owned, or container-sandboxed artifacts
+  - Add startup/doctor check flagging root-owned runtime files before long runs begin
+  - Apply ownership normalization script with recoveryrollback for failed ownership changes
+
+- **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
+  - Ensure every CLI run closes with `run_success` or `run_failure` event, even on stage exceptions
+  - Write `run_summary.json` on both success and failure paths with stage outcomes, retry counts, failure reason
+  - Add guaranteed cleanup of run locks and diagnostics flush on abnormal termination
+  - Add recovery mode to complete orphaned runs left by crashed host processes
+
 - **Todo 120**: Evaluate stage-by-stage think mode policy and default profile settings
   - Build an evidence-based matrix for each major stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial stages) indicating when `think: false` improves reliability/latency and when deeper reasoning is worth the cost.
   - Capture measurable criteria: schema pass rate, retry count, latency, hallucination/continuity regressions, and token economy impact.
