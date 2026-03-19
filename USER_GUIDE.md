@@ -300,6 +300,81 @@ curl -s "http://127.0.0.1:11888/api/status?fallback_stage=can+on"
 # Response: {"detail": "invalid fallback_stage 'can on'; valid values: canon"}
 ```
 
+### API Error Contract
+
+The `/api/status` endpoint returns structured error responses for invalid filter parameters.
+
+#### Invalid `fallback_stage` Value
+
+**Request:**
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=invalid_stage" | jq .
+```
+
+**Response (HTTP 400):**
+```json
+{
+  "detail": "invalid fallback_stage 'invalid_stage'; valid values: canon"
+}
+```
+
+**Troubleshooting:**
+- The error message lists all **valid stage names** after "valid values:"
+- Copy-paste one of the listed stage names into your next request
+- If the list is empty, no fallback stages are currently registered (check `_FALLBACK_STAGE_CONFIGS` in `api_server.py`)
+
+#### Invalid `fallback_used` Value
+
+**Request:**
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_used=maybe"
+```
+
+**Response (HTTP 422 - Validation Error):**
+```json
+{
+  "detail": [
+    {
+      "type": "bool_parsing",
+      "loc": ["query", "fallback_used"],
+      "msg": "Input should be a valid boolean",
+      "input": "maybe"
+    }
+  ]
+}
+```
+
+**Valid values for `fallback_used`:**
+- `true` (lowercase)
+- `false` (lowercase)
+- `1` (interpreted as true)
+- `0` (interpreted as false)
+
+#### Malformed Query Combinations
+
+**Invalid: Multiple `fallback_stage` values**
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=canon&fallback_stage=sections_written"
+# Only the FIRST value is used; second is silently ignored (standard HTTP behavior)
+```
+
+**Valid: Filter by multiple criteria simultaneously**
+```sh
+# Both filters applied (AND logic): fallback_used=true AND fallback_stage=canon
+curl -s "http://127.0.0.1:11888/api/status?fallback_used=true&fallback_stage=canon" | jq '.tasks | length'
+```
+
+#### Common Error Scenarios
+
+| Scenario | Error | Fix |
+|----------|-------|-----|
+| Typo in stage name: `fallback_stage=Canon` (capital C) | No error — auto-lowercased to `canon` | Works as-is (case-insensitive) |
+| Spaces in stage: `fallback_stage=can%20on` | HTTP 400 with valid values list | Use a listed valid stage name |
+| Invalid boolean: `fallback_used=true` (case-correct) | Works; filters correctly | No fix needed |
+| Invalid boolean: `fallback_used=True` (capitalized) | HTTP 422 Validation Error | Change to lowercase: `true` or `false` |
+| No matching results | Empty `tasks` array | Filters may be too restrictive; try base `/api/status` |
+| Server returns 500 Internal Error | Check API server logs | Restart API with `agent-stack-up` |
+
 ---
 
 For more details, see the files in `/home/daravenrk/dragonlair/` and `/opt/ai-stack/`.

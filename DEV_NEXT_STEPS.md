@@ -922,9 +922,13 @@ These should be completed once publisher outputs successfully:
   - **Documentation**: Added "Stage Normalization Policy" subsection in `USER_GUIDE.md` with URL-encoded examples showing equivalence
   - **Result**: Operators can use any case variation without memorizing exact stage names
 
-- **Todo 163**: Add API error contract examples for invalid filters
-  - Add explicit 400 response examples in docs for invalid `fallback_stage` and malformed filter combinations.
-  - Include valid-values hint behavior and troubleshooting guidance.
+- **Todo 163**: Add API error contract examples for invalid filters ✅ CORE IMPLEMENTED
+  - **Added "API Error Contract" section in USER_GUIDE.md** with HTTP 400/422 error responses
+  - **Invalid `fallback_stage`**: Example request/response showing HTTP 400 with valid-values guidance
+  - **Invalid `fallback_used`**: Example showing HTTP 422 Validation Error for non-boolean values
+  - **Malformed combinations**: Examples of multiple `fallback_stage` values (first used) and valid AND-logic filters
+  - **Common error scenarios table**: 6 troubleshooting rows covering typos, spaces, case sensitivity, empty results, and server errors
+  - **Key guidance**: Error messages list valid stage names; copy-paste ready; case-insensitive for stages but strict for booleans
 
 - **Todo 120**: Evaluate stage-by-stage think mode policy and default profile settings
   - Build an evidence-based matrix for each major stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial stages) indicating when `think: false` improves reliability/latency and when deeper reasoning is worth the cost.
