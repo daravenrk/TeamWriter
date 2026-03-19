@@ -3,6 +3,7 @@
 # - Log all major stage transitions, returns, and errors
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,12 @@ def read_json(path: Path, default=None):
 
 def write_json(path: Path, payload):
     write_text(path, json.dumps(payload, indent=2))
+
+
+def payload_sha256(payload) -> str:
+    """Deterministic sha256 for JSON-serializable payload provenance checks."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
@@ -700,6 +707,150 @@ def build_fallback_chapter_spec(brief: dict, chapter: dict, outline_payload: dic
     }
 
 
+def build_fallback_canon_payload(brief: dict, chapter: dict, chapter_spec: dict, outline_payload: dict) -> dict:
+    chapter_number = int((chapter or {}).get("number") or 1)
+    chapter_title = str((chapter or {}).get("title") or f"Chapter {chapter_number}")
+    section_title = str((chapter or {}).get("section_title") or "Core Section")
+    section_goal = str((chapter or {}).get("section_goal") or "Advance core narrative intent.")
+
+    ending_hook = str((chapter_spec or {}).get("ending_hook") or "")
+    must_include = _normalize_list((chapter_spec or {}).get("must_include"))
+    must_avoid = _normalize_list((chapter_spec or {}).get("must_avoid"))
+
+    return {
+        "canon": {
+            "book_identity": {
+                "title_working": str((brief or {}).get("title_working") or "Working Title"),
+                "genre": str((brief or {}).get("genre") or "speculative fiction"),
+                "audience": str((brief or {}).get("audience") or "adult"),
+                "tone": str((brief or {}).get("tone") or "clear"),
+            },
+            "chapter_anchor": {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "section_title": section_title,
+                "section_goal": section_goal,
+            },
+            "constraints": _normalize_list((brief or {}).get("constraints")),
+            "acceptance_criteria": _normalize_list((brief or {}).get("acceptance_criteria")),
+            "must_include": must_include,
+            "must_avoid": must_avoid,
+            "fallback": {
+                "active": True,
+                "reason": "canon_generation_failed_after_retries_recovery_and_failover",
+            },
+        },
+        "timeline": {
+            "chapter_events": [
+                {
+                    "chapter_number": chapter_number,
+                    "chapter_title": chapter_title,
+                    "section_title": section_title,
+                    "event": "Canon bootstrap fallback initialized.",
+                }
+            ],
+            "source": "deterministic_canon_fallback",
+        },
+        "character_bible": {
+            "characters": [],
+            "notes": [
+                "Character details pending downstream continuity/editorial refinement.",
+            ],
+            "source": "deterministic_canon_fallback",
+        },
+        "open_loops": [
+            item for item in [ending_hook, section_goal] if str(item).strip()
+        ],
+        "style_guide": (
+            "# Style Guide (Fallback Canon)\n\n"
+            "- Preserve continuity with chapter goal and brief constraints.\n"
+            "- Prefer conservative canon updates until full canon regeneration succeeds.\n"
+            "- Treat this artifact as bootstrap canon and refine in the next successful canon stage.\n"
+        ),
+        "fallback_meta": {
+            "active": True,
+            "type": "deterministic_canon_bootstrap",
+            "generated_at": datetime.utcnow().isoformat(),
+            "chapter_number": chapter_number,
+            "chapter_title": chapter_title,
+            "outline_present": bool((outline_payload or {}).get("book_structure")),
+        },
+    }
+
+
+def validate_fallback_canon_contract(canon_payload: dict, brief: dict, chapter: dict, chapter_spec: dict) -> dict:
+    """Validate deterministic canon fallback carries minimum semantic anchors."""
+    payload = canon_payload if isinstance(canon_payload, dict) else {}
+    canon = payload.get("canon") if isinstance(payload.get("canon"), dict) else {}
+    chapter_anchor = canon.get("chapter_anchor") if isinstance(canon.get("chapter_anchor"), dict) else {}
+    book_identity = canon.get("book_identity") if isinstance(canon.get("book_identity"), dict) else {}
+
+    expected_chapter_number = int((chapter or {}).get("number") or 1)
+    expected_ending_hook = str((chapter_spec or {}).get("ending_hook") or "").strip()
+
+    checks = [
+        {
+            "name": "chapter_number_anchor",
+            "passed": int(chapter_anchor.get("chapter_number") or 0) == expected_chapter_number,
+            "detail": "canon.chapter_anchor.chapter_number matches requested chapter",
+        },
+        {
+            "name": "chapter_title_anchor",
+            "passed": bool(str(chapter_anchor.get("chapter_title") or "").strip()),
+            "detail": "canon.chapter_anchor.chapter_title is present",
+        },
+        {
+            "name": "section_goal_anchor",
+            "passed": bool(str(chapter_anchor.get("section_goal") or "").strip()),
+            "detail": "canon.chapter_anchor.section_goal is present",
+        },
+        {
+            "name": "constraints_anchor",
+            "passed": bool(_normalize_list(canon.get("constraints"))),
+            "detail": "canon.constraints contains at least one constraint",
+        },
+        {
+            "name": "book_identity_anchor",
+            "passed": bool(str(book_identity.get("title_working") or "").strip()),
+            "detail": "canon.book_identity.title_working is present",
+        },
+        {
+            "name": "style_guide_anchor",
+            "passed": bool(str(payload.get("style_guide") or "").strip()),
+            "detail": "style_guide is present",
+        },
+        {
+            "name": "open_loops_anchor",
+            "passed": bool(_normalize_list(payload.get("open_loops"))),
+            "detail": "open_loops contains at least one carry-forward item",
+        },
+        {
+            "name": "ending_hook_anchor",
+            "passed": (not expected_ending_hook) or (expected_ending_hook in _normalize_list(payload.get("open_loops"))),
+            "detail": "chapter_spec ending_hook is preserved in open_loops when provided",
+        },
+        {
+            "name": "fallback_meta_anchor",
+            "passed": bool(((payload.get("fallback_meta") or {}).get("active") is True)),
+            "detail": "fallback_meta.active is true",
+        },
+    ]
+
+    missing = [item["name"] for item in checks if not item["passed"]]
+    return {
+        "contract": "canon_fallback_parity_v1",
+        "generated_at": datetime.utcnow().isoformat(),
+        "all_passed": not missing,
+        "missing": missing,
+        "checks": checks,
+        "expected": {
+            "chapter_number": expected_chapter_number,
+            "ending_hook": expected_ending_hook,
+            "brief_title": str((brief or {}).get("title_working") or ""),
+        },
+    }
+
+
 def gate_architect_outline(payload):
     if not isinstance(payload, dict):
         return False, "invalid architect payload"
@@ -1166,6 +1317,27 @@ def load_recent_jsonl(path: Path, limit: int = 50):
     return rows
 
 
+def collect_used_fallback_stages(run_journal_path: Path) -> list:
+    """Return sorted unique fallback stages observed in run_journal.jsonl."""
+    if not run_journal_path.exists():
+        return []
+
+    used = set()
+    for line in run_journal_path.read_text(encoding="utf-8").splitlines():
+        item = parse_json_block(line, fallback=None)
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("event") or "") != "stage_fallback_applied":
+            continue
+        details = item.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        stage = str(details.get("stage") or item.get("stage") or "").strip()
+        if stage:
+            used.add(stage)
+    return sorted(used)
+
+
 def build_quality_failure_review_markdown(entries: list) -> str:
     lines = [
         "# Quality Failure Review",
@@ -1375,6 +1547,85 @@ def run_stage(
             + "\nDo not explain the failure. Return only the corrected final output."
         )
 
+    def apply_quarantine_backoff(*, error_code, error_details, attempt_index, route_hint, phase):
+        if str(error_code or "") != "AGENT_QUARANTINED":
+            return
+
+        now = time.time()
+        details = error_details if isinstance(error_details, dict) else {}
+        route_name = str(details.get("agent") or route_hint or "").strip()
+
+        quarantined_until = 0.0
+        try:
+            quarantined_until = float(details.get("quarantined_until") or 0.0)
+        except (TypeError, ValueError):
+            quarantined_until = 0.0
+
+        remaining_seconds = max(0.0, quarantined_until - now) if quarantined_until > 0 else 0.0
+
+        # If details are stale/missing, fall back to current health report for the route.
+        if route_name and remaining_seconds <= 0.0:
+            try:
+                health_report = orchestrator.get_agent_health_report()
+                route_health = ((health_report or {}).get("agents") or {}).get(route_name) or {}
+                remaining_seconds = max(
+                    remaining_seconds,
+                    float(route_health.get("quarantine_remaining_seconds") or 0.0),
+                )
+            except Exception:
+                pass
+
+        if remaining_seconds <= 0.0:
+            # Avoid hot-looping if quarantine metadata is unavailable.
+            remaining_seconds = 1.0
+
+        jitter_seconds = min(1.0, 0.25 * max(1, int(attempt_index)))
+        delay_seconds = max(1.0, remaining_seconds + jitter_seconds)
+
+        append_run_event(
+            run_journal_path,
+            "stage_retry_backoff",
+            {
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "phase": phase,
+                "attempt": int(attempt_index),
+                "error_code": str(error_code),
+                "route": route_name or None,
+                "quarantine_remaining_seconds": remaining_seconds,
+                "retry_delay_seconds": delay_seconds,
+            },
+        )
+        if diagnostics_path is not None:
+            append_jsonl(
+                diagnostics_path,
+                {
+                    "stage": stage_id,
+                    "agent": agent_name,
+                    "profile": profile_name,
+                    "attempt": int(attempt_index),
+                    "event": "stage_retry_backoff",
+                    "phase": phase,
+                    "error_code": str(error_code),
+                    "route": route_name or None,
+                    "quarantine_remaining_seconds": remaining_seconds,
+                    "retry_delay_seconds": delay_seconds,
+                },
+            )
+        update_cli_runtime_activity_from_context(
+            context_store,
+            {
+                "source": "cli-book-flow",
+                "state": "running",
+                "stage": stage_id,
+                "agent": agent_name,
+                "profile": profile_name,
+                "status_detail": f"quarantine backoff {delay_seconds:.1f}s ({phase})",
+            },
+        )
+        time.sleep(delay_seconds)
+
     for attempt in range(1, max_retries + 2):
         resource_block = build_resource_reference_block(context_store)
         prompt_with_feedback = prompt
@@ -1513,6 +1764,13 @@ def run_stage(
                     "error": str(e),
                     "error_code": e.code,
                 },
+            )
+            apply_quarantine_backoff(
+                error_code=e.code,
+                error_details=getattr(e, "details", {}),
+                attempt_index=attempt,
+                route_hint=(resolved_plan or {}).get("route"),
+                phase="attempt",
             )
             continue
         except Exception as e:
@@ -1714,6 +1972,13 @@ def run_stage(
                     "error_code": e.code,
                 },
             )
+            apply_quarantine_backoff(
+                error_code=e.code,
+                error_details=getattr(e, "details", {}),
+                attempt_index=recovery_attempt,
+                route_hint=(getattr(e, "details", {}) or {}).get("agent"),
+                phase="recovery",
+            )
             continue
         except Exception as e:
             wrapped_error = AgentUnexpectedError(
@@ -1860,6 +2125,33 @@ def run_stage(
         f"{stage_id} failed quality gate after retries: {last_error}",
         details={"stage": stage_id, "agent": agent_name, "profile": profile_name, "last_error": last_error},
     )
+
+
+def _is_canon_failover_trigger(error: StageQualityGateError) -> bool:
+    """Return True when canon should fail over to alternate route/model profile."""
+    message = str(error)
+    trigger_codes = (
+        "AGENT_QUARANTINED",
+        "OLLAMA_EMPTY_RESPONSE",
+        "OLLAMA_REQUEST_ERROR",
+        "OLLAMA_ENDPOINT_ERROR",
+    )
+    return any(code in message for code in trigger_codes)
+
+
+def _extract_stage_error_code(error: StageQualityGateError) -> str:
+    """Best-effort extraction of upstream error code embedded in stage failure message."""
+    message = str(error)
+    known_codes = (
+        "AGENT_QUARANTINED",
+        "OLLAMA_EMPTY_RESPONSE",
+        "OLLAMA_REQUEST_ERROR",
+        "OLLAMA_ENDPOINT_ERROR",
+    )
+    for code in known_codes:
+        if code in message:
+            return code
+    return "STAGE_QUALITY_GATE_ERROR"
 
 
 def run_flow(args):
@@ -2012,6 +2304,8 @@ def run_flow(args):
             "premise": args.premise,
             "target_word_count": args.target_word_count,
             "page_target": args.page_target,
+            "pen_name": getattr(args, "pen_name", "DaRaVeNrK"),
+            "publisher_name": getattr(args, "publisher_name", "DaRaVeNrK LLC"),
         },
         "chapter": {
             "number": args.chapter_number,
@@ -2473,23 +2767,153 @@ def run_flow(args):
         output_format='JSON with keys: canon, timeline, character_bible, open_loops, style_guide',
         failure_conditions=["missing canon", "missing timeline", "invalid JSON"],
     )
-    canon_payload = run_stage(
-        orchestrator=orchestrator,
-        lock_manager=lock_manager,
-        changes_log=changes_log,
-        context_store=context_store,
-        stage_id="canon",
-        agent_name="book-canon",
-        profile_name="book-canon",
-        prompt=canon_contract,
-        output_path=dirs["canon"] / "canon.json",
-        parse_json=True,
-        output_schema="canon",
-        max_retries=args.max_retries,
-        diagnostics_path=diagnostics_log,
-        verbose=args.verbose,
-        debug=debug_mode,
-    )
+    canon_fallback_reason = None
+    try:
+        canon_payload = run_stage(
+            orchestrator=orchestrator,
+            lock_manager=lock_manager,
+            changes_log=changes_log,
+            context_store=context_store,
+            stage_id="canon",
+            agent_name="book-canon",
+            profile_name="book-canon",
+            prompt=canon_contract,
+            output_path=dirs["canon"] / "canon.json",
+            parse_json=True,
+            output_schema="canon",
+            max_retries=args.max_retries,
+            diagnostics_path=diagnostics_log,
+            verbose=args.verbose,
+            debug=debug_mode,
+        )
+    except StageQualityGateError as err:
+        if _is_canon_failover_trigger(err):
+            trigger_code = _extract_stage_error_code(err)
+            append_run_event(
+                run_journal,
+                "stage_route_failover",
+                {
+                    "stage": "canon",
+                    "agent": "book-canon",
+                    "from_profile": "book-canon",
+                    "to_profile": "book-canon-nvidia",
+                    "from_route": "ollama_amd",
+                    "to_route": "ollama_nvidia",
+                    "trigger_error_code": trigger_code,
+                    "trigger_error": str(err),
+                },
+            )
+            try:
+                canon_payload = run_stage(
+                    orchestrator=orchestrator,
+                    lock_manager=lock_manager,
+                    changes_log=changes_log,
+                    context_store=context_store,
+                    stage_id="canon",
+                    agent_name="book-canon",
+                    profile_name="book-canon-nvidia",
+                    prompt=canon_contract,
+                    output_path=dirs["canon"] / "canon.json",
+                    parse_json=True,
+                    output_schema="canon",
+                    max_retries=args.max_retries,
+                    diagnostics_path=diagnostics_log,
+                    verbose=args.verbose,
+                    debug=debug_mode,
+                )
+            except StageQualityGateError as nvidia_err:
+                canon_fallback_reason = str(nvidia_err)
+        else:
+            canon_fallback_reason = str(err)
+
+    if canon_fallback_reason:
+        canon_payload = build_fallback_canon_payload(
+            brief=brief,
+            chapter=context_store.get("chapter") or {},
+            chapter_spec=chapter_spec,
+            outline_payload=outline_payload,
+        )
+        fallback_contract_report = validate_fallback_canon_contract(
+            canon_payload,
+            brief=brief,
+            chapter=context_store.get("chapter") or {},
+            chapter_spec=chapter_spec,
+        )
+        write_json(dirs["canon"] / "fallback_contract_report.json", fallback_contract_report)
+        append_run_event(
+            run_journal,
+            "stage_fallback_contract_report",
+            {
+                "stage": "canon",
+                "contract": fallback_contract_report.get("contract"),
+                "all_passed": bool(fallback_contract_report.get("all_passed")),
+                "missing": fallback_contract_report.get("missing") or [],
+                "report_path": str(dirs["canon"] / "fallback_contract_report.json"),
+            },
+        )
+        if not fallback_contract_report.get("all_passed"):
+            raise FrameworkIntegrityError(
+                "Deterministic canon fallback parity contract failed.",
+                details={
+                    "stage": "canon",
+                    "missing": fallback_contract_report.get("missing") or [],
+                    "report_path": str(dirs["canon"] / "fallback_contract_report.json"),
+                },
+            )
+        source_materials = {
+            "book_brief": brief,
+            "outline_payload": outline_payload,
+            "chapter_spec": chapter_spec,
+            "chapter_context": context_store.get("chapter") or {},
+        }
+        source_hashes = {name: payload_sha256(value) for name, value in source_materials.items()}
+        fallback_payload_checksum = payload_sha256(canon_payload)
+        write_json(dirs["canon"] / "canon.json", canon_payload)
+        write_json(
+            dirs["canon"] / "canon_fallback_metadata.json",
+            {
+                "fallback": True,
+                "fallback_type": "deterministic_canon_bootstrap",
+                "stage": "canon",
+                "profile": "book-canon",
+                "reason": canon_fallback_reason,
+                "generated_at": datetime.utcnow().isoformat(),
+                "fallback_payload_checksum": fallback_payload_checksum,
+                "source_input_hashes": source_hashes,
+                "source_input_paths": {
+                    "book_brief": str(dirs["brief"] / "book_brief.json"),
+                    "outline_payload": str(dirs["outline"] / "book_structure.json"),
+                    "chapter_spec": str(dirs["chapter_specs"] / "chapter_01.json"),
+                    "fallback_contract_report": str(dirs["canon"] / "fallback_contract_report.json"),
+                },
+            },
+        )
+        context_store["canon"] = {
+            "agent": "book-canon",
+            "profile": "book-canon",
+            "output_path": str(dirs["canon"] / "canon.json"),
+            "fallback": True,
+            "fallback_reason": canon_fallback_reason,
+            "fallback_artifact": str(dirs["canon"] / "canon_fallback_metadata.json"),
+            "fallback_contract_report": str(dirs["canon"] / "fallback_contract_report.json"),
+            "fallback_payload_checksum": fallback_payload_checksum,
+        }
+        append_run_event(
+            run_journal,
+            "stage_fallback_applied",
+            {
+                "stage": "canon",
+                "agent": "book-canon",
+                "profile": "book-canon",
+                "reason": canon_fallback_reason,
+                "fallback_type": "deterministic_canon_bootstrap",
+                "output_path": str(dirs["canon"] / "canon.json"),
+                "fallback_artifact": str(dirs["canon"] / "canon_fallback_metadata.json"),
+                "fallback_contract_report": str(dirs["canon"] / "fallback_contract_report.json"),
+                "fallback_payload_checksum": fallback_payload_checksum,
+                "source_input_hashes": source_hashes,
+            },
+        )
     write_json(dirs["canon"] / "timeline.json", canon_payload.get("timeline", {}))
     write_json(dirs["canon"] / "character_bible.json", canon_payload.get("character_bible", {}))
     write_json(dirs["canon"] / "open_loops.json", canon_payload.get("open_loops", []))
@@ -2605,7 +3029,7 @@ def run_flow(args):
             context_store=context_store,
             stage_id=f"writer_section_{idx:02d}",
             agent_name="book-writer",
-            profile_name="book-writer",
+            profile_name=args.writer_profile,
             prompt=writer_contract,
             output_path=dirs["drafts_ch"] / f"section_{idx:02d}.md",
             parse_json=False,
@@ -3356,16 +3780,36 @@ def run_flow(args):
         },
     )
 
-    write_text(dirs["final"] / "manuscript_v1.md", current_manuscript)
-    write_text(dirs["final"] / "manuscript_v2.md", current_manuscript)
+    # Build attribution title page and prepend to the manuscript
+    pen_name = getattr(args, "pen_name", "DaRaVeNrK")
+    publisher_name = getattr(args, "publisher_name", "DaRaVeNrK LLC")
+    year = datetime.utcnow().year
+    title_page = (
+        f"# {args.title}\n\n"
+        f"**Author:** {pen_name}  \n"
+        f"**Publisher:** {publisher_name}  \n"
+        f"**Copyright:** © {year} {publisher_name}. All rights reserved.  \n"
+        f"**Chapter {args.chapter_number}:** {args.chapter_title}\n\n"
+        f"---\n\n"
+    )
+    signed_manuscript = title_page + current_manuscript
+
+    write_text(dirs["final"] / "manuscript_v1.md", signed_manuscript)
+    write_text(dirs["final"] / "manuscript_v2.md", signed_manuscript)
 
     validation = validate_required_artifacts(run_dir, expected_section_count=len(chapter_sections))
+    used_fallbacks = collect_used_fallback_stages(run_journal)
     summary = {
         "run_dir": str(run_dir),
         "book_root": str(book_root),
         "framework_root": str(framework_root),
         "runs_root": str(runs_root),
         "title": args.title,
+        "attribution": {
+            "pen_name": getattr(args, "pen_name", "DaRaVeNrK"),
+            "publisher_name": getattr(args, "publisher_name", "DaRaVeNrK LLC"),
+            "copyright_year": datetime.utcnow().year,
+        },
         "chapter_number": args.chapter_number,
         "chapter_title": args.chapter_title,
         "section_title": args.section_title,
@@ -3373,6 +3817,13 @@ def run_flow(args):
         "publisher_decision": publisher_qa.get("decision"),
         "publisher_attempts": publisher_attempts,
         "forced_completion": forced_completion,
+        "used_fallbacks": used_fallbacks,
+        "fallback_provenance": {
+            "used_fallbacks": used_fallbacks,
+            "used_fallback_count": len(used_fallbacks),
+            "human_review_recommended": bool(used_fallbacks),
+            "note": "One or more deterministic stage fallbacks were used in this run." if used_fallbacks else "No deterministic stage fallbacks were used in this run.",
+        },
         "artifact_validation": validation,
         "merge_stats": merge_stats,
         "context_tracking_strategy": context_tracking_strategy,
@@ -3516,6 +3967,12 @@ def build_parser():
     p.add_argument("--editor-profile", "--editor_profile", dest="editor_profile", default="book-editor")
     p.add_argument("--publisher-brief-profile", "--publisher_brief_profile", dest="publisher_brief_profile", default="book-publisher-brief")
     p.add_argument("--publisher-profile", "--publisher_profile", dest="publisher_profile", default="book-publisher")
+
+    # Attribution / ownership
+    p.add_argument("--pen-name", "--pen_name", dest="pen_name", default="DaRaVeNrK",
+                   help="Author pen name to appear on the manuscript (e.g. Demosthenes, Locke, or a custom pen name)")
+    p.add_argument("--publisher-name", "--publisher_name", dest="publisher_name", default="DaRaVeNrK LLC",
+                   help="Publisher / company name for the copyright line")
 
     p.add_argument("--output-dir", "--output_dir", dest="output_dir", default="/home/daravenrk/dragonlair/book_project")
     return p

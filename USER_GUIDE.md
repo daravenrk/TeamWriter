@@ -237,6 +237,69 @@ PYTHONPATH=/home/daravenrk/dragonlair /home/daravenrk/dragonlair/bin/agentctl se
 PYTHONPATH=/home/daravenrk/dragonlair /home/daravenrk/dragonlair/bin/agentctl server-watch --interval 1
 ```
 
+## API Status Fallback Filters
+
+Use `/api/status` filters to isolate runs that used deterministic fallback artifacts.
+
+Base status payload:
+
+```sh
+curl -s "http://127.0.0.1:11888/api/status" | jq '.task_counts, (.tasks | length)'
+```
+
+Only tasks with fallback provenance (`used_fallbacks` non-empty):
+
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_used=true" | jq '.tasks[] | {id, status, runtime_stage, fallback_provenance_summary}'
+```
+
+Only tasks without fallback provenance (`used_fallbacks` empty or missing):
+
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_used=false" | jq '.tasks[] | {id, status, runtime_stage}'
+```
+
+Only tasks that used a specific fallback stage (current stage example: `canon`):
+
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=canon" | jq '.tasks[] | {id, status, runtime_stage, used_fallbacks: .fallback_provenance_summary.used_fallbacks}'
+```
+
+Combined filter example (must have fallback + include canon stage):
+
+```sh
+curl -s "http://127.0.0.1:11888/api/status?fallback_used=true&fallback_stage=canon" | jq '.tasks[] | {id, status, hold, fallback_integrity_summary, fallback_provenance_summary}'
+```
+
+Interpretation notes:
+
+- `fallback_provenance_summary.used_fallbacks` is the authoritative stage list from `run_summary.json`.
+- `fallback_integrity_summary.blocked=true` indicates auto-resume was blocked due to integrity failures and needs operator repair/retry.
+- Filters apply to the current status task window; older runs may not appear if they are outside the API's returned task list.
+
+### Stage Normalization Policy
+
+The `fallback_stage` filter parameter applies case-insensitive, whitespace-tolerant matching:
+
+- Input is automatically converted to lowercase (e.g., `"CANON"`, `"Canon"` → `"canon"`)
+- Leading/trailing whitespace is trimmed (e.g., `"  canon  "` → `"canon"`)
+- Internal whitespace is NOT collapsed (e.g., `"can on"` will be rejected as invalid)
+- If invalid, the API returns HTTP 400 with a list of valid values
+
+Examples:
+
+```sh
+# All of these are equivalent and will return the same results:
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=canon"
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=CANON"
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=Canon"
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=%20canon%20"  # with spaces, URL-encoded
+
+# This will return HTTP 400 error:
+curl -s "http://127.0.0.1:11888/api/status?fallback_stage=can+on"
+# Response: {"detail": "invalid fallback_stage 'can on'; valid values: canon"}
+```
+
 ---
 
 For more details, see the files in `/home/daravenrk/dragonlair/` and `/opt/ai-stack/`.

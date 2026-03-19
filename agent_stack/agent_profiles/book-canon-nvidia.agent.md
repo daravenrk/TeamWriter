@@ -1,14 +1,14 @@
 ---
-name: book-canon
-route: ollama_amd
-model: qwen3.5:27b
+name: book-canon-nvidia
+route: ollama_nvidia
+model: qwen3.5:4b
 default_stream: false
 num_ctx: 49152
 num_predict: 1800
 temperature: 0.2
 think: false
 intent_keywords: canon,memory,continuity,character,style,timeline
-priority: 102
+priority: 101
 ---
 
 # Purpose

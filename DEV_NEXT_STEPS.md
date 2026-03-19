@@ -712,20 +712,279 @@ These should be completed once publisher outputs successfully:
   - Require checksum/manifest validation of upstream artifacts before resume to avoid drift.
   - Goal: reduce repetitive end-to-end reruns when validating fixes for a downstream stage.
 
-- **Todo 117**: Add canon route failover when AMD agent is quarantined
-  - Current run evidence shows `canon` attempt 1 can fail with empty response and then immediately collapse because `ollama_amd` is quarantined for attempts 2/3 and recovery.
-  - Add stage-level route failover policy for `canon` (for example AMD primary, NVIDIA fallback) when errors are `AGENT_QUARANTINED` or empty-response transport faults.
-  - Emit explicit route-failover events in `run_journal.jsonl` including source route, destination route, and trigger error code.
+- **Completed (2026-03-18) / Todo 117**: Add canon route failover when AMD agent is quarantined
+  - Implemented canon-stage failover in `book_flow.py`: when `book-canon` fails with `AGENT_QUARANTINED`, `OLLAMA_EMPTY_RESPONSE`, `OLLAMA_REQUEST_ERROR`, or `OLLAMA_ENDPOINT_ERROR`, flow emits `stage_route_failover` and retries canon with NVIDIA profile `book-canon-nvidia`.
+  - Added new profile `agent_stack/agent_profiles/book-canon-nvidia.agent.md` (`ollama_nvidia`, `qwen3.5:4b`) for deterministic fallback routing.
+  - `run_journal.jsonl` now records source profile/route, destination profile/route, and trigger error code for canon failover audits.
 
 - **Todo 118**: Introduce quarantine-aware retry backoff windows
   - Retries currently happen fast enough that quarantined agents are retried before cooldown expiry, causing deterministic repeated failure.
   - Add backoff that respects remaining quarantine duration before retrying the same route/agent.
   - Include `quarantine_remaining_seconds` in stage error events to explain retry behavior.
+  - **Evaluation snapshot (2026-03-18):** Current canon failures confirm immediate retries hit quarantine repeatedly (`AGENT_QUARANTINED`) instead of waiting for cooldown expiry.
+  - **Recommended retry rule:** `next_retry_delay_seconds = max(base_backoff_seconds, quarantine_remaining_seconds + jitter_seconds)` with bounded jitter to avoid synchronized retry storms.
+  - **Acceptance checks:** no retry attempt should occur while quarantine is active; run journal should show computed delay and remaining quarantine; total repeated quarantine errors per stage should drop sharply in A/B validation.
+  - **Implementation progress (2026-03-18):** `run_stage(...)` now applies quarantine-aware backoff on both stage attempts and recovery attempts when error code is `AGENT_QUARANTINED`, emits `stage_retry_backoff` journal/diagnostic events, and sleeps for computed delay (`remaining + bounded jitter`).
+  - **Remaining validation:** run an end-to-end canon failure drill and confirm retries wait for cooldown instead of immediate re-fire.
 
 - **Todo 119**: Add deterministic canon fallback artifact for chapter bootstrap
   - If canon cannot be generated after retries/recovery/failover, synthesize a minimal valid canon payload from `book_brief`, `outline_payload`, and `chapter_spec` to preserve pipeline continuity.
   - Persist it as a clearly tagged fallback artifact and record a `stage_fallback_applied` event for `canon`.
   - Keep fallback strict and auditable so downstream editorial stages can proceed without silent schema drift.
+  - **Evaluation snapshot (2026-03-18):** Canon remains a critical choke point; even with route failover, both primary and fallback routes can fail under endpoint/model instability.
+  - **Implementation progress (2026-03-18):** Added deterministic fallback path in `book_flow.py` after canon retries/recovery/failover exhaustion; writes `canon.json` plus `canon_fallback_metadata.json` and emits `stage_fallback_applied` for `canon`.
+  - **Remaining validation:** run a forced canon-failure drill and verify downstream stages (`writer`, editorial chain) proceed with fallback artifacts and no schema break.
+
+- **Todo 130**: Add fallback provenance and checksum verification for generated fallback artifacts
+  - Record source inputs (`book_brief`, `outline_payload`, `chapter_spec`) fingerprints and fallback payload checksum in metadata.
+  - Expose provenance in run summary and diagnostics so operators can audit exactly which inputs produced fallback state.
+  - Add verification step before resume/reconcile to detect fallback artifact drift or manual corruption.
+  - **Implementation progress (2026-03-18):** canon fallback metadata now includes deterministic source-input hashes and fallback payload checksum; run journal fallback event also records these hashes/checksum for audit.
+  - **Remaining validation:** add resume/reconcile checksum verification pass and surface checksum mismatch warnings in diagnostics/UI.
+
+- **Todo 131**: Add fallback parity contract checks for deterministic artifacts
+  - Validate fallback artifacts preserve minimum required semantic anchors (chapter id/title, section goal, ending hook, constraints) before downstream stages consume them.
+  - Add a contract report (`fallback_contract_report.json`) that marks each required anchor as present/missing.
+  - Block resume if fallback parity checks fail, with actionable diagnostics for operator repair.
+  - **Implementation progress (2026-03-18):** added `validate_fallback_canon_contract(...)` in `book_flow.py`, writes `fallback_contract_report.json`, logs `stage_fallback_contract_report`, and raises integrity error when required anchors are missing.
+  - **Remaining validation:** ensure resume/reconcile paths consume the same contract report and prevent reuse of parity-failed fallback artifacts.
+
+- **Todo 132**: Add reconcile-time verification for fallback metadata and parity reports
+  - During reconcile/startup recovery, detect fallback artifacts and verify both checksum metadata and parity contract report before re-queue/resume.
+  - Emit explicit recovery diagnostics for mismatch cases: `fallback_checksum_mismatch`, `fallback_contract_failed`, `fallback_metadata_missing`.
+  - Route invalid fallback runs into operator-review state instead of auto-resuming with untrusted artifacts.
+  - **Implementation progress (2026-03-18):** `api_server.py` now verifies canon fallback integrity (`canon_fallback_metadata.json`, `fallback_contract_report.json`, and checksum parity against `canon.json`) during both task-ledger startup bootstrap and `/api/book-jobs/reconcile`; invalid fallback runs are forced to `failed + hold` with `fallback_integrity_failed` run-journal events and are not auto-resumed.
+  - **Remaining validation:** run two drills (valid fallback and tampered fallback) and confirm reconcile/startup behavior, `skipped.reason=fallback_integrity_failed`, and operator-visible error/issue payloads.
+
+- **Todo 133**: Surface fallback-integrity state in UI/CLI production status summaries
+  - Expose `fallback_integrity.checked/valid/issues` from production status in `/api/status` and UI cards so operators can identify blocked runs without log digging.
+  - Add explicit operator guidance text for `failed + hold` fallback-integrity blocks (how to repair artifacts and safely retry).
+  - **Implementation progress (2026-03-18):** `api_server.py` now emits per-task `fallback_integrity_summary` and top-level `fallback_integrity_blocks` in the status/UI payload, including repair guidance for checksum mismatch, missing metadata, and failed contract cases.
+  - **Remaining validation:** restart the API, induce a blocked fallback-integrity run, and verify both `/api/status` and `/api/ui-state` expose the block without needing nested artifact inspection.
+
+- **Todo 134**: Add a fallback-integrity drill for status/UI visibility
+  - Create a lightweight operator drill that tampers with a canon fallback artifact, runs reconcile, and asserts the status payload surfaces `fallback_integrity_blocks` plus task-level guidance.
+  - Include the clean-path control case where verified fallback artifacts remain resumable and no block is emitted.
+  - **Implementation progress (2026-03-19):** `agent_stack/scripts/fallback_integrity_drill.py` written and passing 6/6: CLEAN, TAMPERED-CHECKSUM, FAILED-CONTRACT, NO-FALLBACK-EVENT artifact-level cases + live-API phantom-block guard. Also caught and fixed a checksum parity bug: `_stable_payload_sha256` in `api_server.py` was using `ensure_ascii=False` with no `default=str`, diverging from `book_flow.payload_sha256` (`ensure_ascii=True, default=str`); real-run checksums would never have verified. Fixed and compile-confirmed.
+  - **Remaining validation:** run against a real forced canon-failure scenario (live book run, not synthetic temp dir) to confirm blocking and repair guidance surface in UI.
+
+- **Todo 139**: Add manuscript attribution signature (pen name, publisher, copyright)
+  - Every final manuscript export should carry ownership metadata: author pen name, publisher/company name, and copyright year, both prepended to the manuscript text and recorded in `run_summary.json`.
+  - Support multiple pen names based on book type (e.g. `Demosthenes`, `Locke`, custom approved names) and the default ownership entity `DaRaVeNrK LLC`.
+  - **Implementation progress (2026-03-19):** `BookFlowRequest` in `api_server.py` now has `pen_name` (default `DaRaVeNrK`) and `publisher_name` (default `DaRaVeNrK LLC`) fields. `book_flow.py` now carries both fields through `context_store["book"]`, prepends a title page (author / publisher / copyright / chapter header) to `manuscript_v1.md` and `manuscript_v2.md`, and records an `attribution` block in `run_summary.json`. CLI flags `--pen-name` and `--publisher-name` added to `build_parser()`. Compile-confirmed.
+  - **Remaining:** add per-book attribution config persistence (Todo 140), surface in UI (Todo 141), expand to colophon/legal page (Todo 142).
+
+- **Todo 140**: Add per-book attribution config file (`book_attribution.json`)
+  - Store `pen_name`, `publisher_name`, and optional `isbn_placeholder` under `{book_root}/book_attribution.json` so operators set attribution once per book and it is automatically loaded for every subsequent chapter/run — no need to repeat flags or API fields.
+  - Auto-create with defaults (`DaRaVeNrK` / `DaRaVeNrK LLC`) on first run if the file does not exist.
+  - Allow override: `--pen-name` CLI flag and `pen_name` API field take precedence over the file, and on override, update the file for future runs.
+  - Add a `pen_name_status` field (e.g. `provisional`, `publisher_approved`) so operators can track approval state; block final export if status is `provisional` and a strict-mode flag is set.
+
+- **Todo 141**: Surface attribution in WebUI run-summary card and status payload
+  - Expose `attribution.pen_name`, `attribution.publisher_name`, and `attribution.pen_name_status` (from Todo 140) in `/api/status` task records and in the UI run-summary cards.
+  - Add a visual badge for pending/unconfirmed pen names so operators see at a glance when a run used an unapproved pen name.
+  - Include attribution in the `/api/book-jobs/report` export and any downloadable run-summary artifacts.
+
+- **Todo 142**: Expand title page to full legal colophon / front matter
+  - Replace the current minimal title-page block with a proper legal front matter section suitable for EPUB/print-on-demand formatting: title, author pen name, publisher, copyright year, first-edition statement, all-rights-reserved language, ISBN/ASIN placeholder, and contact/rights-inquiry line for DaRaVeNrK LLC.
+  - Write the colophon to a dedicated `06_final/colophon.md` in addition to prepending it to the manuscript, so it can be styled independently by downstream export tooling.
+  - Add a colophon schema so future export stages can template it for different output formats (Markdown, EPUB OPF metadata, PDF cover-page injection).
+
+- **Todo 135**: E2E canon fallback drill with live book run
+  - Force a canon exhaustion in a real book-flow run (by triggering model/route failures) and verify the full pipeline: fallback artifact written → `stage_fallback_applied` event → downstream stages (writer, editorial) consume the fallback → quality gates reflect fallback provenance → final export marks "produced via canon fallback".
+  - Confirm `_verify_canon_fallback_integrity` correctly blocks/allows that run at reconcile and that the operator sees the block in `/api/status` + `/api/ui-state` without log-diving.
+  - Document the minimum recovery procedure: tamper fix → artifact re-verify → hold release → safe-resume.
+
+- **Todo 136**: Generalize fallback integrity to sections_written and other fallback-able stages ✅ IMPLEMENTED
+  - **Implementation complete** (api_server.py + fallback_integrity_drill.py, drill 6/6 passing):
+    - Added `_FALLBACK_STAGE_CONFIGS` registry dict (currently: `"canon"` entry; add new stages here)
+    - Added `_verify_stage_fallback_integrity(run_dir, stage, config)` — generic verifier replacing canon-specific logic
+    - Added `_any_fallback_stage_failed(fallback_integrity: dict) -> (bool, issues, failed_stages)` helper
+    - Added `_verify_all_stage_fallback_integrity(run_dir) -> {stage: result}` convenience wrapper
+    - Kept `_verify_canon_fallback_integrity(run_dir)` as backward-compat thin wrapper
+    - `fallback_integrity` in `production_status` is now `{"canon": {...}}` per-stage dict
+    - `_fallback_integrity_summary()` now returns `blocked_stages`, `all_issues`, and per-stage `stages` dict
+    - All 3 reconcile/startup guards updated to use `_any_fallback_stage_failed()`
+    - **Guard logic tightened**: early-return now fires when `not fallback_event_seen` (journal is authoritative); a metadata file without a corresponding journal event is skipped, not checked
+    - Drill updated to match new metadata schema (`"fallback": True, "stage": "canon"`)
+  - Remaining: register additional stages (e.g. `sections_written`) when their fallback paths are built
+
+- **Todo 137**: Add fallback artifact staleness/expiry detection ✅ IMPLEMENTED
+  - **Implementation complete** (api_server.py + fallback_integrity_drill.py, drill 8/8 passing):
+    - Added `_FALLBACK_STALE_HOURS: float` constant (default 72h, overridable via `FALLBACK_STALE_HOURS` env var) to `api_server.py`
+    - `_verify_stage_fallback_integrity()` now parses `generated_at` from fallback metadata (accepts ISO-8601 or Unix float string) and emits:
+      - `fallback_artifact_stale` — age > `_FALLBACK_STALE_HOURS`
+      - `fallback_generated_at_missing` — field absent from metadata
+      - `fallback_generated_at_unparseable` — field present but not parseable
+    - `age_hours` (rounded to 2dp) and `generated_at` are surfaced in the per-stage result dict when present
+    - These issues flow through `_any_fallback_stage_failed()` and block auto-resume via existing reconcile guards — no new guard wiring needed
+    - Drill updated: added `FRESH_TIMESTAMP`/`STALE_TIMESTAMP` constants, `_build_stale_run_dir`, `_build_missing_generated_at_run_dir`, and `test_stale_artifact` / `test_missing_generated_at` test cases
+  - Remaining: add stale-specific repair guidance hint in `_fallback_integrity_summary()`'s `guidance` field
+
+- **Todo 138**: Add final-export fallback provenance annotation ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`book_flow.py`): `run_summary.json` now includes top-level `used_fallbacks` and a `fallback_provenance` block containing `used_fallbacks`, `used_fallback_count`, `human_review_recommended`, and a provenance note.
+  - Fallback stages are derived from `run_journal.jsonl` via `stage_fallback_applied` events (authoritative event-driven provenance).
+  - Remaining: expose this provenance in `/api/status` + WebUI run-summary card and add configurable release veto policy requiring operator sign-off when `used_fallbacks` is non-empty.
+
+- **Todo 143**: Surface fallback provenance in `/api/status` and `/api/ui-state` ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`api_server.py`): task payloads now include `fallback_provenance_summary` (derived from `run_summary.json`) with `used_fallbacks`, `used_fallback_count`, `human_review_recommended`, and `note`.
+  - `fallback_integrity_blocks` now include fallback provenance fields (`used_fallbacks`, `human_review_recommended`) so operator alerts carry both integrity and provenance context.
+  - Remaining: consume/render this in the WebUI run-summary card for at-a-glance visibility.
+
+- **Todo 144**: Add fallback sign-off release policy gate
+  - Introduce a configurable policy that blocks `final_export` completion when `used_fallbacks` is non-empty and no explicit operator sign-off is present.
+  - Record sign-off decision, actor, timestamp, and rationale in `run_journal.jsonl` and `run_summary.json` for auditability.
+
+- **Todo 145**: Archive-time provenance manifest and checksum attestation
+  - Generate `fallback_provenance_manifest.json` during archive/export containing fallback stages, artifact paths, metadata checksums, and integrity verdict snapshot.
+  - Include manifest hash in export logs to support immutable provenance audits.
+
+- **Todo 146**: Add provenance regression checks in `regression_status_synthesis.py` ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`agent_stack/scripts/regression_status_synthesis.py`): added schema validators for task `fallback_provenance_summary` and `run_summary.json` fallback provenance fields.
+  - Added synthetic fixture coverage for both fallback-used and no-fallback variants (`fixture_provenance_regression`) to prevent schema drift.
+  - Added live provenance validation path (`live_provenance_regression`) that checks `/api/status` book-flow tasks and validates `run_summary.json` when available.
+  - Remaining: wire this script into the standard regression runner wrapper so provenance checks are always executed in CI/operator smoke runs.
+
+- **Todo 147**: Add `/api/status` filter for fallback-used runs ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`api_server.py`): `/api/status` now accepts optional query params `fallback_used` (`true|false`) and `fallback_stage` (e.g. `canon`).
+  - Filtering is applied in `_build_status_payload()` against task `fallback_provenance_summary.used_fallbacks`, and works across queued/running/completed/cancelled tasks in the status window.
+  - Remaining: add explicit regression checks for the new query params and document examples in operator/API docs.
+
+- **Todo 148**: Add fallback provenance badge + review CTA in WebUI
+  - Display a clear provenance badge in the run list/card when `used_fallbacks` is non-empty.
+  - Add a one-click “review fallback artifacts” action linking to run dir and integrity guidance.
+
+- **Todo 149**: Add regression wrapper target for provenance checks
+  - Add a `bin/regression-provenance` host-side wrapper that runs `regression_status_synthesis.py` in fixtures-only mode and reports pass/fail succinctly.
+  - Integrate it into the existing operator regression checklist to ensure fallback provenance schema stability after API changes.
+
+- **Todo 150**: Add explicit API contract docs for fallback provenance fields
+  - Document `fallback_provenance_summary` and `fallback_integrity_blocks.used_fallbacks` in API docs/user guide with example payloads for fallback-used and clean runs.
+  - Include backward-compat notes for clients expecting older status payloads.
+
+- **Todo 151**: Add minimal UI contract test for fallback provenance rendering
+  - Add a lightweight UI payload fixture test ensuring provenance badges and review CTA visibility rules map correctly from status payload fields.
+  - Cover both empty and non-empty `used_fallbacks` states to prevent false-positive badges.
+
+- **Todo 152**: Add regression assertions for `/api/status` fallback filters ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`agent_stack/scripts/regression_status_synthesis.py`): added `live_status_filter_regression()` covering `/api/status?fallback_used=true`, `/api/status?fallback_used=false`, and `/api/status?fallback_stage=canon`.
+  - Added assertions that filtered results satisfy semantics and consistency constraints (membership correctness, disjoint true/false sets, and subset-of-base invariants).
+  - Remaining: add explicit mixed-stage fallback fixtures once additional fallback stages (beyond `canon`) are introduced.
+
+- **Todo 153**: Add API examples for fallback filtering in `USER_GUIDE.md` ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`USER_GUIDE.md`): added copy-paste `curl` + `jq` examples for `/api/status`, `fallback_used=true`, `fallback_used=false`, `fallback_stage=canon`, and combined filter usage.
+  - Added interpretation notes for `fallback_provenance_summary` vs `fallback_integrity_summary.blocked`, plus status-window scope caveat.
+  - Remaining: mirror these examples in any external API reference pages if they diverge from `USER_GUIDE.md`.
+
+- **Todo 154**: Add UI filter controls for fallback-used/stage
+  - Add WebUI toggles/dropdown that map directly to `/api/status` filter params.
+  - Provide persistent filter state in UI session storage for operator workflows.
+
+- **Todo 155**: Add `status_filter_regression` mode flag to synthesis script
+  - Add a CLI switch to run only provenance/filter checks without route queue synthesis for fast operator smoke tests.
+  - Keep full mode as default to preserve existing broad regression coverage.
+
+- **Todo 156**: Add operator cheat sheet for fallback triage queries
+  - Document high-signal query combinations (`fallback_used=true`, `fallback_stage=canon`, hold/blocked focus) and expected interpretation.
+  - Include copy-paste curl examples and a short decision flow for hold-clear vs re-run.
+
+- **Todo 157**: Add API pagination notes for filtered status windows
+  - Clarify interaction between current status task window limits and fallback filters to prevent missed-run assumptions.
+  - Define next-step design for stable pagination/cursor if filtered views become primary operator workflow.
+
+- **Todo 158**: Add `--filters` shortcuts to `agentctl server-status`
+  - Support CLI flags mapping to `/api/status` filter params (`--fallback-used`, `--fallback-stage`) for operator speed.
+  - Add compact tabular output mode focused on provenance/integrity triage columns.
+
+- **Todo 159**: Add fallback-stage enum validation in API layer ✅ CORE IMPLEMENTED
+  - **Core implementation complete** (`api_server.py`): `/api/status` now validates `fallback_stage` against registered fallback stages from `_FALLBACK_STAGE_CONFIGS`.
+  - Invalid values return HTTP 400 with explicit guidance including valid stage values.
+  - Regression coverage extended (`regression_status_synthesis.py`) with invalid-stage checks and environment-aware fallback behavior.
+  - Remaining: once the live API process is refreshed, promote the invalid-stage check from fallback/skip behavior to strict live-only assertion.
+
+- **Todo 160**: Add status payload contract snapshot fixtures
+  - Store representative JSON snapshots for unfiltered and filtered `/api/status` responses.
+  - Use snapshot diffs as a guard against accidental breaking changes in operator-facing fields.
+
+- **Todo 161**: Add strict-live mode for regression filter checks ✅ CORE IMPLEMENTED
+  - **Implementation**: Added `--strict-live` CLI flag to `regression_status_synthesis.py` main()
+  - `live_status_filter_invalid_stage_regression(strict_live=False)` now accepts parameter
+  - Default (strict_live=False): Returns SKIP on ModuleNotFoundError (host-side tolerance for missing API deps)
+  - Strict mode (strict_live=True): Returns FAIL if in-process validation unavailable (CI/container enforcement)
+  - Usage: `python3 agent_stack/scripts/regression_status_synthesis.py --strict-live`
+  - Validates that CI/container runs don't hide stale-server issues by requiring observable invalid-stage rejection
+
+- **Todo 162**: Add stage-normalization policy for filter input ✅ CORE IMPLEMENTED
+  - **Policy**: Case-insensitive (auto-lowercase), whitespace-trimmed matching for `fallback_stage` filter parameter
+  - **Implementation**: Added `_normalize_fallback_stage(input_value)` helper in `api_server.py` with docstring and examples
+  - **Behavior**: "CANON", "Canon", "  canon  " all normalize to "canon"; internal spaces rejected as invalid (e.g., "can on")
+  - **Error handling**: HTTP 400 with guidance on valid values if normalized input doesn't match registered stages
+  - **Documentation**: Added "Stage Normalization Policy" subsection in `USER_GUIDE.md` with URL-encoded examples showing equivalence
+  - **Result**: Operators can use any case variation without memorizing exact stage names
+
+- **Todo 163**: Add API error contract examples for invalid filters
+  - Add explicit 400 response examples in docs for invalid `fallback_stage` and malformed filter combinations.
+  - Include valid-values hint behavior and troubleshooting guidance.
+
+- **Todo 120**: Evaluate stage-by-stage think mode policy and default profile settings
+  - Build an evidence-based matrix for each major stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial stages) indicating when `think: false` improves reliability/latency and when deeper reasoning is worth the cost.
+  - Capture measurable criteria: schema pass rate, retry count, latency, hallucination/continuity regressions, and token economy impact.
+  - Produce an implementation plan for profile updates (including safe defaults and rollback toggles) and document final policy in the operator guide.
+
+- **Todo 121**: Redesign WebUI with hardware-first system view (AMD + NVIDIA GPU pools)
+  - Add a dedicated Hardware view that visually separates the two model environments: AMD/ROCm pool and NVIDIA pool, including per-route capacity and active model assignment.
+  - Integrate ROCm SMI telemetry for AMD cards: GPU temperature, average board power, VRAM usage, and GPU utilization (with refresh cadence and stale-data indicators).
+  - Add equivalent NVIDIA telemetry cards (temperature, power, VRAM, GPU utilization) so operators can compare both pools side by side and quickly identify thermal/power bottlenecks.
+  - Define data contract and backend aggregator endpoint for hardware metrics, including unit normalization and safety thresholds for warning/critical UI states.
+  - Include UX acceptance criteria: at-a-glance health summary, per-GPU detail drill-down, and clear routing context showing which stages/models are currently mapped to each hardware pool.
+
+- **Todo 122**: Design gate-issued monetary reward economy for model selection and quality outcomes
+  - Define a spend-and-settle reward economy where each stage attempt "spends" budget based on model size/cost and latency, then settles reward based on gate outcomes (pass/fail, retries, and downstream stability).
+  - Make acceptance/quality-gate agents the reward authorities: they mint positive rewards for strong, first-pass, schema-valid outputs and apply penalties for failures, retries, regressions, or avoidable over-spend on oversized models.
+  - Add model-to-task-size efficiency policy so agents are rewarded for choosing the smallest reliable model that passes quality, while escalating to larger models only when evidence shows reliability gain.
+  - Add failure-learning loop: when a profile fails repeatedly, reduce its effective budget/priority and record recovery strategies that improved pass rate, then gradually restore budget after sustained success.
+  - Define accounting artifacts: per-stage cost/reward ledger entries, profile wallet balances, gate-issued reward events, and operator dashboards showing ROI by profile/model/route.
+
+- **Todo 123**: Analyze queue-depth-aware scheduling and liberal model swapping under multi-queue load
+  - Evaluate whether higher queue concurrency should unlock more aggressive cross-route/model swapping, including temporary promotion to alternate models when multiple queues are active and latency pressure rises.
+  - Define guardrails so liberal swapping improves throughput without destroying determinism: queue-depth thresholds, per-stage allowlists, VRAM headroom checks, and quarantine-aware exclusions.
+  - Compare policies for single-queue vs multi-queue operation: conservative stable routing when the system is quiet, adaptive scheduling when backlog grows, and explicit rollback when quality gates regress.
+  - Produce an analysis matrix covering throughput gain, quality impact, retry rate, cost/power impact, and fairness across AMD/NVIDIA pools.
+  - Recommend whether this should be implemented as an orchestrator policy layer, a pressure-mode extension, or a route planner plugin with operator override controls.
+
+- **Todo 124**: Run a dedicated LLM feature-dispatch review (`think`, tool-calling model, coding model)
+  - Build a stage-and-task dispatch matrix defining when to use: standard no-think calls, `think: false`, `think: true`, tool-oriented model calls, and coding-oriented model calls.
+  - Include hard decision criteria: output type required (strict JSON vs prose), expected tool use, code-generation depth, latency budget, retry risk, and continuity risk.
+  - Define default and override rules per stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial chain), including rollback toggles and safe fallbacks.
+  - Add observability requirements so every call logs which dispatch rule fired and why (rule id + stage + selected profile/model/options).
+  - Deliverable: operator-facing "LLM Feature Dispatch Playbook" with examples and anti-patterns.
+
+- **Todo 125**: Extend OpenClaw technical analysis with an explicit Dragonlair feature-routing crosswalk
+  - Add a required output to Todo 65: map OpenClaw control patterns to Dragonlair decisions for `think` usage, tool-LLM selection, and coding-LLM selection.
+  - Identify what OpenClaw can answer directly, what Dragonlair must decide independently, and where book-flow constraints require stricter policy than OpenClaw defaults.
+  - Produce a gap table: `Decision area`, `OpenClaw reference behavior`, `Current Dragonlair behavior`, `Recommended Dragonlair policy`, `Evidence required`.
+  - Include an implementation sequence so policy work lands in this order: profile defaults -> orchestrator decision layer -> diagnostics fields -> UI visibility.
+  - Success criterion: after Todo 65 closes, operators can explain and predict which LLM feature path is selected for each stage without inspecting source code.
+
+- **Todo 126**: Add explicit `think` policy lint and enforcement across all stage profiles
+  - Require every active stage profile to declare `think` explicitly (`true` or `false`) so behavior never depends on model defaults.
+  - Add lint failure for missing `think` on critical production profiles (`book-*` stages) and emit a startup warning/error before runs begin.
+  - Add a migration checklist to update existing profiles and verify resolved options in diagnostics.
+
+- **Todo 127**: Handle "thinking present, final response empty" as a first-class failure mode
+  - Add explicit error classification when payload contains non-empty `thinking` but empty final `response`.
+  - Record this classification in diagnostics and quarantine events so operators can distinguish endpoint outage from model output-channel mismatch.
+  - Define policy: retry with adjusted options/profile, fail over route/model, or force deterministic fallback artifact based on stage criticality.
+
+- **Todo 128**: Add context-budget right-sizing analysis for writer and canon stages
+  - Measure effective prompt footprint versus configured `num_ctx` using run diagnostics and prompt-length telemetry.
+  - Quantify how much prior-run material (notes, canon excerpts, section summaries) is actually needed for quality gates to pass.
+  - Produce bounded context-injection rules so prior-run memory is included when relevant without oversized context overhead.
+
+- **Todo 129**: Add controlled experiment harness for feature-routing policy validation
+  - Run fixed-seed A/B validation sets across policy variants (`think` off/on, tool-LLM path, coding-LLM path, model size changes).
+  - Track comparable metrics: stage pass rate, retries, latency, fallback incidence, continuity score, and token/cost efficiency.
+  - Require a signed decision report before promoting new routing defaults to production profiles.
 
 - **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
   - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.

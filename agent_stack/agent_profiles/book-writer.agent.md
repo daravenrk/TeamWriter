@@ -1,11 +1,14 @@
 ---
 name: book-writer
 route: ollama_amd
-model: qwen3.5:9b
+allowed_routes: ollama_amd
+model: qwen3.5:27b
+model_allowlist: qwen3.5:27b
 default_stream: false
-num_ctx: 192000
+num_ctx: 49152
 num_predict: 2200
 temperature: 0.7
+think: false
 num_gpus: 2
 intent_keywords: book,chapter,scene,novel,story,manuscript,writer
 priority: 110

@@ -4,6 +4,7 @@ import time
 import uuid
 import glob
 import datetime
+import hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -69,6 +70,9 @@ class BookFlowRequest(BaseModel):
     output_dir: str = "/home/daravenrk/dragonlair/book_project"
     resource_tracker_path: Optional[str] = None
     resource_events_path: Optional[str] = None
+    # Attribution / ownership fields
+    pen_name: str = "DaRaVeNrK"
+    publisher_name: str = "DaRaVeNrK LLC"
 
 
 class OpenClawCompatMessage(BaseModel):
@@ -695,7 +699,11 @@ def _effective_runtime_target_for_record(record: TaskRecord, runtime_hint: Optio
     }
 
 
-def _build_status_payload(records: List[TaskRecord]):
+def _build_status_payload(
+    records: List[TaskRecord],
+    fallback_used: Optional[bool] = None,
+    fallback_stage: Optional[str] = None,
+):
     queue_positions = _compute_queue_positions(records)
     book_runtime_hints: Dict[str, dict] = {}
     for rec in records:
@@ -706,6 +714,7 @@ def _build_status_payload(records: List[TaskRecord]):
             book_runtime_hints[rec.id] = hint
 
     tasks = []
+    fallback_stage = str(fallback_stage or "").strip()
     for v in sorted(records, key=lambda t: t.created_at, reverse=True)[:50]:
         task = _task_to_dict(v, queue_position=queue_positions.get(v.id))
         effective = _effective_runtime_target_for_record(v, book_runtime_hints.get(v.id))
@@ -717,7 +726,43 @@ def _build_status_payload(records: List[TaskRecord]):
             task["runtime_profile"] = effective.get("profile")
         if book_runtime_hints.get(v.id):
             task["runtime_stage"] = book_runtime_hints[v.id].get("stage")
+
+        # Optional filters for fallback provenance visibility in /api/status
+        provenance = task.get("fallback_provenance_summary") or {}
+        used_fallbacks = provenance.get("used_fallbacks") or []
+        if not isinstance(used_fallbacks, list):
+            used_fallbacks = []
+        used_fallbacks = [str(stage) for stage in used_fallbacks if str(stage)]
+
+        if fallback_used is True and not used_fallbacks:
+            continue
+        if fallback_used is False and used_fallbacks:
+            continue
+        if fallback_stage and fallback_stage not in used_fallbacks:
+            continue
+
         tasks.append(task)
+
+    fallback_integrity_blocks = []
+    for task in tasks:
+        summary = task.get("fallback_integrity_summary") or {}
+        if not bool(summary.get("blocked")):
+            continue
+        provenance = task.get("fallback_provenance_summary") or {}
+        fallback_integrity_blocks.append(
+            {
+                "task_id": task.get("id"),
+                "status": task.get("status"),
+                "hold": bool(task.get("hold")),
+                "runtime_profile": task.get("runtime_profile") or task.get("profile"),
+                "runtime_stage": task.get("runtime_stage"),
+                "run_dir": summary.get("run_dir"),
+                "issues": summary.get("all_issues") or summary.get("issues") or [],
+                "used_fallbacks": provenance.get("used_fallbacks") or [],
+                "human_review_recommended": bool(provenance.get("human_review_recommended")),
+                "guidance": summary.get("guidance"),
+            }
+        )
 
     counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
     for task in tasks:
@@ -912,6 +957,7 @@ def _build_status_payload(records: List[TaskRecord]):
         "task_counts": counts,
         "tasks": tasks,
         "pending_spawn_groups": pending_spawn_groups,
+        "fallback_integrity_blocks": fallback_integrity_blocks,
         "latest_gate_failure": latest_failure,
         "latest_stage_event": latest_stage_event,
         "latest_ollama_call": _latest_ollama_ledger_entry(),
@@ -1013,6 +1059,29 @@ def _bootstrap_task_ledger():
                     record.status = "failed"
                     record.error = "Invalid persisted book request payload"
                     record.finished_at = time.time()
+                    continue
+                record.production_status = _analyze_book_production(req)
+                fallback_integrity = (record.production_status or {}).get("fallback_integrity") or {}
+                _fi_failed, _fi_issues, _fi_stages = _any_fallback_stage_failed(fallback_integrity)
+                if _fi_failed:
+                    record.status = "failed"
+                    record.hold = True
+                    record.finished_at = time.time()
+                    record.next_retry_at = None
+                    record.error = (
+                        "Startup blocked auto-resume due to fallback integrity failure in stage(s): "
+                        + ", ".join(_fi_stages) + "; operator review required"
+                    )
+                    _append_run_journal_event(
+                        (record.production_status or {}).get("run_dir"),
+                        "fallback_integrity_failed",
+                        {
+                            "task_id": task_id,
+                            "source": "task_ledger_bootstrap",
+                            "stages": _fi_stages,
+                            "issues": _fi_issues,
+                        },
+                    )
                     continue
                 queued_for_resume.append((task_id, _run_book_task, req))
             else:
@@ -1329,8 +1398,106 @@ def _compute_queue_positions(records):
     return positions
 
 
-def _task_to_dict(record: TaskRecord, queue_position=None):
+def _fallback_repair_guidance(issues: List[str]) -> str:
+    issues = [str(item) for item in (issues or []) if str(item)]
+    if not issues:
+        return "Inspect 03_canon fallback artifacts, regenerate canon fallback if needed, then clear hold and retry."
+
+    if "fallback_checksum_mismatch" in issues:
+        return "canon.json no longer matches canon_fallback_metadata.json; restore matching artifacts or regenerate the canon fallback before retrying."
+    if "fallback_contract_failed" in issues:
+        return "fallback_contract_report.json indicates missing semantic anchors; repair or regenerate the canon fallback before retrying."
+    if any(issue in issues for issue in {"fallback_metadata_missing", "fallback_metadata_invalid_json", "fallback_metadata_flag_invalid", "fallback_metadata_stage_mismatch"}):
+        return "canon fallback metadata is missing or invalid; recreate canon_fallback_metadata.json from a fresh fallback generation before retrying."
+    if any(issue in issues for issue in {"fallback_contract_missing", "fallback_contract_invalid_json"}):
+        return "fallback contract report is missing or invalid; regenerate fallback_contract_report.json from a verified canon fallback before retrying."
+    if any(issue in issues for issue in {"fallback_checksum_missing", "fallback_payload_missing_or_invalid"}):
+        return "canon fallback payload or checksum is incomplete; regenerate canon fallback artifacts before retrying."
+    if "fallback_artifact_stale" in issues:
+        return "fallback artifact is stale; regenerate the stage fallback from fresh inputs before retrying (avoid manual artifact patching)."
+    if any(issue in issues for issue in {"fallback_generated_at_missing", "fallback_generated_at_unparseable"}):
+        return "fallback metadata generated_at is missing or invalid; regenerate fallback metadata and contract artifacts before retrying."
+
+    return "Inspect 03_canon fallback artifacts, repair integrity mismatches, then clear hold and retry."
+
+
+def _fallback_integrity_summary(record: TaskRecord) -> Optional[dict]:
+    production_status = record.production_status if isinstance(record.production_status, dict) else {}
+    fallback_integrity = production_status.get("fallback_integrity")
+    if not isinstance(fallback_integrity, dict):
+        return None
+
+    # Aggregate across all registered stages
+    stage_summaries: dict = {}
+    for stage, integrity in fallback_integrity.items():
+        if not isinstance(integrity, dict):
+            continue
+        checked = bool(integrity.get("checked"))
+        valid = bool(integrity.get("valid", True))
+        stage_blocked = checked and (not valid) and bool(record.hold)
+        stage_issues = [str(i) for i in (integrity.get("issues") or []) if str(i)]
+        stage_summaries[stage] = {
+            "checked": checked,
+            "valid": valid,
+            "blocked": stage_blocked,
+            "reason": integrity.get("reason"),
+            "issues": stage_issues,
+        }
+
+    any_checked = any(s.get("checked") for s in stage_summaries.values())
+    any_invalid = any(not s.get("valid", True) for s in stage_summaries.values())
+    if not any_checked or not any_invalid:
+        return None
+
+    all_issues = [i for s in stage_summaries.values() for i in s.get("issues", [])]
+    blocked_stages = [st for st, sv in stage_summaries.items() if sv.get("blocked")]
+    any_blocked = bool(blocked_stages)
+
     return {
+        "checked": any_checked,
+        "valid": not any_invalid,
+        "blocked": any_blocked,
+        "stages": stage_summaries,
+        "blocked_stages": blocked_stages,
+        "all_issues": all_issues,
+        "run_dir": production_status.get("run_dir"),
+        "guidance": _fallback_repair_guidance(all_issues) if any_blocked else None,
+    }
+
+
+def _fallback_provenance_summary(record: TaskRecord) -> Optional[dict]:
+    """Load fallback provenance from run_summary.json for status payload visibility."""
+    production_status = record.production_status if isinstance(record.production_status, dict) else {}
+    run_dir_raw = production_status.get("run_dir")
+    if not run_dir_raw:
+        return None
+
+    run_dir = Path(str(run_dir_raw))
+    run_summary = _read_json_file(run_dir / "run_summary.json")
+    if not isinstance(run_summary, dict):
+        return None
+
+    raw_used = run_summary.get("used_fallbacks")
+    used_fallbacks = [str(stage) for stage in raw_used if str(stage)] if isinstance(raw_used, list) else []
+    raw_provenance = run_summary.get("fallback_provenance")
+    if isinstance(raw_provenance, dict):
+        human_review_recommended = bool(raw_provenance.get("human_review_recommended", bool(used_fallbacks)))
+        note = str(raw_provenance.get("note") or "")
+    else:
+        human_review_recommended = bool(used_fallbacks)
+        note = "One or more deterministic stage fallbacks were used in this run." if used_fallbacks else ""
+
+    return {
+        "used_fallbacks": used_fallbacks,
+        "used_fallback_count": len(used_fallbacks),
+        "human_review_recommended": human_review_recommended,
+        "note": note,
+        "run_dir": str(run_dir),
+    }
+
+
+def _task_to_dict(record: TaskRecord, queue_position=None):
+    payload = {
         "id": record.id,
         "created_at": record.created_at,
         "status": record.status,
@@ -1352,6 +1519,13 @@ def _task_to_dict(record: TaskRecord, queue_position=None):
         "spawn_release_at": record.spawn_release_at,
         "spawn_requested_at": record.spawn_requested_at,
     }
+    fallback_summary = _fallback_integrity_summary(record)
+    if fallback_summary:
+        payload["fallback_integrity_summary"] = fallback_summary
+    fallback_provenance = _fallback_provenance_summary(record)
+    if fallback_provenance:
+        payload["fallback_provenance_summary"] = fallback_provenance
+    return payload
 
 
 def _find_route_model_conflict(route: Optional[str], model: Optional[str]):
@@ -1417,6 +1591,218 @@ def _read_jsonl(path: Path) -> List[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def _read_json_file(path: Path) -> Optional[Any]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _stable_payload_sha256(payload: Any) -> str:
+    # Must match book_flow.payload_sha256 exactly: ensure_ascii=True, default=str
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Stage fallback integrity registry
+# Add stages here as deterministic fallback paths are introduced in book_flow.py.
+# Each entry maps a stage name to the artifact paths relative to run_dir.
+# ---------------------------------------------------------------------------
+_FALLBACK_STAGE_CONFIGS: dict = {
+    "canon": {
+        "artifact_dir": "03_canon",
+        "payload_file": "canon.json",          # JSON payload for checksum verification
+        "metadata_file": "canon_fallback_metadata.json",
+        "contract_file": "fallback_contract_report.json",
+    },
+    # Future stages — uncomment and fill in when deterministic fallback is added:
+    # "sections_written": {
+    #     "artifact_dir": "04_drafts/chapter_01",
+    #     "payload_file": None,                  # No single-file JSON checksum yet
+    #     "metadata_file": "sections_fallback_metadata.json",
+    #     "contract_file": "sections_fallback_contract_report.json",
+    # },
+}
+
+# Fallback artifacts older than this threshold are treated as untrusted (stale).
+# Override via FALLBACK_STALE_HOURS env var.
+_FALLBACK_STALE_HOURS: float = float(os.environ.get("FALLBACK_STALE_HOURS", "72"))
+
+
+def _normalize_fallback_stage(input_value: Optional[str]) -> Optional[str]:
+    """Normalize fallback_stage filter input according to policy.
+    
+    Policy: whitespace trimmed, case-insensitive (converted to lowercase) to match
+    registered stage names. This reduces operator confusion from typos/case variations.
+    
+    Args:
+        input_value: Raw input from query parameter or function call (e.g., "CANON")
+    
+    Returns:
+        Normalized stage name (lowercase), or None/empty-string if input was empty.
+        Does NOT validate against registered stages — that is caller's responsibility.
+    
+    Examples:
+        _normalize_fallback_stage("CANON") -> "canon"
+        _normalize_fallback_stage("  Canon  ") -> "canon"
+        _normalize_fallback_stage("") -> ""
+        _normalize_fallback_stage(None) -> None
+    """
+    if input_value is None:
+        return None
+    normalized = str(input_value).strip().lower()
+    return normalized
+
+
+def _verify_stage_fallback_integrity(run_dir: Optional[Path], stage: str, config: dict) -> dict:
+    """Generic fallback integrity check for any registered stage."""
+    if not run_dir:
+        return {
+            "checked": False,
+            "valid": True,
+            "reason": "run_dir_missing",
+            "issues": [],
+            "stage": stage,
+        }
+
+    artifact_dir = run_dir / config["artifact_dir"]
+    payload_path = artifact_dir / config["payload_file"] if config.get("payload_file") else None
+    metadata_path = artifact_dir / config["metadata_file"]
+    contract_path = artifact_dir / config["contract_file"]
+    journal_path = run_dir / "run_journal.jsonl"
+
+    journal_rows = _read_jsonl(journal_path)
+    fallback_event_seen = any(
+        str(row.get("event") or "") == "stage_fallback_applied"
+        and str(((row.get("details") or {}).get("stage") or "")) == stage
+        for row in journal_rows
+        if isinstance(row, dict)
+    )
+
+    if not fallback_event_seen:
+        return {
+            "checked": False,
+            "valid": True,
+            "reason": f"no_{stage}_fallback_detected",
+            "issues": [],
+            "stage": stage,
+            "paths": {
+                "metadata": str(metadata_path),
+                "contract_report": str(contract_path),
+            },
+        }
+
+    issues: List[str] = []
+    metadata = _read_json_file(metadata_path)
+    contract_report = _read_json_file(contract_path)
+    payload = _read_json_file(payload_path) if payload_path else None
+
+    if not metadata_path.exists():
+        issues.append("fallback_metadata_missing")
+    elif not isinstance(metadata, dict):
+        issues.append("fallback_metadata_invalid_json")
+    else:
+        if metadata.get("fallback") is not True:
+            issues.append("fallback_metadata_flag_invalid")
+        if str(metadata.get("stage") or stage) != stage:
+            issues.append("fallback_metadata_stage_mismatch")
+
+        if payload_path is not None:
+            expected_checksum = str(metadata.get("fallback_payload_checksum") or "").strip()
+            if not expected_checksum:
+                issues.append("fallback_checksum_missing")
+            elif isinstance(payload, (dict, list)):
+                actual_checksum = _stable_payload_sha256(payload)
+                if actual_checksum != expected_checksum:
+                    issues.append("fallback_checksum_mismatch")
+            else:
+                issues.append("fallback_payload_missing_or_invalid")
+
+    if not contract_path.exists():
+        issues.append("fallback_contract_missing")
+    elif not isinstance(contract_report, dict):
+        issues.append("fallback_contract_invalid_json")
+    elif not bool(contract_report.get("all_passed")):
+        issues.append("fallback_contract_failed")
+
+    # Staleness check — run after metadata validity checks so we only parse
+    # generated_at when we have a valid metadata dict.
+    age_hours: Optional[float] = None
+    generated_at_raw: Optional[str] = None
+    if isinstance(metadata, dict):
+        generated_at_raw = str(metadata.get("generated_at") or "").strip() or None
+        if generated_at_raw:
+            try:
+                # Accept ISO-8601 strings or Unix timestamps (float/int as string)
+                try:
+                    ts = float(generated_at_raw)
+                except ValueError:
+                    from datetime import timezone
+                    import datetime as _dt
+                    ts = _dt.datetime.fromisoformat(generated_at_raw.replace("Z", "+00:00")).timestamp()
+                age_hours = (time.time() - ts) / 3600.0
+                if age_hours > _FALLBACK_STALE_HOURS:
+                    issues.append("fallback_artifact_stale")
+            except Exception:  # noqa: BLE001
+                issues.append("fallback_generated_at_unparseable")
+        else:
+            issues.append("fallback_generated_at_missing")
+
+    valid = len(issues) == 0
+    result: dict = {
+        "checked": True,
+        "valid": valid,
+        "reason": "fallback_integrity_passed" if valid else "fallback_integrity_failed",
+        "issues": issues,
+        "stage": stage,
+        "paths": {
+            "metadata": str(metadata_path),
+            "contract_report": str(contract_path),
+            "run_journal": str(journal_path),
+        },
+        "fallback_event_seen": fallback_event_seen,
+    }
+    if generated_at_raw is not None:
+        result["generated_at"] = generated_at_raw
+    if age_hours is not None:
+        result["age_hours"] = round(age_hours, 2)
+    if payload_path:
+        result["paths"]["payload"] = str(payload_path)
+    return result
+
+
+def _any_fallback_stage_failed(fallback_integrity: dict) -> tuple:
+    """Return (any_failed, combined_issues, failed_stages) from a stage-keyed integrity dict."""
+    failed_stages: List[str] = []
+    all_issues: List[str] = []
+    for stage, result in (fallback_integrity or {}).items():
+        if not isinstance(result, dict):
+            continue
+        if bool(result.get("checked")) and not bool(result.get("valid", True)):
+            failed_stages.append(stage)
+            all_issues.extend(str(i) for i in (result.get("issues") or []) if str(i))
+    return bool(failed_stages), all_issues, failed_stages
+
+
+def _verify_canon_fallback_integrity(run_dir: Optional[Path]) -> dict:
+    """Backward-compatible wrapper — verifies only the canon stage."""
+    config = _FALLBACK_STAGE_CONFIGS.get("canon", {})
+    if not config:
+        return {"checked": False, "valid": True, "reason": "stage_not_registered", "issues": []}
+    return _verify_stage_fallback_integrity(run_dir, "canon", config)
+
+
+def _verify_all_stage_fallback_integrity(run_dir: Optional[Path]) -> dict:
+    """Verify all registered fallback stages; returns {stage: result}."""
+    return {
+        stage: _verify_stage_fallback_integrity(run_dir, stage, cfg)
+        for stage, cfg in _FALLBACK_STAGE_CONFIGS.items()
+    }
 
 
 def _parse_event_ts(raw_value: Any) -> Optional[float]:
@@ -1614,6 +2000,7 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
         "latest_stage_event": latest_stage_event,
         "last_error": last_error,
         "interruption": _assess_run_interruption(run_dir),
+        "fallback_integrity": _verify_all_stage_fallback_integrity(run_dir),
         "evaluated_at": time.time(),
     }
 
@@ -2161,9 +2548,24 @@ def openclaw_compat_chat_completions(req: OpenClawCompatChatRequest):
 
 
 @app.get("/api/status")
-def status():
+def status(fallback_used: Optional[bool] = None, fallback_stage: Optional[str] = None):
     _pressure_snapshot()
-    return _refresh_ui_state_snapshot(event_type="status_refresh")
+    normalized_stage = _normalize_fallback_stage(fallback_stage)
+    if normalized_stage:
+        valid_stages = sorted(str(stage) for stage in _FALLBACK_STAGE_CONFIGS.keys())
+        if normalized_stage not in valid_stages:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"invalid fallback_stage '{normalized_stage}'; "
+                    f"valid values: {', '.join(valid_stages)}"
+                ),
+            )
+    with _task_lock:
+        records = list(_tasks.values())
+    payload = _build_status_payload(records, fallback_used=fallback_used, fallback_stage=normalized_stage)
+    _save_ui_state_snapshot(payload)
+    return payload
 
 
 @app.get("/api/ui-state")
@@ -2408,6 +2810,37 @@ def reconcile_book_jobs():
                     continue
 
                 record.production_status = _analyze_book_production(req)
+                fallback_integrity = (record.production_status or {}).get("fallback_integrity") or {}
+                _fi_failed, _fi_issues, _fi_stages = _any_fallback_stage_failed(fallback_integrity)
+                if _fi_failed:
+                    run_dir = (record.production_status or {}).get("run_dir")
+                    record.status = "failed"
+                    record.hold = True
+                    record.finished_at = time.time()
+                    record.next_retry_at = None
+                    record.error = (
+                        "Reconcile blocked resume due to fallback integrity failure in stage(s): "
+                        + ", ".join(_fi_stages) + "; operator review required"
+                    )
+                    skipped.append(
+                        {
+                            "task_id": task_id,
+                            "reason": "fallback_integrity_failed",
+                            "stages": _fi_stages,
+                            "issues": _fi_issues,
+                        }
+                    )
+                    _append_run_journal_event(
+                        run_dir,
+                        "fallback_integrity_failed",
+                        {
+                            "task_id": task_id,
+                            "source": "reconcile_running_guard",
+                            "stages": _fi_stages,
+                            "issues": _fi_issues,
+                        },
+                    )
+                    continue
                 interruption = (record.production_status or {}).get("interruption") or {}
                 if interruption.get("stalled"):
                     run_dir = (record.production_status or {}).get("run_dir")
@@ -2469,6 +2902,37 @@ def reconcile_book_jobs():
                 continue
 
             record.production_status = _analyze_book_production(req)
+            fallback_integrity = (record.production_status or {}).get("fallback_integrity") or {}
+            _fi_failed, _fi_issues, _fi_stages = _any_fallback_stage_failed(fallback_integrity)
+            if _fi_failed:
+                run_dir = (record.production_status or {}).get("run_dir")
+                record.status = "failed"
+                record.hold = True
+                record.finished_at = time.time()
+                record.next_retry_at = None
+                record.error = (
+                    "Reconcile blocked auto-resume due to fallback integrity failure in stage(s): "
+                    + ", ".join(_fi_stages) + "; operator review required"
+                )
+                skipped.append(
+                    {
+                        "task_id": task_id,
+                        "reason": "fallback_integrity_failed",
+                        "stages": _fi_stages,
+                        "issues": _fi_issues,
+                    }
+                )
+                _append_run_journal_event(
+                    run_dir,
+                    "fallback_integrity_failed",
+                    {
+                        "task_id": task_id,
+                        "source": "reconcile_retry_guard",
+                        "stages": _fi_stages,
+                        "issues": _fi_issues,
+                    },
+                )
+                continue
 
             record.status = "queued"
             record.next_retry_at = None
