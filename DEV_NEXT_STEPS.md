@@ -963,7 +963,7 @@ These should be completed once publisher outputs successfully:
   - Direct host-side book-flow runs blocked by root-owned artifacts (created by containerized services)
   - Decide ownership policy: group-writable, host-user-owned, or container-sandboxed artifacts
   - Add startup/doctor check flagging root-owned runtime files before long runs begin
-  - Apply ownership normalization script with recoveryrollback for failed ownership changes
+  - Apply ownership normalization script with recovery/rollback for failed ownership changes
 
 - **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
   - Ensure every CLI run closes with `run_success` or `run_failure` event, even on stage exceptions
