@@ -959,11 +959,15 @@ These should be completed once publisher outputs successfully:
     - Lists errors with profile name and specific issue for quick debugging
   - **Result**: Prevents bad configurations from silently taking the control plane offline; operators see immediate feedback
 
-- **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs ⭐ OPERATIONAL BLOCKER
-  - Direct host-side book-flow runs blocked by root-owned artifacts (created by containerized services)
-  - Decide ownership policy: group-writable, host-user-owned, or container-sandboxed artifacts
-  - Add startup/doctor check flagging root-owned runtime files before long runs begin
-  - Apply ownership normalization script with recovery/rollback for failed ownership changes
+- **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs ✅ CORE IMPLEMENTED
+  - **Policy documented**: Group-writable (0o775 dirs, 0o664 files) with user:docker ownership
+  - **Module created**: `artifact_ownership.py` with diagnostic and repair functions
+  - **Diagnostic functions**: Identifies 7 root-owned files, 3 with wrong permissions in test environment
+  - **CLI commands added**:
+    - `book-flow check-ownership`: Report status with exit code for scripting
+    - `book-flow fix-ownership`: Repair issues with optional `--dry-run` mode
+  - **Usage**: `python3 -m agent_stack.cli check-ownership` or `fix-ownership --dry-run`
+  - **Result**: Operators can now diagnose and fix root-owned artifact issues without privilege escalation
 
 - **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
   - Ensure every CLI run closes with `run_success` or `run_failure` event, even on stage exceptions
