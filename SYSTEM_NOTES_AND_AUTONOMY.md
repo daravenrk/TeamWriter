@@ -1,8 +1,57 @@
+## GPU Endpoint Smoketesting Procedure (March 2026)
+
+This section documents the process for smoketesting both NVIDIA and AMD Ollama endpoints to ensure GPU-backed inference is working as expected.
+
+### 1. Model and Prompt Selection
+- Choose a small, known-good model for each endpoint:
+  - NVIDIA: `llama3.2:1b` (or any available model in `/ai/ollama-nvidia/models`)
+  - AMD: `qwen2.5-coder:3b` (or any available model in `/ai/ollama-amd/models`)
+- Use a simple prompt, e.g.: `"Write a Python function that prints hello world."`
+
+### 2. Validate Model Availability
+- Run:
+  - `curl http://127.0.0.1:11434/api/tags` (NVIDIA)
+  - `curl http://127.0.0.1:11435/api/tags` (AMD)
+- Confirm the chosen model appears in the output.
+
+### 3. Run Inference Test
+- NVIDIA:
+  ```sh
+  curl -sS http://127.0.0.1:11434/api/generate -d '{"model":"llama3.2:1b","prompt":"Write a Python function that prints hello world.","stream":false}'
+  ```
+- AMD:
+  ```sh
+  curl -sS http://127.0.0.1:11435/api/generate -d '{"model":"qwen2.5-coder:3b","prompt":"Write a Python function that prints hello world.","stream":false}'
+  ```
+
+### 4. Check GPU Utilization
+- NVIDIA: `nvidia-smi` before and after the test
+- AMD: `rocm-smi` before and after the test (if available)
+
+### 5. Record Results
+- Log the prompt, model, endpoint, output, and GPU stats in this section or a dedicated log file.
+
+### 6. Automation (Optional)
+- Create a script to automate the above steps for both endpoints and append results to a log.
+
+**Note:** This process should be run after any major update, model change, or hardware modification to validate GPU inference health.
+## Ollama AMD/NVIDIA Service Mirroring (March 2026)
+
+- Each Ollama instance (AMD and NVIDIA) must run as a separate service/container.
+- NVIDIA Ollama runs on port 11434, mounting `/ai/ollama-nvidia/models` for its manifests/blobs.
+- AMD Ollama runs on port 11435, mounting `/ai/ollama-amd/models` for its manifests/blobs.
+- No model or manifest sharing between AMD and NVIDIA—each has a dedicated model store.
+- See `docker-compose.ollama.yml` for service definitions and GPU device mapping.
 # Dragonlair System Notes And Autonomy Plan
 
 ## 1) Current System State
 
 ### Endpoints
+
+**Model Storage Policy (March 2026):**
+- All Ollama model manifests and blobs for NVIDIA/AMD must reside in `/ai/ollama-nvidia/models` (NVIDIA) and `/ai/ollama-amd/models` (AMD).
+- The `/home/daravenrk/dragonlair/model-sets` directory must NOT contain any manifests or blobs—only text lists or configuration files are allowed.
+- Any stray manifests or blobs in `model-sets` should be deleted to maintain a clean and predictable structure.
 - AMD endpoint: `http://127.0.0.1:11435` (`ollama_amd`)
 - NVIDIA endpoint: `http://127.0.0.1:11434` (`ollama_nvidia`)
 - Agent API/UI: `http://127.0.0.1:11888` (`dragonlair_agent_stack`)
@@ -31,6 +80,163 @@ curl -sS http://127.0.0.1:11435/api/generate -d '{"model":"qwen2.5-coder:14b","p
 AMD stream:
 ```sh
 curl -sS http://127.0.0.1:11435/api/generate -d '{"model":"qwen2.5-coder:14b","prompt":"reply with ok","stream":true}'
+```
+
+### GPU Layer Standard (March 2026)
+- Standard requirement: all models routed to NVIDIA or AMD must execute with GPU offload (`num_gpu_layers > 0`).
+- CPU fallback is not permitted for GPU-routed requests.
+- Enforce this with explicit per-model layer maps in compose:
+  - `AGENT_NVIDIA_NUM_GPU_BY_MODEL`
+  - `AGENT_AMD_NUM_GPU_BY_MODEL`
+- Keep `AGENT_BLOCK_CPU_BACKEND=true` in production.
+- Regression includes a GPU-layer validation check for both endpoints and fails when a model reports non-positive GPU layers.
+
+### Operational Regression Note (2026-03-19)
+- Operator reports NVIDIA GPU compute was working correctly on the current branch most or all of the time on 2026-03-18.
+- Treat current uncertainty around "VRAM residency vs actual GPU compute" as a likely recent branch regression candidate.
+- `main` is currently too far behind to be used as a clean operational fallback without losing substantial newer work.
+- Preferred recovery/debug path: isolate recent branch-level config/runtime changes and prove compute behavior with live telemetry during sustained inference.
+
+### Full GPU Layer Enforcement + AMD Dual-GPU Split (2026-03-19, Session 2)
+
+#### Problems Resolved
+1. **`num_gpu=999` crashed NVIDIA Ollama** — `memory layout cannot be allocated with num_gpu = 999`.
+  - Root cause: orchestrator was injecting `num_gpu=999` as the "all layers" sentinel, but Ollama/CUDA rejects any value > model layer count as invalid. Correct sentinel is `-1`.
+  - Fix: all per-model and default GPU counts changed to `-1` in `docker-compose.agent.yml` env vars and in `orchestrator.py`. `_parse_env_json_int_map` updated to preserve `-1` without clamping.
+
+2. **`ollama/ollama:latest` image has no ROCm backend** — AMD container fell back to CPU silently.
+  - Root cause: `ollama:latest` bundles CUDA libs only. AMD requires `ollama:rocm` image.
+  - Fix: `docker-compose.ollama.yml` AMD service changed to `image: ollama/ollama:rocm`.
+  - Group fix: render group (`GID 993` on this host) added as `"993"` numeric string in `group_add` since the group name is absent inside the container.
+
+3. **`_save_ui_state_snapshot` NameError crashing `/api/status`** — function was renamed to `_refresh_ui_state_snapshot` but one call site in `api_server.py` still used the old name.
+  - Fix: call site in `status()` endpoint corrected to `_refresh_ui_state_snapshot(event_type="status")`.
+
+4. **`args.debug` AttributeError in `book_flow.py`** — bare attribute access crashed when `debug` key not in SimpleNamespace.
+  - Fix: changed to `getattr(args, "debug", False)` at line ~2287.
+
+#### AMD Dual-GPU Configuration (Confirmed Working 2026-03-19)
+- Image: `ollama/ollama:rocm`
+- Devices passed through: `/dev/kfd`, `/dev/dri`
+- Groups: `video`, `"993"` (numeric render GID)
+- Environment:
+  - `HIP_VISIBLE_DEVICES=0,1`
+  - `ROCR_VISIBLE_DEVICES=0,1`
+  - `OLLAMA_SCHED_SPREAD=1` (spreads layers across both GPUs automatically)
+- Result at runtime: `offloaded 33/33 layers to GPU` — split ~20 layers on ROCm0, ~13 on ROCm1 (both AMD Radeon RX 6800, 16 GiB VRAM each, 32 GiB total)
+- VRAM per GPU during `qwen3.5:9b` inference: ROCm0 ~3.9 GiB · ROCm1 ~3.95 GiB
+
+#### NVIDIA Single-GPU Configuration (Confirmed Working 2026-03-19)
+- Device: GTX 1660 SUPER (6 GiB VRAM)
+- `num_gpu=-1` (Ollama "offload all" sentinel — accepted without error)
+- Result at runtime: `offloaded 32/33 layers to GPU` — 1 output-projection layer on CPU is normal for 6 GiB VRAM; all transformer compute on GPU
+- CUDA0 weights: ~2 GiB · KV cache: ~2 GiB · compute graph: ~900 MiB
+
+#### Orchestrator GPU Policy Methods (orchestrator.py, 2026-03-19)
+- `_parse_env_json_int_map(env_key)` — parses JSON int maps from env; preserves `-1`
+- `_resolve_amd_tensor_split()` — reads `AGENT_AMD_TENSOR_SPLIT` (default `"0.5,0.5"`)
+- `_resolve_model_num_gpu_layers(model, route)` — per-model, per-route layer count
+- `_apply_gpu_execution_policy(agent_name, model_name, options)` — injected into every inference call
+  - Sets `num_gpu=-1` on all routes
+  - On AMD: also sets `num_gpus=2`, `tensor_split=[0.5,0.5]`, `main_gpu=0`
+  - On NVIDIA: strips `tensor_split`/`main_gpu` to avoid CUDA errors
+
+#### AGENT_AMD_GPU_COUNT and Split env vars
+```yaml
+AGENT_BLOCK_CPU_BACKEND: "true"
+AGENT_FORCE_FULL_GPU_LAYERS: "true"
+AGENT_NVIDIA_NUM_GPU_DEFAULT: "-1"
+AGENT_AMD_NUM_GPU_DEFAULT: "-1"
+AGENT_AMD_GPU_COUNT: "2"
+AGENT_AMD_MAIN_GPU: "0"
+AGENT_AMD_TENSOR_SPLIT: "0.5,0.5"
+```
+
+#### Quick GPU Validation
+```sh
+# AMD — confirm 33/33 layers + dual split
+docker logs ollama_amd 2>&1 | grep -iE "offloaded|ROCm|split"
+
+# NVIDIA — confirm 32/33 layers on CUDA
+docker logs ollama_nvidia 2>&1 | grep -iE "offloaded|CUDA|Load failed"
+
+# Live AMD GPU utilization
+rocm-smi --showuse
+
+# Live NVIDIA GPU utilization
+nvidia-smi
+```
+
+### NVIDIA GPU Policy Update (2026-03-19)
+- **Operator requirement**: ALL model layers must execute on GPU. No CPU fallback permitted on NVIDIA route.
+- **GTX 1660 SUPER** (6GB VRAM) is the NVIDIA device. This limits maximum model size.
+- **Enforcement added to `orchestrator.py`** in `_enforce_profile_policy()`:
+  - Any model dispatched to `ollama_nvidia` must appear in `AGENT_NVIDIA_TINY_MODELS`.
+  - Non-allowlisted models are hard-rejected with `AgentProfileError` before the request reaches Ollama.
+- **Allowed NVIDIA models** (configured via `AGENT_NVIDIA_TINY_MODELS` env var):
+  - `qwen3.5:0.8b`, `qwen3.5:2b`, `qwen3.5:4b`
+  - `qwen2.5-coder:1.5b`, `qwen2.5-coder:3b`
+  - `llama3.2:1b`, `llama3.2:3b`
+  - `codegemma:2b`
+- **All 8 NVIDIA-routed agent profiles** now have explicit `allowed_routes: ollama_nvidia` frontmatter.
+- **All large-model profiles** (9B, 27B, 14B) have explicit `allowed_routes: ollama_amd` frontmatter.
+- **Model store is shared** — `/ai/ollama-nvidia/models` and `/ai/ollama-amd/models` may coexist on disk; the restriction is enforced at the orchestration layer, not by deleting models.
+
+### How to Validate a Live Run (2026-03-19)
+
+**1. Check GPU compute is active during inference:**
+```sh
+watch -n 2 nvidia-smi
+# Look for: GPU-Util > 0%, Memory-Usage > idle baseline
+```
+
+**2. Check agent queue state:**
+```sh
+curl -s http://127.0.0.1:11888/api/health | python3 -c "
+import json,sys; h=json.load(sys.stdin)
+q=h['resource_tracker']['queue']
+print('Queued:', q['status_counts']['queued'])
+print('Running:', q['status_counts']['running'])
+print('Failed:', q['status_counts']['failed'])
+agents=h['resource_tracker']['agents']['health']['agents']
+for k,v in agents.items():
+    print(k, v['state'], 'model='+str(v['current_model']))
+"
+```
+
+**3. Check task ledger:**
+```sh
+python3 -c "
+import json
+data=json.load(open('/home/daravenrk/dragonlair/book_project/task_ledger.json'))
+for t in data.get('tasks',[])[-10:]:
+    print(str(t.get('status'))[:10], str(t.get('profile'))[:28], str(t.get('created_at'))[:19])
+"
+```
+
+**4. Verify Ollama container logs for model offload:**
+```sh
+docker logs ollama_nvidia 2>&1 | grep -E "offloaded|CUDA|CPU size|waiting"
+# Good: offloaded 17/17 layers to GPU (all layers)
+# Bad: offloaded 24/33 layers to GPU (partial — CPU fallback active)
+```
+
+**5. Check quarantine and failure events:**
+```sh
+tail -20 /home/daravenrk/dragonlair/book_project/quarantine_events.jsonl | python3 -c "
+import json,sys
+for line in sys.stdin:
+    r=json.loads(line.strip())
+    print(r.get('timestamp','')[:10], r.get('agent'), r.get('reason'))
+"
+```
+
+**6. Smoketest NVIDIA GPU inference (small model, fast response):**
+```sh
+time curl -sS http://127.0.0.1:11434/api/generate \
+  -d '{"model":"llama3.2:1b","prompt":"reply with ok","stream":false}' \
+  | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('response','?')[:80])"
+# Should complete in < 15 seconds and return a text response.
 ```
 
 ## 2) Agent Stack Architecture

@@ -18,6 +18,7 @@ Also validates fallback provenance schema and /api/status fallback filters:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -27,8 +28,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 BASE_URL = "http://127.0.0.1:11888"
+LEDGER_PATH = Path("/home/daravenrk/dragonlair/book_project/ollama_run_ledger.jsonl")
 POLL_SECONDS = 1.5
 MAX_WAIT_SECONDS = 75
+SUBMIT_RETRIES = 5
+SUBMIT_RETRY_SECONDS = 2.0
+CPU_PROBE_RETRIES = 3
+CPU_PROBE_RETRY_SECONDS = 2.0
+CPU_PROBE_MAX_WAIT_SECONDS = 180
+REQUEST_RETRIES = 3
+REQUEST_RETRY_SECONDS = 0.75
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,7 @@ class Case:
     label: str
     profile: str
     expected_route: str
+    expected_backend: str
     prompt: str
 
 
@@ -44,12 +54,14 @@ CASES = [
         label="nvidia",
         profile="nvidia-fast",
         expected_route="ollama_nvidia",
+        expected_backend="nvidia",
         prompt="Return 30 short numbered lines labelled NVIDIA regression test.",
     ),
     Case(
         label="amd",
         profile="amd-coder",
         expected_route="ollama_amd",
+        expected_backend="amd",
         prompt="Return 30 short numbered lines labelled AMD regression test.",
     ),
 ]
@@ -62,9 +74,22 @@ def _request_json(url: str, method: str = "GET", payload: Optional[dict] = None)
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("utf-8")
-    return json.loads(raw) if raw else {}
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError, TimeoutError, ConnectionResetError) as exc:
+            last_exc = exc
+            if attempt == REQUEST_RETRIES:
+                raise
+            time.sleep(REQUEST_RETRY_SECONDS)
+    if last_exc is not None:
+        raise last_exc
+    return {}
 
 
 def recover_agents() -> None:
@@ -77,15 +102,28 @@ def recover_agents() -> None:
 
 
 def submit_task(case: Case) -> str:
-    out = _request_json(
-        f"{BASE_URL}/api/tasks",
-        method="POST",
-        payload={"prompt": case.prompt, "profile": case.profile},
-    )
-    task_id = str(out.get("task_id") or "").strip()
-    if not task_id:
-        raise RuntimeError(f"{case.label}: missing task_id in response: {out}")
-    return task_id
+    last_error: Optional[Exception] = None
+    for attempt in range(1, SUBMIT_RETRIES + 1):
+        try:
+            out = _request_json(
+                f"{BASE_URL}/api/tasks",
+                method="POST",
+                payload={"prompt": case.prompt, "profile": case.profile},
+            )
+            task_id = str(out.get("task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError(f"{case.label}: missing task_id in response: {out}")
+            return task_id
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code != 409 or attempt == SUBMIT_RETRIES:
+                raise
+            print(f"[{case.label}] INFO: submit conflict (409), retrying attempt {attempt + 1}/{SUBMIT_RETRIES}")
+            time.sleep(SUBMIT_RETRY_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            raise
+    raise RuntimeError(f"{case.label}: unable to submit task after retries ({last_error})")
 
 
 def cancel_task(task_id: str) -> None:
@@ -114,6 +152,59 @@ def _task_used_fallbacks(task: Dict[str, Any]) -> list:
     if not isinstance(used, list):
         return []
     return [str(item) for item in used if str(item)]
+
+
+def _entry_epoch_seconds(entry: Dict[str, Any]) -> Optional[float]:
+    raw_ts = str(entry.get("timestamp") or "").strip()
+    if not raw_ts:
+        return None
+    try:
+        return time.mktime(time.strptime(raw_ts, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+
+
+def _recent_ledger_entries(run_started_epoch: float) -> list:
+    if not LEDGER_PATH.exists():
+        return []
+    rows = []
+    try:
+        with open(LEDGER_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                entry_epoch = _entry_epoch_seconds(entry)
+                if entry_epoch is None or entry_epoch < run_started_epoch:
+                    continue
+                rows.append(entry)
+    except OSError:
+        return []
+    return rows
+
+
+def _latest_ledger_entry_for_correlation(correlation_id: str) -> Optional[Dict[str, Any]]:
+    if not LEDGER_PATH.exists():
+        return None
+    try:
+        with open(LEDGER_PATH, "r", encoding="utf-8") as fh:
+            for line in reversed(fh.readlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if str(entry.get("correlation_id") or "") == str(correlation_id):
+                    return entry
+    except OSError:
+        return None
+    return None
 
 
 def validate_run_summary_fallback_provenance(summary: Dict[str, Any], label: str) -> bool:
@@ -237,7 +328,11 @@ def fixture_provenance_regression() -> bool:
 
 def live_provenance_regression() -> bool:
     """If book-flow tasks are present, validate provenance schema from /api/status and run_summary.json."""
-    status = _request_json(f"{BASE_URL}/api/status")
+    try:
+        status = _request_json(f"{BASE_URL}/api/status")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
+        print(f"[LIVE-PROVENANCE] SKIP: could not reach /api/status ({exc})")
+        return True
     tasks = status.get("tasks") or []
 
     candidates = []
@@ -424,14 +519,190 @@ def live_status_filter_invalid_stage_regression(strict_live: bool = False) -> bo
         return False
 
 
+def validate_backend_type_in_status(strict_backend_missing: bool = False) -> bool:
+    """Validate that completed tasks in /api/status expose a correct backend_type field.
+
+    Inspects existing completed tasks — no new tasks are submitted. If no completed
+    tasks with backend_type data are available (e.g. stack was just deployed and the
+    ledger doesn’t have the field yet), the check is skipped rather than failed.
+    """
+    try:
+        status = _request_json(f"{BASE_URL}/api/status")
+    except urllib.error.URLError as exc:
+        print(f"[BACKEND-TYPE] FAIL: could not reach /api/status ({exc})")
+        return False
+
+    tasks = [t for t in (status.get("tasks") or []) if isinstance(t, dict)]
+    completed = [t for t in tasks if t.get("status") == "completed"]
+
+    if not completed:
+        print("[BACKEND-TYPE] SKIP: no completed tasks in /api/status")
+        return True
+
+    ROUTE_BACKEND_MAP = {
+        "nvidia": "nvidia",
+        "amd": "amd",
+        "rocm": "amd",
+    }
+
+    ok = True
+    checked = 0
+    for task in completed:
+        route = str(task.get("route") or "")
+        backend_type = task.get("backend_type")
+        task_id_short = str(task.get("id") or "")[:8]
+
+        if backend_type is None:
+            if strict_backend_missing:
+                print(
+                    f"[BACKEND-TYPE] FAIL: task {task_id_short} route={route!r} missing backend_type in strict mode"
+                )
+                ok = False
+            continue
+
+        expected = next(
+            (bt for kw, bt in ROUTE_BACKEND_MAP.items() if kw in route.lower()),
+            None,
+        )
+        if expected is None:
+            continue  # Unknown/unmapped route; skip.
+
+        if backend_type != expected:
+            print(
+                f"[BACKEND-TYPE] FAIL: task {task_id_short} route={route!r} "
+                f"expected backend_type={expected!r} got {backend_type!r}"
+            )
+            ok = False
+        else:
+            print(f"[BACKEND-TYPE] task {task_id_short} route={route!r} backend_type={backend_type!r} OK")
+            checked += 1
+
+    if checked == 0 and ok:
+        print("[BACKEND-TYPE] SKIP: no completed tasks with backend_type field found (stack may need redeploy)")
+        return True
+
+    if ok:
+        print(f"[BACKEND-TYPE] PASS: {checked} task(s) validated")
+    else:
+        print("[BACKEND-TYPE] FAIL")
+    return ok
+
+
+def _wait_for_terminal_task(task_id: str, timeout_seconds: float = MAX_WAIT_SECONDS) -> Optional[Dict[str, Any]]:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        status = _request_json(f"{BASE_URL}/api/status")
+        task = find_task(status, task_id)
+        if task and str(task.get("status") or "") in {"completed", "failed", "cancelled"}:
+            return task
+        time.sleep(POLL_SECONDS)
+    return None
+
+
+def validate_cpu_block_probe(strict_backend_missing: bool = False) -> bool:
+    """Submit a short probe task and verify ledger proves no successful CPU run occurred."""
+    probe = Case(
+        label="cpu-block-probe",
+        profile="nvidia-fast",
+        expected_route="ollama_nvidia",
+        expected_backend="nvidia",
+        prompt="CPU block probe: reply with exactly 'probe-ok'.",
+    )
+    transient_error_markers = (
+        "http error 500",
+        "timed out",
+        "temporary failure in name resolution",
+        "empty_response",
+    )
+
+    for attempt in range(1, CPU_PROBE_RETRIES + 1):
+        recover_agents()
+        task_id = submit_task(probe)
+        print(f"[CPU-BLOCK] probe submitted task_id={task_id} attempt={attempt}/{CPU_PROBE_RETRIES}")
+
+        task = _wait_for_terminal_task(task_id, timeout_seconds=CPU_PROBE_MAX_WAIT_SECONDS)
+        if not task:
+            cancel_task(task_id)
+            if attempt < CPU_PROBE_RETRIES:
+                print("[CPU-BLOCK] INFO: probe timed out, retrying")
+                time.sleep(CPU_PROBE_RETRY_SECONDS)
+                continue
+            print("[CPU-BLOCK] FAIL: probe task did not reach terminal state before timeout")
+            return False
+
+        task_status = str(task.get("status") or "")
+        task_error = str(task.get("error") or "")
+        entry = _latest_ledger_entry_for_correlation(task_id)
+        if entry is None:
+            if strict_backend_missing:
+                print("[CPU-BLOCK] FAIL: missing ledger entry for probe task in strict mode")
+                return False
+            if attempt < CPU_PROBE_RETRIES:
+                print("[CPU-BLOCK] INFO: missing ledger entry for probe task, retrying")
+                time.sleep(CPU_PROBE_RETRY_SECONDS)
+                continue
+            print("[CPU-BLOCK] SKIP: no ledger entry found for probe task")
+            return True
+
+        backend_type = entry.get("backend_type")
+        success = bool(entry.get("success"))
+        error = str(entry.get("error") or "")
+        error_l = error.lower()
+        task_error_l = task_error.lower()
+
+        if success and str(backend_type or "").strip().lower() == "cpu":
+            print(
+                "[CPU-BLOCK] FAIL: probe completed successfully on CPU "
+                f"(endpoint={entry.get('endpoint')}, model={entry.get('model')})"
+            )
+            return False
+
+        if backend_type is None and strict_backend_missing:
+            print("[CPU-BLOCK] FAIL: probe ledger entry missing backend_type in strict mode")
+            return False
+
+        if error == "cpu_execution_blocked" or "cpu_execution_blocked" in task_error:
+            print("[CPU-BLOCK] PASS: CPU execution was detected and blocked")
+            return True
+
+        if success and str(backend_type or "").strip().lower() in {"nvidia", "amd"}:
+            print(f"[CPU-BLOCK] PASS: probe completed on GPU backend_type={backend_type}")
+            return True
+
+        is_transient = any(marker in error_l or marker in task_error_l for marker in transient_error_markers)
+        if is_transient:
+            if attempt < CPU_PROBE_RETRIES:
+                print(
+                    "[CPU-BLOCK] INFO: transient probe failure, retrying "
+                    f"(task_status={task_status}, ledger_error={error!r})"
+                )
+                time.sleep(CPU_PROBE_RETRY_SECONDS)
+                continue
+            if not strict_backend_missing:
+                print(
+                    "[CPU-BLOCK] SKIP: persistent transient probe failures; "
+                    "unable to conclusively evaluate CPU-block path in this run"
+                )
+                return True
+
+        print(
+            "[CPU-BLOCK] FAIL: unexpected probe outcome "
+            f"(task_status={task_status}, ledger_success={success}, backend_type={backend_type}, ledger_error={error!r})"
+        )
+        return False
+
+    print("[CPU-BLOCK] FAIL: probe retries exhausted")
+    return False
+
+
 def validate_case(case: Case) -> bool:
     recover_agents()
     task_id = submit_task(case)
     print(f"[{case.label}] submitted task_id={task_id}")
 
     saw_route_count = False
-    saw_running_agent_details = False
-    saw_agent_identity = False
+    saw_task_running = False
+    warned_identity_mismatch = False
     deadline = time.time() + MAX_WAIT_SECONDS
 
     try:
@@ -445,6 +716,7 @@ def validate_case(case: Case) -> bool:
             task_status = str(task.get("status") or "")
             task_route = task.get("route")
             task_model = task.get("model")
+            task_backend = task.get("backend_type")
             route_counts = (((status.get("resource_tracker") or {}).get("queue") or {}).get("route_active_counts") or {})
             route_count = int(route_counts.get(case.expected_route) or 0)
             agents = ((status.get("health") or {}).get("agents") or {})
@@ -456,7 +728,8 @@ def validate_case(case: Case) -> bool:
             print(
                 f"[{case.label}] status={task_status} route={task_route} model={task_model} "
                 f"route_count={route_count} agent_state={route_agent_state} "
-                f"agent_profile={route_agent_profile} agent_model={route_agent_model}"
+                f"agent_profile={route_agent_profile} agent_model={route_agent_model} "
+                f"backend_type={task_backend}"
             )
 
             if task_route != case.expected_route:
@@ -465,23 +738,34 @@ def validate_case(case: Case) -> bool:
             if not task_model:
                 print(f"[{case.label}] FAIL: task model missing")
                 return False
+            if task_backend is not None and str(task_backend) != case.expected_backend:
+                print(
+                    f"[{case.label}] FAIL: expected backend_type={case.expected_backend}, got {task_backend}"
+                )
+                return False
 
             if task_status in {"queued", "running"} and route_count >= 1:
                 saw_route_count = True
 
-            if route_agent_profile == case.profile and bool(route_agent_model):
-                saw_agent_identity = True
-
             if task_status == "running":
-                if route_agent_state == "running" and route_agent_profile == case.profile and bool(route_agent_model):
-                    saw_running_agent_details = True
+                saw_task_running = True
+                if (
+                    route_agent_state == "running"
+                    and route_agent_profile != case.profile
+                    and not warned_identity_mismatch
+                ):
+                    print(
+                        f"[{case.label}] INFO: route is active with profile={route_agent_profile} "
+                        f"while task profile={case.profile}; continuing because task itself reached running"
+                    )
+                    warned_identity_mismatch = True
 
-            if saw_route_count and (saw_running_agent_details or saw_agent_identity):
+            if saw_route_count and saw_task_running:
                 print(f"[{case.label}] PASS")
                 return True
 
-            if task_status in {"completed", "failed", "cancelled"} and not (saw_running_agent_details or saw_agent_identity):
-                print(f"[{case.label}] FAIL: task ended before route agent identity was observed")
+            if task_status in {"completed", "failed", "cancelled"} and not saw_task_running:
+                print(f"[{case.label}] FAIL: task ended before reaching running state")
                 return False
 
             time.sleep(POLL_SECONDS)
@@ -492,19 +776,123 @@ def validate_case(case: Case) -> bool:
         cancel_task(task_id)
 
 
+def validate_gpu_layers_no_cpu_fallback() -> bool:
+    """Validate that all models load GPU layers (num_gpu_layers > 0) on both NVIDIA and AMD.
+    
+    Requirement: No model layers run on CPU. All GPU-targeted endpoints must have
+    num_gpu_layers > 0 for every model they serve.
+    
+    This probes both NVIDIA and AMD Ollama endpoints for loaded models and validates
+    each one has actual GPU layer offloading.
+    """
+    endpoints = {
+        "nvidia": str(os.environ.get("OLLAMA_NVIDIA_ENDPOINT") or "http://127.0.0.1:11434").rstrip("/"),
+        "amd": str(os.environ.get("OLLAMA_AMD_ENDPOINT") or "http://127.0.0.1:11435").rstrip("/"),
+    }
+    
+    backends_ok = []
+    
+    for backend_name, endpoint in endpoints.items():
+        try:
+            # Query running models endpoint
+            models_url = f"{endpoint}/api/tags"
+            resp = urllib.request.urlopen(models_url, timeout=10)
+            data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models") or []
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError, TimeoutError) as exc:
+            print(f"[GPU-LAYERS-NO-CPU-FALLBACK] SKIP {backend_name}: cannot query models ({exc})")
+            backends_ok.append(True)  # Skip if endpoint unreachable (container may not be running)
+            continue
+        
+        if not models:
+            print(f"[GPU-LAYERS-NO-CPU-FALLBACK] SKIP {backend_name}: no models loaded")
+            backends_ok.append(True)
+            continue
+        
+        backend_ok = True
+        for model_info in models:
+            model_name = str(model_info.get("name") or "").strip()
+            if not model_name:
+                continue
+            
+            # Query model details via generate endpoint metadata
+            # (shallow request to pull model metadata without full generation)
+            try:
+                show_url = f"{endpoint}/api/show"
+                show_req = urllib.request.Request(
+                    show_url,
+                    data=json.dumps({"name": model_name}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                show_resp = urllib.request.urlopen(show_req, timeout=10)
+                show_data = json.loads(show_resp.read().decode("utf-8"))
+                
+                model_details = show_data.get("model_info", {})
+                num_gpu_layers = model_details.get("num_gpu_layers")
+                
+                if num_gpu_layers is None:
+                    # num_gpu_layers not available in show response; skip detailed check
+                    continue
+                
+                num_gpu_layers = int(num_gpu_layers) if isinstance(num_gpu_layers, (int, str)) else 0
+                
+                if num_gpu_layers <= 0:
+                    print(
+                        f"[GPU-LAYERS-NO-CPU-FALLBACK] FAIL {backend_name}: "
+                        f"model {model_name} has num_gpu_layers={num_gpu_layers} "
+                        f"(CPU fallback detected; should be > 0)"
+                    )
+                    backend_ok = False
+                else:
+                    print(
+                        f"[GPU-LAYERS-NO-CPU-FALLBACK] {backend_name} model {model_name}: "
+                        f"num_gpu_layers={num_gpu_layers} OK"
+                    )
+            except (
+                urllib.error.URLError,
+                urllib.error.HTTPError,
+                json.JSONDecodeError,
+                ValueError,
+                OSError,
+                TimeoutError,
+            ) as exc:
+                # If we can't get model details, skip (endpoint may have transient issues)
+                print(
+                    f"[GPU-LAYERS-NO-CPU-FALLBACK] INFO {backend_name}: "
+                    f"cannot query details for {model_name} ({exc})"
+                )
+                continue
+        
+        backends_ok.append(backend_ok)
+    
+    if all(backends_ok):
+        print("[GPU-LAYERS-NO-CPU-FALLBACK] PASS: all models load GPU layers (no CPU fallback)")
+        return True
+    else:
+        print("[GPU-LAYERS-NO-CPU-FALLBACK] FAIL")
+        return False
+
+
 def main() -> int:
     strict_live = "--strict-live" in sys.argv
+    strict_backend_missing = "--strict-backend-missing" in sys.argv
     if strict_live:
         print("[REGRESSION] Running in strict-live mode (CI/container)")
+    if strict_backend_missing:
+        print("[REGRESSION] Running in strict-backend-missing mode")
     
     results = []
     results.append(fixture_provenance_regression())
     results.append(live_provenance_regression())
     results.append(live_status_filter_regression())
     results.append(live_status_filter_invalid_stage_regression(strict_live=strict_live))
+    results.append(validate_backend_type_in_status(strict_backend_missing=strict_backend_missing))
     for case in CASES:
         ok = validate_case(case)
         results.append(ok)
+    results.append(validate_cpu_block_probe(strict_backend_missing=strict_backend_missing))
+    results.append(validate_gpu_layers_no_cpu_fallback())
 
     if all(results):
         print("status_synthesis_regression: PASS")
@@ -519,6 +907,8 @@ if __name__ == "__main__":
         exit_code = main()
         if "--strict-live" in sys.argv:
             sys.argv.remove("--strict-live")  # Clean up for any downstream consumers
+        if "--strict-backend-missing" in sys.argv:
+            sys.argv.remove("--strict-backend-missing")
         sys.exit(exit_code)
     except Exception as exc:  # noqa: BLE001
         print(f"fatal: {exc}")

@@ -1,6 +1,7 @@
 ---
 name: book-skeleton-updater
 route: ollama_amd
+allowed_routes: ollama_amd
 model: qwen3.5:9b
 default_stream: false
 intent_keywords: skeleton-updater,skeleton update,canonical extraction,law extraction,canon extraction,chapter acceptance,living skeleton,canonical record

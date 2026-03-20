@@ -1,4 +1,25 @@
+## Ollama AMD/NVIDIA Service Mirroring (March 2026)
+- Each Ollama instance (AMD/NVIDIA) must have its own container, port, and model/manifest directory.
+- NVIDIA: `/ai/ollama-nvidia/models` (port 11434)
+- AMD: `/ai/ollama-amd/models` (port 11435)
+- No cross-mounting or sharing of model data.
+- All GPU runs must be enforced per container/device.
+- See `docker-compose.ollama.yml` for the canonical service configuration.
 # AGENT_PLAN.md
+# Documentation Requirement
+
+## Model Storage Enforcement (March 2026)
+- All model manifests and blobs must be stored in `/ai/ollama-nvidia/models` (NVIDIA) or `/ai/ollama-amd/models` (AMD) only.
+- The `/home/daravenrk/dragonlair/model-sets` directory is for text lists/config only—no manifests or blobs allowed.
+- Periodically audit and delete any model data found in `model-sets` to prevent confusion and ensure correct operation.
+All procedures, operational steps, troubleshooting, and recovery workflows must be fully documented in the markdown files. This includes:
+- How to start, stop, and restart all agent services/containers (with and without Docker Compose)
+- How to trigger, monitor, and debug book runs
+- How to interpret logs and error messages
+- How to perform backup, restore, and recovery
+- How to update, patch, and validate the system
+- How to escalate or trace persistent errors
+No operational knowledge should be left undocumented. Every step must be reproducible by following the markdown documentation alone.
 
 ## Objective
 Build a fully autonomous backend agent control system for Dragonlair using md-defined behavior profiles, lock/triage safeguards, and an operator CLI with streaming support.
@@ -23,6 +44,14 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [ ] Add worker loop for queued requests
 - [ ] Add checkpointed task state transitions
 - [ ] Add retry strategy and dead-letter handling
+
+## Debug Attribute Error Blocker (March 2026)
+- [x] Workspace-wide audit and patch for SimpleNamespace debug/no_debug attributes
+- [x] Patched all entrypoints (API, CLI, error handling)
+- [ ] Persistent error remains: likely stale process or external code path
+- [ ] Next: Restart all agent containers/services to ensure latest code is running
+- [ ] If error persists: Add runtime logging to trace faulty args construction
+- [ ] Escalate for deeper codebase review if error persists after restart
 
 ## Phase 3: Self-Healing
 - [ ] Add endpoint watchdog probes and health scoring

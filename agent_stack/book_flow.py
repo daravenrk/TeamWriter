@@ -2284,7 +2284,7 @@ def run_flow(args):
     }
     diagnostics_log = (dirs["diagnostics"] / "agent_diagnostics.jsonl") if (args.verbose or diagnostics_always) else None
     debug_env = str(os.environ.get("BOOK_FLOW_DEBUG", "true")).lower()
-    debug_mode = bool(args.debug)
+    debug_mode = bool(getattr(args, "debug", False))
     if debug_env in {"0", "false", "no", "off"}:
         debug_mode = False
     elif debug_env in {"1", "true", "yes", "on"}:

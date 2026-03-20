@@ -161,7 +161,7 @@
       <div id="counts"></div>
       <table>
         <thead>
-          <tr><th>ID</th><th>Status</th><th>Queue</th><th>Profile</th><th>Runtime</th><th>Route</th><th>Model</th><th>Error</th></tr>
+          <tr><th>ID</th><th>Status</th><th>Queue</th><th>Profile</th><th>Runtime</th><th>Backend</th><th>Route</th><th>Model</th><th>Error</th></tr>
         </thead>
         <tbody id="tasks"></tbody>
       </table>
@@ -642,7 +642,7 @@ async function refreshStatus() {
     const runtimeLabel = t.runtime_stage
       ? `${t.runtime_profile || t.profile || ''} @ ${t.runtime_stage}`
       : (t.runtime_profile || '');
-    tr.innerHTML = `<td>${(t.id || '').slice(0,8)}</td><td>${pill(t.status || '')}</td><td>${t.queue_position || ''}</td><td>${t.profile || ''}</td><td>${runtimeLabel}</td><td>${t.route || ''}</td><td>${t.model || ''}</td><td>${t.error || ''}</td>`;
+    tr.innerHTML = `<td>${(t.id || '').slice(0,8)}</td><td>${pill(t.status || '')}</td><td>${t.queue_position || ''}</td><td>${t.profile || ''}</td><td>${runtimeLabel}</td><td>${t.backend_type || '-'}</td><td>${t.route || ''}</td><td>${t.model || ''}</td><td>${t.error || ''}</td>`;
     tbody.appendChild(tr);
   }
 

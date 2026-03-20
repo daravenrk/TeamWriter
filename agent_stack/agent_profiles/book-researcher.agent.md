@@ -1,6 +1,7 @@
 ---
 name: book-researcher
 route: ollama_amd
+allowed_routes: ollama_amd
 model: qwen2.5-coder:14b
 default_stream: false
 num_ctx: 128000

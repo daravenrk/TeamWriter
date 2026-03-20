@@ -1,6 +1,7 @@
 ---
 name: book-publisher-brief-amd
 route: ollama_amd
+allowed_routes: ollama_amd
 model: qwen3.5:9b
 default_stream: false
 num_ctx: 49152

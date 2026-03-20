@@ -1,0 +1,47 @@
+services:
+  ollama_nvidia:
+    image: ollama/ollama:latest
+    container_name: ollama_nvidia
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - /ai/ollama-nvidia/models:/root/.ollama/models
+    environment:
+      - OLLAMA_MODELS=/root/.ollama/models
+    networks:
+      - dragonlair-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama_amd:
+    image: ollama/ollama:rocm
+    container_name: ollama_amd
+    restart: unless-stopped
+    ports:
+      - "11435:11434"
+    volumes:
+      - /ai/ollama-amd/models:/root/.ollama/models
+    environment:
+      - OLLAMA_MODELS=/root/.ollama/models
+      - HIP_VISIBLE_DEVICES=0,1
+      - HSA_VISIBLE_DEVICES=0,1
+      - ROCR_VISIBLE_DEVICES=0,1
+      - OLLAMA_SCHED_SPREAD=1
+    networks:
+      - dragonlair-net
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - "993"
+
+networks:
+  dragonlair-net:
+    external: true

@@ -1,12 +1,17 @@
 # Development Next Steps & Process Guide
 
-**Last Updated:** March 18, 2026  
+**Last Updated:** March 19, 2026
 **Project:** Dragonlair Agent Stack — Multi-agent orchestration for book writing and code generation  
 **Current Focus:** Complete one end-to-end book run and validate interruption recovery in production flow
 
 ---
 
 ## 1. Project Overview
+
+**Model Storage Structure Policy (March 2026):**
+- All Ollama model manifests and blobs must be stored in `/ai/ollama-nvidia/models` (NVIDIA) or `/ai/ollama-amd/models` (AMD).
+- The `/home/daravenrk/dragonlair/model-sets` directory must not contain manifests or blobs—only text lists/configuration.
+- Enforce this structure with regular audits and immediate cleanup if violations are found.
 
 Dragonlair is a distributed multi-agent system that orchestrates specialized Ollama LLM models to collaboratively write books and generate code. The system consists of:
 
@@ -56,7 +61,69 @@ queued → (10s pre-spawn delay) → running → completed/failed/cancelled
 - Spawn queue interdiction controls (Go/Pause/Stop buttons work correctly)
 - Docker deployment and validation
 
-### ⚠️ Current Risk: Mid-run interruption without terminal completion
+### ✅ Completed Work (2026-03-19 Session 2 — GPU Layer Enforcement)
+
+- **AMD container switched to `ollama/ollama:rocm`** — `ollama:latest` contains only CUDA; ROCm image required for AMD GPU inference.
+  - `/dev/kfd` + `/dev/dri` passed as Docker devices; `group_add: ["video", "993"]` (render GID)
+  - `HIP_VISIBLE_DEVICES=0,1`, `ROCR_VISIBLE_DEVICES=0,1`, `OLLAMA_SCHED_SPREAD=1` set in container env
+  - Verified: `offloaded 33/33 layers to GPU` across both RX 6800 GPUs (32 GiB VRAM total)
+- **NVIDIA `num_gpu=999` crash fixed** — changed to `-1` (Ollama sentinel for "all layers")
+  - Previous value `999` caused `memory layout cannot be allocated` in CUDA backend
+  - `_parse_env_json_int_map` now preserves `-1` without clamping
+  - Verified: NVIDIA loads `32/33` layers on GPU (1 output layer CPU-side is normal for 6 GiB VRAM)
+- **GPU execution policy injected in every orchestrator request** — new methods in `orchestrator.py`:
+  - `_apply_gpu_execution_policy()` sets `num_gpu=-1` on all routes
+  - AMD-only: `num_gpus=2`, `tensor_split=[0.5, 0.5]`, `main_gpu=0`
+  - Configured via `AGENT_BLOCK_CPU_BACKEND`, `AGENT_AMD_GPU_COUNT`, `AGENT_AMD_TENSOR_SPLIT` env vars
+- **`_save_ui_state_snapshot` NameError fixed** — `api_server.py` `/api/status` endpoint was calling a deleted function name; corrected to `_refresh_ui_state_snapshot(event_type="status")`
+- **`args.debug` AttributeError fixed** — `book_flow.py` bare `args.debug` → `getattr(args, "debug", False)`
+
+### ✅ Completed Work (2026-03-19 Session)
+
+- **NVIDIA GPU enforcement**: All model layers must run on GPU — no CPU fallback permitted.
+  - `orchestrator.py` `_enforce_profile_policy()` now hard-rejects any model not in `AGENT_NVIDIA_TINY_MODELS` when route is `ollama_nvidia`.
+  - NVIDIA tiny-model allowlist: `qwen3.5:0.8b`, `qwen3.5:2b`, `qwen3.5:4b`, `qwen2.5-coder:1.5b`, `qwen2.5-coder:3b`, `llama3.2:1b`, `llama3.2:3b`, `codegemma:2b`
+- **Profile route locking**: Added explicit `allowed_routes` frontmatter to all 8 NVIDIA profiles and all 8 large-model AMD-only profiles.
+- **No model store changes**: Model files are kept on disk for both endpoints; enforcement is orchestration-layer only.
+- Container rebuilt and redeployed with changes active.
+
+### ⚠️ Current State (2026-03-19)
+
+**Book-flow task status as of this session:**
+- 9 failed `book-flow` tasks (all `qwen3.5:27b` on AMD) queued before 21:09
+- 2 queued `book-flow` tasks awaiting execution (`qwen3.5:27b`, AMD route)
+- Both agents (`ollama_amd`, `ollama_nvidia`) are currently **idle** — no active inference
+- GPU is idle (0% utilization, 1MB VRAM used)
+- Root failure cause of the 9 failed runs: **publisher stage returning empty outputs** (pre-existing issue, not caused by today's changes)
+
+**How to validate the queued runs when they fire:**
+```sh
+# 1. Watch GPU activity
+watch -n 2 nvidia-smi
+
+# 2. Watch agent stack health live
+watch -n 3 'curl -s http://127.0.0.1:11888/api/health | python3 -c "
+import json,sys; h=json.load(sys.stdin)
+q=h[\"resource_tracker\"][\"queue\"]
+print(\"Q:\",q[\"status_counts\"])
+agents=h[\"resource_tracker\"][\"agents\"][\"health\"][\"agents\"]
+for k,v in agents.items():
+    print(k,v[\"state\"],\"model=\"+str(v[\"current_model\"]))
+"'
+
+# 3. Tail the task ledger for updates
+watch -n 5 'python3 -c "
+import json
+data=json.load(open(\"/home/daravenrk/dragonlair/book_project/task_ledger.json\"))
+for t in data.get(\"tasks\",{}).values() if isinstance(data.get(\"tasks\"),dict) else data.get(\"tasks\",[]):
+    print(str(t.get(\"status\"))[:10], str(t.get(\"profile\"))[:28], str(t.get(\"created_at\"))[:19])
+" 2>&1 | tail -5'
+
+# 4. Tail run journal for active run
+find /home/daravenrk/dragonlair/book_project/runs -name run_journal.jsonl \
+  -newer /home/daravenrk/dragonlair/book_project/task_ledger.json 2>/dev/null \
+  | xargs tail -f 2>/dev/null
+```
 
 **Observed behavior**:
 - Some runs stop after early stages (for example at `research` stage start)
@@ -215,9 +282,38 @@ These should be completed once publisher outputs successfully:
   - Adjust `num_ctx`, `num_predict`, `temperature`, `think`, `num_gpus` based on stage type and task size
   - Enforce hard safety caps and fallback defaults when profile options are missing
 
+- **Todo 167**: Enforce explicit per-model GPU layer maps for every run (no sentinels)
+  - Define exact `num_gpu_layers` per model and per run profile for both AMD and NVIDIA routes; do not use sentinel values (`999` or `-1`).
+  - Require explicit dual-AMD layer split mapping for each AMD run so layers are balanced evenly across both GPUs.
+  - Enforce zero CPU-layer execution for targeted runs; fail fast if any layer is placed on CPU.
+  - Add startup/runtime validation that blocks task launch when a model is missing an explicit GPU layer map.
+  - Persist per-run layer mapping + actual offload results to diagnostics for operator verification.
+
 - **Todo 42**: Add token-aware execution policy
   - Use reward token level to tighten validation, reduce creativity variance, and choose safer models
   - Trigger stricter JSON/contract checks automatically when profile tokens are low or depleted
+
+- **Todo 168**: Add monetary reward model tied to execution policy and approved model definitions
+  - Define a pricing and reward formula per run that combines: wall-clock speed, quality-gate pass rate, and least-interference behavior (no quarantines, no forced recoveries, no avoidable retries).
+  - Restrict reward eligibility to approved model/profile configurations only (enforced by existing route/model allowlists and model-definition constraints such as `num_ctx`, `num_predict`, `temperature`, and GPU mapping rules).
+  - Add per-profile baseline cost bands and per-model multipliers so faster, stable runs on approved configurations are rewarded predictably.
+  - Add explicit penalties for policy violations (CPU-layer usage where disallowed, unsupported model selection, route override drift, excessive fallback hops).
+  - Persist run-level reward ledger entries with pricing inputs, final reward/penalty, and audit trace fields for operator review and reconciliation.
+
+- **Todo 169**: Prepare no-touch end-to-end book run automation (front-to-back untouched)
+  - Implement an external operator watchdog loop (no core pipeline code edits) that monitors task status, run-journal freshness, and queue health.
+  - Stall detection policy: if task is `running` and no new `run_journal.jsonl` event for a bounded window, trigger controlled recovery.
+  - Recovery ladder policy:
+    1. call `/api/recover-hung` with timeout + retry/backoff,
+    2. if unresolved, soft-cancel stuck task,
+    3. requeue using the last persisted `book_request` payload.
+  - Polling resilience policy: require consecutive failed/empty API responses before corrective action (to avoid false positives during transient endpoint jitter).
+  - Safety policy: single-instance lock for watchdog execution and append-only action audit log with timestamps, task IDs, and outcomes.
+  - Run unchanged core stack for validation; use only existing public endpoints and file artifacts to recover progress.
+  - Acceptance criteria for "untouched" prep:
+    - at least one run reaches terminal success without manual stage intervention,
+    - stalled runs are automatically recovered or requeued,
+    - every corrective action is captured in automation audit logs for replay/debug.
 
 - **Todo 43**: Add failure-memory corrective retries
   - Inject recent `quality_gate_failures.jsonl` reasons into retry prompts as explicit fix targets
@@ -458,11 +554,25 @@ These should be completed once publisher outputs successfully:
   - **Current checkpoint (2026-03-18, before next todo pickup)**:
     - Pre-run cleanup and archival are now active and verified in live runs: old `runs/` content is copied into `run_history/` before the next run starts.
     - Full debug payload logging is active by default, so stage attempt/recovery payloads are available in diagnostics without needing `--debug`.
+
+- **Todo 74**: Add standard GPU execution proof for NVIDIA and AMD routes
+  - Add a repeatable probe that runs a sustained generation load and captures live accelerator telemetry during inference, not just pre/post memory residency.
+  - NVIDIA success criterion: sampled GPU utilization/power must show active compute during generation while backend_type remains `nvidia`.
+  - AMD success criterion: sampled ROCm/AMD telemetry must show active compute during generation while backend_type remains `amd`.
+  - Persist a short machine-readable summary artifact for each probe run so GPU execution evidence is auditable.
+
+- **Todo 75**: Standardize accelerator telemetry availability across environments
+  - Ensure NVIDIA and AMD environments both expose operator-usable runtime telemetry tools (`nvidia-smi` / `rocm-smi` or equivalent).
+  - Add a doctor/self-check that fails when GPU-backed routes are configured but accelerator telemetry is unavailable.
+  - Requirement: GPU-routed models are not considered fully validated until both layer residency and live compute activity are observable.
     - `publisher_brief` is now stable enough to pass on current validation runs.
     - `research` on AMD is still returning `raw_output: null` / empty output, but the pipeline now applies a deterministic fallback dossier and continues.
     - `architect_outline` fallback is now validated in the fresh run path (`operator_generated_architect_outline` fired and advanced downstream).
     - `chapter_planner` fallback is now validated in the fresh run path (`operator_generated_chapter_spec` fired and framework integrity passed).
     - Immediate next evaluation target: confirm whether `canon` is simply high-latency or a new silent-stop/stall boundary between `pre_agent_call` and `stage_attempt_result`.
+    - Latest live-run finding (2026-03-19): canon-stage attempt can stall with no terminal stage event, leaving task status as `running` until operator soft-cancel.
+    - Latest live-run finding (2026-03-19): `/api/recover-hung` may timeout under this stall condition, so recovery reliability needs hardening.
+    - Latest live-run finding (2026-03-19): `/api/tasks/{id}` intermittently returns an empty response body during active polling; add response-integrity guard + retry/trace logging.
   - **Current Todo 73 analysis summary**:
     - Infra timeout mismatch: fixed.
     - Executor timeout shutdown blocking: fixed.
@@ -487,6 +597,13 @@ These should be completed once publisher outputs successfully:
 - **Todo 77**: Gate model pull on smoketest pass before committing to production route
   - After `pull-amd` or `pull-nvidia`, run the `smoketest_coder_models.py` logic against writing/coder profiles
   - Refuse to update the active model alias if the smoketest score falls below threshold
+
+- **Todo 78**: Isolate GPU compute regression from last-known-good branch state
+  - Operator reports NVIDIA GPU compute was working correctly on this branch most or all of the time on 2026-03-18.
+  - `main` is not a practical rollback target because it is significantly behind current agent-stack/runtime work.
+  - Treat current GPU-compute doubt as a recent regression candidate in this branch, not as proof of host-level GPU failure.
+  - Compare recent agent-stack/config/runtime changes against the last-known-good window and identify the smallest change set that altered observable GPU compute behavior.
+  - Success criterion: either prove current branch still executes compute on GPU with live telemetry evidence, or identify the exact recent change that broke that property.
 
 - **Todo 78**: Add per-stage wall-clock budget enforcement
   - Define optional `stage_timeout_seconds` in each stage's kwargs or profile policy
@@ -969,16 +1086,25 @@ These should be completed once publisher outputs successfully:
   - **Usage**: `python3 -m agent_stack.cli check-ownership` or `fix-ownership --dry-run`
   - **Result**: Operators can now diagnose and fix root-owned artifact issues without privilege escalation
 
-- **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
-  - Ensure every CLI run closes with `run_success` or `run_failure` event, even on stage exceptions
-  - Write `run_summary.json` on both success and failure paths with stage outcomes, retry counts, failure reason
-  - Add guaranteed cleanup of run locks and diagnostics flush on abnormal termination
-  - Add recovery mode to complete orphaned runs left by crashed host processes
+- **Completed (2026-03-19) / Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
+  - Added uncaught-exception closure in `book_flow.py` CLI entrypoint: on failure, append `run_failure` when missing and write `run_summary.json` on failure path.
+  - Failure summary now includes per-stage outcomes and retry counts derived from `run_journal.jsonl`, plus failure type/reason.
+  - CLI runtime activity is now forced to failed then cleared on abnormal termination to avoid stale active-run rows.
+  - Logged parent-level `run_failure` record into `changes.log` for audit continuity.
+  - Remaining follow-up (separate task): explicit orphaned-run recovery mode for host crash/power-loss scenarios.
 
 - **Todo 120**: Evaluate stage-by-stage think mode policy and default profile settings
   - Build an evidence-based matrix for each major stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial stages) indicating when `think: false` improves reliability/latency and when deeper reasoning is worth the cost.
   - Capture measurable criteria: schema pass rate, retry count, latency, hallucination/continuity regressions, and token economy impact.
   - Produce an implementation plan for profile updates (including safe defaults and rollback toggles) and document final policy in the operator guide.
+
+  Suggestions / Open Questions:
+  - All major agent profiles currently have `think: false`. Should any stages (e.g., research, canon, or writer) enable `think: true` for deeper reasoning?
+  - Consider A/B testing `think: true` on research or outline stages to measure impact on schema pass rate and hallucination.
+  - Add a CLI or config toggle to override `think` per run for rapid experimentation.
+  - Document observed tradeoffs: does `think: true` increase latency or cost, and is the quality gain (if any) worth it?
+  - Should “think” be adaptive (e.g., enabled only on retry or fallback) rather than static per profile?
+  - Gather operator feedback on where “think” has been most/least valuable in production runs.
 
 - **Todo 121**: Redesign WebUI with hardware-first system view (AMD + NVIDIA GPU pools)
   - Add a dedicated Hardware view that visually separates the two model environments: AMD/ROCm pool and NVIDIA pool, including per-route capacity and active model assignment.

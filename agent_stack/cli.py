@@ -20,7 +20,6 @@ def slugify(text):
 
 from .orchestrator import OrchestratorAgent
 from .validate_agent_profiles import DEFAULT_MAX_SYSTEM_PROMPT_CHARS, lint_profiles
-from .artifact_ownership import diagnose_ownership, repair_ownership, check_artifact_ownership
 
 
 def _print_stream(token, _chunk):
@@ -80,31 +79,6 @@ def cmd_profile_lint(profile_dir, max_system_prompt_chars, json_output):
             f"{report['profile_count']} profiles, {report['error_count']} errors, {report['warning_count']} warnings"
         )
     if not report["valid"]:
-        raise SystemExit(1)
-
-
-def cmd_check_ownership(book_project_dir):
-    """Check artifact ownership and report status."""
-    book_project_path = pathlib.Path(book_project_dir)
-    ownership = check_artifact_ownership(book_project_path)
-    
-    has_issues = bool(ownership["root_owned"] or ownership["wrong_permissions"])
-    
-    print(diagnose_ownership(book_project_path))
-    
-    if has_issues:
-        raise SystemExit(1)
-    else:
-        raise SystemExit(0)
-
-
-def cmd_fix_ownership(book_project_dir, dry_run):
-    """Fix artifact ownership issues."""
-    book_project_path = pathlib.Path(book_project_dir)
-    success, report = repair_ownership(book_project_path, dry_run=dry_run)
-    print(report)
-    
-    if not success:
         raise SystemExit(1)
 
 
@@ -301,14 +275,6 @@ def main():
     lint_p.add_argument("--profile-dir", default=str(pathlib.Path(__file__).parent / "agent_profiles"))
     lint_p.add_argument("--max-system-prompt-chars", type=int, default=DEFAULT_MAX_SYSTEM_PROMPT_CHARS)
     lint_p.add_argument("--json", action="store_true", help="Emit full JSON report")
-    
-    own_p = sub.add_parser("check-ownership", help="Check artifact ownership status")
-    own_p.add_argument("--book-project", default="book_project", help="Path to book_project directory")
-    
-    fix_p = sub.add_parser("fix-ownership", help="Fix artifact ownership issues")
-    fix_p.add_argument("--book-project", default="book_project", help="Path to book_project directory")
-    fix_p.add_argument("--dry-run", action="store_true", help="Show what would be fixed without applying")
-    
     sub.add_parser("health", help="Show orchestrator health report")
 
     plan_p = sub.add_parser("plan", help="Show route/model plan for a prompt")
@@ -354,12 +320,6 @@ def main():
         return
     elif args.command == "profile-lint":
         cmd_profile_lint(args.profile_dir, args.max_system_prompt_chars, args.json)
-        return
-    elif args.command == "check-ownership":
-        cmd_check_ownership(args.book_project)
-        return
-    elif args.command == "fix-ownership":
-        cmd_fix_ownership(args.book_project, args.dry_run)
         return
     elif args.command == "health":
         orchestrator = OrchestratorAgent()

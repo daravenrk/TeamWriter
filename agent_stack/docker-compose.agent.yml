@@ -22,6 +22,15 @@ services:
       AGENT_ROUTE_MAX_INFLIGHT_NVIDIA: "3"
       AGENT_ENDPOINT_MAX_INFLIGHT_AMD: "1"
       AGENT_ENDPOINT_MAX_INFLIGHT_NVIDIA: "3"
+      AGENT_BLOCK_CPU_BACKEND: "true"
+      AGENT_FORCE_FULL_GPU_LAYERS: "true"
+      AGENT_NVIDIA_NUM_GPU_DEFAULT: "-1"
+      AGENT_AMD_NUM_GPU_DEFAULT: "-1"
+      AGENT_NVIDIA_NUM_GPU_BY_MODEL: '{"qwen3.5:4b":-1,"qwen3.5:2b":-1,"qwen3.5:0.8b":-1,"qwen2.5-coder:3b":-1,"qwen2.5-coder:1.5b":-1,"llama3.2:3b":-1,"llama3.2:1b":-1,"codegemma:2b":-1}'
+      AGENT_AMD_NUM_GPU_BY_MODEL: '{"qwen3.5:27b":-1,"qwen2.5-coder:14b":-1,"qwen3.5:9b":-1,"llama3.1:8b":-1}'
+      AGENT_AMD_GPU_COUNT: "2"
+      AGENT_AMD_MAIN_GPU: "0"
+      AGENT_AMD_TENSOR_SPLIT: "0.5,0.5"
       AGENT_NVIDIA_ROUTE_NAME: "ollama_nvidia"
       AGENT_NVIDIA_ALLOW_MIXED_TINY_MODELS: "true"
       AGENT_NVIDIA_TINY_MAX_ACTIVE_MODELS: "2"

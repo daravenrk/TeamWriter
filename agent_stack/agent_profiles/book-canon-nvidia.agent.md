@@ -1,6 +1,7 @@
 ---
 name: book-canon-nvidia
 route: ollama_nvidia
+allowed_routes: ollama_nvidia
 model: qwen3.5:4b
 default_stream: false
 num_ctx: 49152

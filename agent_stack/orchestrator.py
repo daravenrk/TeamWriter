@@ -159,6 +159,27 @@ class OrchestratorAgent:
             "ollama_amd": os.environ.get("AGENT_DEFAULT_MODEL_OLLAMA_AMD", "qwen3.5:27b"),
             "ollama_nvidia": os.environ.get("AGENT_DEFAULT_MODEL_OLLAMA_NVIDIA", "qwen3.5:4b"),
         }
+        self.block_cpu_backend = str(os.environ.get("AGENT_BLOCK_CPU_BACKEND", "true")).lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.force_full_gpu_layers = str(os.environ.get("AGENT_FORCE_FULL_GPU_LAYERS", "true")).lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.nvidia_num_gpu_default = max(1, int(os.environ.get("AGENT_NVIDIA_NUM_GPU_DEFAULT", "999")))
+        self.amd_num_gpu_default = max(1, int(os.environ.get("AGENT_AMD_NUM_GPU_DEFAULT", "999")))
+        self.nvidia_num_gpu_by_model = self._parse_env_json_int_map("AGENT_NVIDIA_NUM_GPU_BY_MODEL")
+        self.amd_num_gpu_by_model = self._parse_env_json_int_map("AGENT_AMD_NUM_GPU_BY_MODEL")
+        self.amd_gpu_count = max(1, int(os.environ.get("AGENT_AMD_GPU_COUNT", "2")))
+        self.amd_main_gpu = int(os.environ.get("AGENT_AMD_MAIN_GPU", "0"))
+        self.amd_tensor_split = self._resolve_amd_tensor_split()
+        # NVIDIA GPU constraint: only small models allowed (GTX 1660 has 6GB VRAM)
+        _nvidia_tiny_raw = str(
+            os.environ.get(
+                "AGENT_NVIDIA_TINY_MODELS",
+                "qwen3.5:4b,qwen3.5:2b,qwen3.5:0.8b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b",
+            )
+        )
+        self.nvidia_tiny_models = {item.strip() for item in _nvidia_tiny_raw.split(",") if item.strip()}
         # Dynamic Qwen-only selector for lightweight witty/chat responses.
         self.joke_short_model = os.environ.get("AGENT_JOKE_SHORT_MODEL", "qwen3.5:0.8b")
         self.joke_medium_model = os.environ.get("AGENT_JOKE_MEDIUM_MODEL", "qwen3.5:2b")
@@ -831,6 +852,85 @@ class OrchestratorAgent:
         except (TypeError, ValueError):
             return 0
 
+    def _parse_env_json_int_map(self, env_key):
+        raw = str(os.environ.get(env_key, "")).strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        resolved = {}
+        for key, value in parsed.items():
+            model_name = str(key or "").strip()
+            if not model_name:
+                continue
+            try:
+                layers = int(value)
+            except (TypeError, ValueError):
+                continue
+            # -1 is valid (Ollama sentinel for "all layers"); positive means specific count
+            resolved[model_name] = layers if layers == -1 else max(1, layers)
+        return resolved
+
+    def _resolve_amd_tensor_split(self):
+        raw = str(os.environ.get("AGENT_AMD_TENSOR_SPLIT", "")).strip()
+        if raw:
+            parsed = []
+            for chunk in raw.split(","):
+                token = chunk.strip()
+                if not token:
+                    continue
+                try:
+                    parsed.append(float(token))
+                except ValueError:
+                    parsed = []
+                    break
+            if len(parsed) == self.amd_gpu_count:
+                total = sum(parsed)
+                if total > 0:
+                    return [round(value / total, 6) for value in parsed]
+        even = 1.0 / float(self.amd_gpu_count)
+        return [round(even, 6) for _ in range(self.amd_gpu_count)]
+
+    def _resolve_model_num_gpu_layers(self, model_name, route_name):
+        model = str(model_name or "").strip()
+        if route_name == "ollama_nvidia":
+            configured = self.nvidia_num_gpu_by_model.get(model, self.nvidia_num_gpu_default)
+        elif route_name == "ollama_amd":
+            configured = self.amd_num_gpu_by_model.get(model, self.amd_num_gpu_default)
+        else:
+            return None
+
+        resolved = max(1, int(configured))
+        if self.force_full_gpu_layers:
+            # -1 is Ollama's sentinel for "offload all layers" — safe for any GPU
+            return -1
+        return resolved
+
+    def _apply_gpu_execution_policy(self, agent_name, model_name, request_options):
+        options = dict(request_options or {})
+        if not self.block_cpu_backend:
+            return options
+
+        num_gpu = self._resolve_model_num_gpu_layers(model_name, agent_name)
+        if num_gpu is not None:
+            options["num_gpu"] = int(num_gpu)  # -1 = all layers on GPU
+
+        if agent_name == "ollama_amd":
+            options["num_gpus"] = int(self.amd_gpu_count)
+            options["tensor_split"] = list(self.amd_tensor_split)
+            if self.amd_main_gpu >= 0:
+                options["main_gpu"] = int(self.amd_main_gpu)
+
+        if agent_name == "ollama_nvidia":
+            options.pop("tensor_split", None)
+            options.pop("main_gpu", None)
+
+        return options
+
     def _enforce_profile_policy(self, profile, route_name, model_name):
         if not profile:
             return
@@ -857,6 +957,20 @@ class OrchestratorAgent:
                     "model_allowlist": model_allowlist,
                 },
             )
+
+        # NVIDIA route constraint: only tiny models allowed (GPU memory limit)
+        if route_name == "ollama_nvidia" and model_name:
+            model_str = str(model_name).strip()
+            if model_str not in self.nvidia_tiny_models:
+                raise AgentProfileError(
+                    f"Profile {profile_name} requests model {model_name} on NVIDIA route, but only these models are allowed on NVIDIA: {sorted(self.nvidia_tiny_models)}",
+                    details={
+                        "profile": profile_name,
+                        "route": "ollama_nvidia",
+                        "model": model_name,
+                        "allowed_tiny_models": sorted(self.nvidia_tiny_models),
+                    },
+                )
 
     def _is_retryable_agent_error(self, err):
         if isinstance(err, (AgentProfileError, AgentRouteConfigError, AgentQuarantinedError)):
@@ -1249,7 +1363,7 @@ class OrchestratorAgent:
         )
 
         stream_preview = []
-        request_options = dict(options or {})
+        request_options = self._apply_gpu_execution_policy(agent_name, model, options or {})
         request_keep_alive = keep_alive
 
         # AMD override policy: allow temporary alternate large-context model calls,
