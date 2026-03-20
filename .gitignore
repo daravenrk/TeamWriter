@@ -75,3 +75,18 @@ book_project/**/framework/*.jsonl
 # Generated runtime markdown/json artifacts outside runs
 book_project/**/book_history.jsonl
 book_project/**/changes.log
+
+# Stage-A compliance/report artifacts and generated helper markdown
+book_project/policy_compliance_report.json
+book_project/history.md
+book_project/names.md
+book_project/personalities.md
+book_project/technology.md
+book_project/test-book-flight/
+
+# Model storage must not live in model-sets; keep generated stores untracked
+model-sets/blobs/
+model-sets/manifests/
+
+# Local host status snapshots
+nvidia_status.json
