@@ -24,6 +24,34 @@ No operational knowledge should be left undocumented. Every step must be reprodu
 ## Objective
 Build a fully autonomous backend agent control system for Dragonlair using md-defined behavior profiles, lock/triage safeguards, and an operator CLI with streaming support.
 
+## Adaptive Creation Platform Expectations (March 2026)
+
+### Core Principles
+- Abstraction over hardcoding
+- Options over single-path execution
+- User control over automation
+- Documentation over assumption
+- Conversation over configuration
+- Assistive intelligence over static UI
+
+### Control Philosophy
+- Minimal interaction is a usability goal, not a control reduction goal.
+- The system must provide both:
+	- a guided default path for low-friction execution
+	- a detailed control path for inspection, overrides, and operator intervention
+
+### Architectural Direction
+- Move from fixed flow branching to publisher-driven orchestration.
+- Publishers must be modular and pluggable (book publisher, code publisher, future publishers).
+- Each publisher defines its own execution model and artifacts while using shared runtime guardrails.
+- Intent analysis selects publisher and plan strategy; user approval gates execution.
+
+### Assistive Intelligence Layer Requirement
+- Introduce a conversational mediation layer between user and execution runtime.
+- The layer must maintain persistent user memory (preferences, prior projects, tendencies, goals).
+- The layer must produce multiple structured options and request user selection before full execution.
+- Long-term: this layer becomes the primary interface for Dragonlair and expands toward Linux/Ubuntu interaction mediation.
+
 ## Current Completed Baseline
 - [x] Python class-based orchestrator + subagent stack
 - [x] md profile behavior files with hot reload
@@ -70,6 +98,21 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [ ] Add regression test suite for routing/stream/triage
 - [ ] Add chaos tests for hangs/timeouts/failover
 - [ ] Version and freeze profile bundles per release
+
+## Phase 6: Publisher Abstraction + Assistive Layer
+- [ ] Add `publisher` contract interface (analyze_intent, generate_options, validate_plan, execute_plan, stream_progress)
+- [ ] Add publisher registry and runtime selection service
+- [ ] Wrap existing book flow as `BookPublisher` adapter (no behavior change first)
+- [ ] Implement independent `CodePublisher` flow with structured output contract
+- [ ] Add intent-to-options API endpoint and approval checkpoint model
+- [ ] Add strategy version stamping for every approved plan and run artifact
+
+## Phase 7: Persistent Memory + Conversational Front-End
+- [ ] Add user memory profile schema (preferences, history, goals, interaction style)
+- [ ] Add memory-aware planning prompts and retrieval layer
+- [ ] Add assistant-facing conversation API as primary entrypoint
+- [ ] Add advanced control panel for route/model/context overrides without exposing low-level complexity by default
+- [ ] Add OS integration roadmap for Ubuntu/Linux task mediation (phased, permission-scoped)
 
 ## Operator CLI Deliverables
 

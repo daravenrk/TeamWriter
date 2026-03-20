@@ -44,6 +44,49 @@ This section documents the process for smoketesting both NVIDIA and AMD Ollama e
 - See `docker-compose.ollama.yml` for service definitions and GPU device mapping.
 # Dragonlair System Notes And Autonomy Plan
 
+## 0) System Evolution Plan (Adaptive Creation Platform + Assistive Layer)
+
+### Documentation And Traceability Requirements
+- All major components must define responsibilities, expected inputs/outputs, constraints, and guardrails in markdown.
+- System behavior must be explicit and testable; avoid hidden behavior implied only by code.
+- Architecture decisions must be versioned and traceable in this file and companion planning docs.
+
+### Interaction Philosophy: Minimal Friction, Maximum Control
+- Minimal interaction means less user burden, not less user authority.
+- Default UX: guided and simple for fast progress.
+- Advanced UX: users can inspect plans, review options, and override route/model/context decisions.
+- Automation must remain inspectable, interruptible, and reversible at key checkpoints.
+
+### Publisher-Centric Refactor Direction
+- Replace rigid single-path execution with modular, pluggable publishers.
+- Publishers (for example book and code) are specialized tools in one shared runtime.
+- Each publisher defines its own flow contract while inheriting shared guardrails (policy checks, safety checks, GPU policy, rewards).
+- A pure code publisher must be able to execute a streamlined non-narrative flow independently of book-flow assumptions.
+
+### Intent-Driven Planning And Option Selection
+- Execution strategy must come from user intent analysis, not fixed flow branching.
+- For each project, generate multiple structured options with tradeoffs (speed, depth, automation, cost).
+- User selects the preferred option before execution proceeds.
+- System role: strategic advisor plus executor; user remains decision-maker.
+
+### Assistive Intelligence Layer (New Abstraction)
+- Add a conversational mediation layer between user intent and execution runtime.
+- Capabilities:
+  - natural conversation and guided planning
+  - project research and option synthesis before execution
+  - persistent memory for user preferences, project history, and recurring patterns
+  - continuity across sessions and runs
+- This layer is the long-term primary interface for Dragonlair interactions.
+
+### Long-Term Interface Trajectory
+- Evolution path:
+  1. tool-based generators (book/code)
+  2. shared agent runtime
+  3. intent-driven orchestration with option approval
+  4. assistive conversational layer with persistent memory
+  5. full interface abstraction where assistant mediates broader Ubuntu/Linux workflows
+- Principle: conversation over configuration, with optional deep operator controls.
+
 ## 1) Current System State
 
 ### Endpoints
@@ -325,6 +368,31 @@ Operational rule:
 - Start with latest-tier profile defaults (`amd-coder`, `amd-writer`, `nvidia-fast`).
 - If first-token latency or failure rate exceeds operational targets, switch traffic to `nvidia-lowlatency` or equivalent fallback profile.
 - Re-evaluate and return to latest-tier profiles after stabilization.
+
+## 4.2) Book-Flow Run Strategy Standard (2026-03-20)
+
+This is the current operational standard for first-pass run stability. It is intentionally strict so runs are reproducible.
+
+### Required strategy rules
+- Stage ownership is profile-driven and must be declared in profile frontmatter (`route`, `allowed_routes`, `model`, `model_allowlist`).
+- NVIDIA-routed profiles must only use models from the approved NVIDIA tiny-model allowlist.
+- GPU policy is mandatory: no CPU fallback for GPU-routed stages.
+- Deterministic stage fallback is allowed, but fallback events must be journaled and auditable.
+
+### Current stability-biased mapping
+- `book-publisher-brief` -> `ollama_nvidia` / `qwen3.5:4b`
+- `writing-assistant` -> `ollama_nvidia` / `qwen3.5:4b`
+- `book-canon` -> `ollama_nvidia` / `qwen3.5:4b` (stability routing while AMD endpoint responsiveness is under investigation)
+- `book-writer` -> `ollama_nvidia` / `qwen3.5:4b` (first-success stabilization policy)
+- `book-researcher` remains AMD-routed for now, with deterministic dossier fallback when empty-output gate fails.
+
+### Flexibility with rigidity
+- Rigidity: stage contract, route/model allowlists, and GPU policy are non-negotiable.
+- Flexibility: route/model strategy can be changed by profile updates, but only through audited policy changes and regression re-validation.
+- Every strategy change must be reflected in:
+  - profile frontmatter,
+  - runtime diagnostics (`run_journal.jsonl`, `agent_diagnostics.jsonl`),
+  - and future-work notes (`DEV_NEXT_STEPS.md`).
 
 ## 5) Predetermine Context Before Running
 

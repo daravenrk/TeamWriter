@@ -209,6 +209,15 @@ BOOK_RUN_STALL_SECONDS = max(
     120,
     int(os.environ.get("BOOK_RUN_STALL_SECONDS", "1800")),
 )
+BOOK_FLOW_STRATEGY_VERSION = str(
+    os.environ.get("AGENT_STRATEGY_VERSION", "2026-03-20-strategy-v1")
+).strip() or "2026-03-20-strategy-v1"
+BOOK_FLOW_PREFLIGHT_ENABLED = str(os.environ.get("BOOK_FLOW_PREFLIGHT_ENABLED", "true")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _ensure_parent(path: Path):
@@ -2018,6 +2027,139 @@ def _resolve_profile_route_model(profile_name: Optional[str], prompt_hint: str =
         return {"route": None, "model": None}
 
 
+def _validate_book_flow_strategy_preflight() -> dict:
+    """Fail-closed preflight validation for critical strategy profiles."""
+
+    def _hints_for_checks(profile_name: str, checks: List[str]) -> List[str]:
+        hints: List[str] = []
+        for check in checks:
+            text = str(check)
+            if text.startswith("expected_route_mismatch"):
+                hints.append(
+                    f"Update {profile_name} route/allowed_routes frontmatter to match strategy matrix (expected ollama_nvidia)."
+                )
+            elif text.startswith("expected_model_mismatch"):
+                hints.append(
+                    f"Update {profile_name} model/model_allowlist to qwen3.5:4b or revise strategy matrix intentionally."
+                )
+            elif text.startswith("allowed_routes_violation"):
+                hints.append(
+                    f"Fix {profile_name} allowed_routes frontmatter so planned route is explicitly permitted."
+                )
+            elif text.startswith("model_allowlist_violation"):
+                hints.append(
+                    f"Fix {profile_name} model_allowlist to include the selected model or adjust selected model to allowlist."
+                )
+            elif text == "cpu_backend_block_disabled":
+                hints.append("Set AGENT_BLOCK_CPU_BACKEND=true in runtime environment.")
+            elif text == "force_full_gpu_layers_disabled":
+                hints.append("Set AGENT_FORCE_FULL_GPU_LAYERS=true to enforce full GPU policy.")
+            elif text.startswith("invalid_gpu_layers"):
+                hints.append("Verify AGENT_NVIDIA_NUM_GPU_BY_MODEL / AGENT_AMD_NUM_GPU_BY_MODEL and enforce num_gpu=-1 policy.")
+            elif text.startswith("plan_request_failed"):
+                hints.append("Run profile lint and fix invalid profile frontmatter before relaunch.")
+        unique: List[str] = []
+        for hint in hints:
+            if hint not in unique:
+                unique.append(hint)
+        return unique
+
+    if not BOOK_FLOW_PREFLIGHT_ENABLED:
+        return {
+            "enabled": False,
+            "strategy_version": BOOK_FLOW_STRATEGY_VERSION,
+            "overall_ok": True,
+            "results": [],
+            "remediation_hints": [],
+        }
+
+    expected_matrix = {
+        "book-publisher-brief": {"route": "ollama_nvidia", "model": "qwen3.5:4b"},
+        "writing-assistant": {"route": "ollama_nvidia", "model": "qwen3.5:4b"},
+        "book-canon": {"route": "ollama_nvidia", "model": "qwen3.5:4b"},
+        "book-writer": {"route": "ollama_nvidia", "model": "qwen3.5:4b"},
+    }
+
+    results = []
+    overall_ok = True
+    for profile_name, expected in expected_matrix.items():
+        checks = []
+        ok = True
+        route = None
+        model = None
+        try:
+            plan = orchestrator.plan_request("book-flow-preflight", profile_name=profile_name)
+            profile = plan.get("profile") or {}
+            route = str(plan.get("route") or "").strip() or None
+            model = str(plan.get("model") or "").strip() or None
+
+            if route != expected["route"]:
+                ok = False
+                checks.append(f"expected_route_mismatch:{route}!={expected['route']}")
+            if model != expected["model"]:
+                ok = False
+                checks.append(f"expected_model_mismatch:{model}!={expected['model']}")
+
+            allowed_routes = {
+                str(item).strip() for item in (profile.get("allowed_routes") or []) if str(item).strip()
+            }
+            if allowed_routes and route not in allowed_routes:
+                ok = False
+                checks.append(f"allowed_routes_violation:{route} not in {sorted(allowed_routes)}")
+
+            model_allowlist = {
+                str(item).strip() for item in (profile.get("model_allowlist") or []) if str(item).strip()
+            }
+            if model_allowlist and model not in model_allowlist:
+                ok = False
+                checks.append(f"model_allowlist_violation:{model} not in {sorted(model_allowlist)}")
+
+            if route in {"ollama_nvidia", "ollama_amd"}:
+                if not bool(getattr(orchestrator, "block_cpu_backend", False)):
+                    ok = False
+                    checks.append("cpu_backend_block_disabled")
+                if not bool(getattr(orchestrator, "force_full_gpu_layers", False)):
+                    ok = False
+                    checks.append("force_full_gpu_layers_disabled")
+                resolved_layers = orchestrator._resolve_model_num_gpu_layers(model, route)  # pylint: disable=protected-access
+                if resolved_layers in (None, 0):
+                    ok = False
+                    checks.append(f"invalid_gpu_layers:{resolved_layers}")
+                else:
+                    checks.append(f"num_gpu={resolved_layers}")
+        except AgentStackError as err:
+            ok = False
+            checks.append(f"plan_request_failed:{err}")
+
+        if not ok:
+            overall_ok = False
+
+        results.append(
+            {
+                "profile": profile_name,
+                "ok": ok,
+                "route": route,
+                "model": model,
+                "checks": checks,
+                "hints": _hints_for_checks(profile_name, checks),
+            }
+        )
+
+    remediation_hints: List[str] = []
+    for row in results:
+        for hint in row.get("hints", []):
+            if hint not in remediation_hints:
+                remediation_hints.append(hint)
+
+    return {
+        "enabled": True,
+        "strategy_version": BOOK_FLOW_STRATEGY_VERSION,
+        "overall_ok": overall_ok,
+        "results": results,
+        "remediation_hints": remediation_hints,
+    }
+
+
 def _resolve_book_task_runtime_target(req: BookFlowRequest, production_status: Optional[dict]) -> dict:
     production_status = production_status if isinstance(production_status, dict) else {}
     latest_stage = production_status.get("latest_stage_event") or {}
@@ -2233,6 +2375,7 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
             publisher_brief_profile=req.publisher_brief_profile,
             publisher_profile=req.publisher_profile,
             output_dir=req.output_dir,
+            strategy_version=BOOK_FLOW_STRATEGY_VERSION,
             resource_tracker_path=req.resource_tracker_path or str(RESOURCE_TRACKER_PATH),
             resource_events_path=req.resource_events_path or str(RESOURCE_EVENTS_PATH),
         )
@@ -2697,6 +2840,19 @@ def create_book_flow(req: BookFlowRequest):
             if t.profile in {"amd-coder", "nvidia-fast", "nvidia-lowlatency"} and t.status in {"queued", "running"}:
                 raise HTTPException(status_code=409, detail="Coding mode is active. Book mode is blocked until coding tasks complete or are cancelled.")
 
+    preflight = _validate_book_flow_strategy_preflight()
+    if not preflight.get("overall_ok", False):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "book_flow_strategy_preflight_failed",
+                "strategy_version": preflight.get("strategy_version"),
+                "results": preflight.get("results", []),
+                "remediation_hints": preflight.get("remediation_hints", []),
+                "hint": "Run PYTHONPATH=/home/daravenrk/dragonlair python3 -m agent_stack.scripts.validate_run_strategy --json for full diagnostics.",
+            },
+        )
+
     task_id = str(uuid.uuid4())
     label = f"book-flow: ch{req.chapter_number} {req.chapter_title} / {req.section_title}"
     initial_target = _resolve_book_task_runtime_target(req, None)
@@ -2733,6 +2889,7 @@ def create_book_flow(req: BookFlowRequest):
         "queue_position": position,
         "route": record.route,
         "model": record.model,
+        "strategy_version": BOOK_FLOW_STRATEGY_VERSION,
     }
 
 

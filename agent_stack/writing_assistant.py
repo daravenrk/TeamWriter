@@ -53,7 +53,12 @@ def generate_names(context):
     prompt = _extract_section(templates, "Names")
     prompt = _fill_template(prompt, context)
     agent = OrchestratorAgent()
-    return agent.handle_request_with_overrides(prompt, profile_name="writing-assistant", stream_override=False)
+    return agent.handle_request_with_overrides(
+        prompt,
+        profile_name="writing-assistant",
+        model_override="qwen3.5:4b",
+        stream_override=False,
+    )
 
 def generate_technology(context):
     """Generate technology/inventions using the writing-assistant agent."""
@@ -61,7 +66,12 @@ def generate_technology(context):
     prompt = _extract_section(templates, "Technology")
     prompt = _fill_template(prompt, context)
     agent = OrchestratorAgent()
-    return agent.handle_request_with_overrides(prompt, profile_name="writing-assistant", stream_override=False)
+    return agent.handle_request_with_overrides(
+        prompt,
+        profile_name="writing-assistant",
+        model_override="qwen3.5:4b",
+        stream_override=False,
+    )
 
 def generate_personalities(context):
     """Generate personalities using the writing-assistant agent."""
@@ -69,7 +79,12 @@ def generate_personalities(context):
     prompt = _extract_section(templates, "Personalities")
     prompt = _fill_template(prompt, context)
     agent = OrchestratorAgent()
-    return agent.handle_request_with_overrides(prompt, profile_name="writing-assistant", stream_override=False)
+    return agent.handle_request_with_overrides(
+        prompt,
+        profile_name="writing-assistant",
+        model_override="qwen3.5:4b",
+        stream_override=False,
+    )
 
 def generate_dates_history(context):
     """Generate dates/history using the writing-assistant agent."""
@@ -77,4 +92,9 @@ def generate_dates_history(context):
     prompt = _extract_section(templates, "Dates & History")
     prompt = _fill_template(prompt, context)
     agent = OrchestratorAgent()
-    return agent.handle_request_with_overrides(prompt, profile_name="writing-assistant", stream_override=False)
+    return agent.handle_request_with_overrides(
+        prompt,
+        profile_name="writing-assistant",
+        model_override="qwen3.5:4b",
+        stream_override=False,
+    )

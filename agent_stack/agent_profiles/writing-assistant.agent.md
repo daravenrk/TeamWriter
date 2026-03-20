@@ -1,7 +1,9 @@
 ---
 name: writing-assistant
 route: ollama_nvidia
-model: qwen3.5:9b
+allowed_routes: ollama_nvidia
+model: qwen3.5:4b
+model_allowlist: qwen3.5:4b
 num_ctx: 32000
 num_predict: 1200
 default_stream: false

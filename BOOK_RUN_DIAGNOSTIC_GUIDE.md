@@ -43,6 +43,43 @@ This document provides a standard procedure for diagnosing failed book runs in t
 - [ ] Review agent health and quarantine status if applicable
 - [ ] Check for missing or empty output files in expected stage folders
 - [ ] If API server is involved, check `/home/daravenrk/dragonlair/agent_stack/api_server.log`
+- [ ] Verify stage route/model mapping in `run_journal.jsonl` matches current strategy standard
+- [ ] Verify profile planning output (`route`, `model`) for critical stages before relaunch
+- [ ] Verify fallback events are explicit (`stage_fallback_applied` or `stage_warning`) and not silent stops
+
+## 4.1 Strategy Validation Commands
+- Run preflight validator (recommended):
+  ```sh
+  cd /home/daravenrk/dragonlair && PYTHONPATH=/home/daravenrk/dragonlair \
+    python3 -m agent_stack.scripts.validate_run_strategy --json
+  ```
+- Write compliance report artifact:
+  ```sh
+  cd /home/daravenrk/dragonlair && PYTHONPATH=/home/daravenrk/dragonlair \
+    python3 -m agent_stack.scripts.validate_run_strategy \
+    --report-path /home/daravenrk/dragonlair/book_project/policy_compliance_report.json --json
+  ```
+- Run synthetic drift self-test:
+  ```sh
+  cd /home/daravenrk/dragonlair && PYTHONPATH=/home/daravenrk/dragonlair \
+    python3 -m agent_stack.scripts.validate_run_strategy --self-test-drift --json
+  ```
+- Confirm effective profile mapping:
+  ```sh
+  cd /home/daravenrk/dragonlair && python3 << 'PY'
+  import sys
+  sys.path.insert(0, '.')
+  from agent_stack.orchestrator import OrchestratorAgent
+  orch = OrchestratorAgent()
+  for p in ("book-publisher-brief", "writing-assistant", "book-canon", "book-writer"):
+      plan = orch.plan_request("diag", profile_name=p)
+      print(p, "=>", plan["route"], plan["model"])
+  PY
+  ```
+- Confirm last stage route/model events:
+  ```sh
+  rg -n 'stage_attempt_start|stage_fallback_applied|stage_warning|run_success|run_failure' /home/daravenrk/dragonlair/book_project/<book-slug>/runs/<run-name>/run_journal.jsonl
+  ```
 
 ## 5. Common Issues
 - Early failure (empty drafts, short log): Likely input, config, or environment error

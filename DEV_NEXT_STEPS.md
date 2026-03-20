@@ -1,6 +1,6 @@
 # Development Next Steps & Process Guide
 
-**Last Updated:** March 19, 2026
+**Last Updated:** March 20, 2026
 **Project:** Dragonlair Agent Stack — Multi-agent orchestration for book writing and code generation  
 **Current Focus:** Complete one end-to-end book run and validate interruption recovery in production flow
 
@@ -60,6 +60,14 @@ queued → (10s pre-spawn delay) → running → completed/failed/cancelled
 - Pre-spawn delay (10s pause before task execution)
 - Spawn queue interdiction controls (Go/Pause/Stop buttons work correctly)
 - Docker deployment and validation
+
+### ✅ Formal Product Direction Recorded (2026-03-20)
+
+- Added explicit expectation that all major system behavior must be documented and traceable in markdown.
+- Added explicit interaction principle: minimal user interaction does not reduce user control.
+- Added architectural direction toward publisher-driven orchestration (book/code as pluggable publishers).
+- Added requirement for an assistive conversational layer with persistent user memory.
+- Added long-term trajectory toward assistant-first interface abstraction for broader Linux workflows.
 
 ### ✅ Completed Work (2026-03-19 Session 2 — GPU Layer Enforcement)
 
@@ -168,6 +176,143 @@ find /home/daravenrk/dragonlair/book_project/runs -name run_journal.jsonl \
 ---
 
 ## 5. Next Development Steps (Prioritized)
+
+### ✅ One-Page Lifecycle Checklist (Build Order + Acceptance Tests)
+
+Use this as the single execution sheet for the long-term arc. Do not move to the next stage until all acceptance tests pass.
+
+#### Stage A — Stabilize + Govern (Weeks 1-4)
+
+**Build tasks:**
+1. Implement strategy preflight validator for all run launches.
+2. Stamp every run with `strategy_version` in `run_summary.json` and `run_journal.jsonl`.
+3. Add drift detector for route/model/context mismatches vs policy.
+4. Add explicit failure reasons + fix hints when policy is violated.
+5. Add weekly report output (`policy_compliance_report.json`).
+
+**Acceptance tests:**
+1. A run with invalid route/model is blocked before stage execution starts.
+2. Every successful and failed run contains `strategy_version` metadata.
+3. Drift scan catches at least one synthetic mismatch in test data.
+4. No GPU-policy violations pass preflight (`num_gpu=-1` required where policy mandates full GPU).
+5. Report includes counts by profile, stage, violation type.
+
+**Stage A Day-by-Day Sprint (First 10 Working Days):**
+1. Day 1: Baseline strategy matrix and profile inventory freeze.
+2. Day 2: Implement preflight validator command and JSON output.
+3. Day 3: Wire strategy version stamping into run artifacts.
+4. Day 4: Add explicit preflight failure reasons and fix hints.
+5. Day 5: Add synthetic drift fixtures and drift detector pass/fail checks.
+6. Day 6: Add weekly compliance report generator.
+7. Day 7: Add operator CLI/API hook to run preflight before launch.
+8. Day 8: Regression run across critical profiles and fallback paths.
+9. Day 9: Documentation hardening (commands, examples, remediation playbooks).
+10. Day 10: Gate review and sign-off; freeze Stage A as strategy-v1 baseline.
+
+#### Stage B — Publisher Abstraction (Weeks 5-8)
+
+**Build tasks:**
+1. Define publisher interface (`analyze_intent`, `generate_options`, `validate_plan`, `execute_plan`, `stream_progress`).
+2. Add publisher registry and dispatcher service.
+3. Wrap current book flow as `BookPublisher` adapter (behavior parity required).
+4. Implement independent `CodePublisher` (no dependency on book stages/artifacts).
+5. Route existing API calls through publisher dispatcher instead of hardcoded flow paths.
+
+**Acceptance tests:**
+1. Book run output parity: legacy and adapter mode produce equivalent stage artifacts.
+2. Code publisher runs end-to-end without invoking any book-flow stage IDs.
+3. Dispatcher chooses publisher by explicit request and by intent classification.
+4. Publisher failures are isolated (code publisher crash does not corrupt book publisher state).
+5. Existing policy guards still apply uniformly across both publishers.
+
+#### Stage C — Intent + Options + Approval (Weeks 9-12)
+
+**Build tasks:**
+1. Add intent analysis endpoint returning ranked project intents.
+2. Add multi-option planner (`speed`, `quality`, `automation`, `resource_cost`).
+3. Add approval checkpoint model: select option before full execution.
+4. Add advanced override path (route/model/context visible and editable).
+5. Record option rationale and user selection in run artifacts.
+
+**Acceptance tests:**
+1. For each prompt, API returns at least two valid options with tradeoffs.
+2. Execution does not start until user approves an option.
+3. Override path changes are logged with actor/time/reason.
+4. Guided mode can complete with minimal inputs.
+5. Advanced mode can inspect and modify all critical decisions.
+
+#### Stage D — Assistive Layer + Memory (Weeks 13-18)
+
+**Build tasks:**
+1. Add conversational assistant entrypoint as primary UX path.
+2. Add persistent user memory schema (preferences, goals, project history, interaction style).
+3. Add memory-aware planning prompts.
+4. Add continuity view showing why current suggestions were generated.
+5. Add memory safety controls (view/edit/delete memory entries).
+
+**Acceptance tests:**
+1. Assistant recalls prior user preferences across sessions.
+2. User can inspect and correct memory-derived assumptions.
+3. Suggested plans show memory-influenced rationale.
+4. Memory deletion requests fully remove selected entries.
+5. Planning quality improves on repeated similar tasks (measured by reduced manual corrections).
+
+#### Stage E — Adaptive Optimization (Weeks 19-24)
+
+**Build tasks:**
+1. Connect reward ledger + event stream to recommendation pipeline.
+2. Train recommendation model for model/context selection per stage/profile.
+3. Keep optimization constrained by allowlists and GPU policy.
+4. Add token economics for unlock/penalty flows.
+5. Add A/B strategy comparison and rollback.
+
+**Acceptance tests:**
+1. Recommended configs improve quality-per-resource over static baseline.
+2. No recommendations violate policy guardrails.
+3. Token spend/earn is auditable per profile.
+4. Strategy rollback restores prior behavior in one deployment step.
+5. Weekly KPI report shows trend lines for quality, latency, failures, compliance.
+
+#### Stage F — OS Interface Expansion (Post-Platform Maturity)
+
+**Build tasks:**
+1. Add permission-scoped Linux action bridge.
+2. Add explicit consent prompts for system-level operations.
+3. Add sandbox policy tiers (read-only, constrained-write, operator-approved).
+4. Add audit ledger for all OS-mediated actions.
+
+**Acceptance tests:**
+1. No privileged action executes without explicit consent.
+2. All OS actions are logged with command intent and outcome.
+3. Permission tiers are enforced and testable.
+4. Assistant can complete common Linux workflows with reversible steps.
+
+#### Program-Level Exit Gates
+
+1. **Control Gate:** Minimal interaction path works, advanced override path always available.
+2. **Transparency Gate:** Every major decision is explainable and logged.
+3. **Safety Gate:** Policy violations fail closed before execution.
+4. **Reliability Gate:** Runs always terminate with explicit success/failure states.
+5. **Adaptivity Gate:** Optimization improves outcomes without eroding compliance.
+
+### 🔴 **NEW: Adaptive Creation Platform Foundation (Immediate Priority)**
+
+**Goal:** Convert fixed-flow architecture into intent-driven, option-based publisher orchestration with an assistive user layer.
+
+**Execution checklist:**
+1. Define publisher contract and registry in backend runtime.
+2. Wrap current book flow as `BookPublisher` adapter without changing behavior.
+3. Implement a first-pass `CodePublisher` that runs independently of book pipeline assumptions.
+4. Add intent analysis endpoint that returns multiple structured options.
+5. Add approval checkpoints: option selection before execution, plus override path for advanced users.
+6. Add strategy version stamping in run artifacts for traceability.
+7. Add persistent user memory schema for preferences, project history, and interaction style.
+
+**Control philosophy acceptance criteria:**
+- Guided defaults available for low-friction usage.
+- Advanced controls available for route/model/context inspection and override.
+- Users can approve, pause, cancel, or redirect at key decision points.
+- System automation remains transparent and auditable.
 
 ### 🔴 **URGENT: Complete a Book Run Now (MVP Exit Criteria)**
 
@@ -314,6 +459,18 @@ These should be completed once publisher outputs successfully:
     - at least one run reaches terminal success without manual stage intervention,
     - stalled runs are automatically recovered or requeued,
     - every corrective action is captured in automation audit logs for replay/debug.
+
+- **Todo 170**: Formalize rigid-flexible run strategy standard and enforce it at runtime
+  - Create a single source-of-truth strategy matrix for book-flow stages (stage -> profile -> route -> model -> allowed fallbacks).
+  - Add startup preflight that validates strategy matrix coherence against profile frontmatter (`allowed_routes`, `model_allowlist`) and route-level model constraints.
+  - Add runtime guardrails so every `stage_attempt_start` must include strategy-compliant route/model values; reject or auto-reroute non-compliant attempts with explicit journal events.
+  - Add a strategy version stamp in run artifacts (`run_summary.json` + `run_journal.jsonl`) so operators can trace which policy governed each run.
+  - Add strategy drift detection in diagnostics: flag when profile edits or environment overrides change effective route/model behavior without a strategy version bump.
+  - Include a controlled override mode for future gamification unlocks: unlocked models/routes must still pass explicit allowlist + GPU policy checks and be recorded as policy exceptions.
+  - Acceptance criteria:
+    - all critical stage profiles resolve to approved route/model pairs before run start,
+    - no silent model drift (for example, 9B requests on NVIDIA) reaches execution,
+    - every strategy violation is visible in diagnostics and future dev notes.
 
 - **Todo 43**: Add failure-memory corrective retries
   - Inject recent `quality_gate_failures.jsonl` reasons into retry prompts as explicit fix targets

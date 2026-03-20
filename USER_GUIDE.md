@@ -1,5 +1,23 @@
 # Dragonlair User Guide
 
+## Interaction Philosophy And Control Model
+
+- Minimal user interaction means reduced friction, not reduced control.
+- Default behavior is guided and simple so users can move quickly.
+- Advanced controls remain available for users who want to inspect, approve, or override decisions.
+
+### What Users Should Expect
+
+- The system should propose options, explain tradeoffs, and ask for approval at key checkpoints.
+- Users can choose a fast path (accept defaults) or a detailed path (review strategy, route, model, context).
+- Automation remains transparent and reversible (pause/cancel/redirect) when a run is active.
+
+### Assistive Layer Direction
+
+- Dragonlair is evolving toward a conversational assistive layer that mediates user intent and system execution.
+- This layer is expected to maintain persistent user memory (preferences, project history, goals, interaction style).
+- Long-term trajectory: this assistant-first layer becomes the primary interface model and can expand into broader Ubuntu/Linux workflow mediation.
+
 ## System Overview
 
 - **Architecture:** Docker-based, portable across any Linux system with Docker, Docker Compose, and the required GPU stack (NVIDIA CUDA or AMD ROCm).

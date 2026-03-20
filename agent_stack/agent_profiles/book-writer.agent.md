@@ -1,9 +1,9 @@
 ---
 name: book-writer
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:27b
-model_allowlist: qwen3.5:27b
+route: ollama_nvidia
+allowed_routes: ollama_nvidia
+model: qwen3.5:4b
+model_allowlist: qwen3.5:4b
 default_stream: false
 num_ctx: 49152
 num_predict: 2200

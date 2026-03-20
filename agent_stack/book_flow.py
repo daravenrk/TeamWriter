@@ -35,6 +35,10 @@ RUBRIC_KEYS = [
     "reader_engagement_score",
 ]
 
+DEFAULT_STRATEGY_VERSION = str(
+    os.environ.get("AGENT_STRATEGY_VERSION", "2026-03-20-strategy-v1")
+).strip() or "2026-03-20-strategy-v1"
+
 
 def slugify(text: str) -> str:
     lowered = text.strip().lower()
@@ -110,6 +114,7 @@ def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
         "archived_run_count": 0,
         "deleted_run_count": 0,
         "deleted_file_count": 0,
+        "skipped_entries": [],
         "archived_runs": [],
         "deleted_files": [],
     }
@@ -131,45 +136,61 @@ def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
 
         if item.is_dir():
             archive_dir = history_root / item.name
-            if archive_dir.exists():
-                shutil.rmtree(archive_dir)
-            ensure_dir(archive_dir)
+            try:
+                if archive_dir.exists():
+                    shutil.rmtree(archive_dir)
+                ensure_dir(archive_dir)
 
-            copied = []
-            for relative_src, relative_dest in artifact_specs:
-                src = item / relative_src
-                if not src.exists() or not src.is_file():
-                    continue
-                dest = archive_dir / relative_dest
-                ensure_dir(dest.parent)
-                shutil.copy2(src, dest)
-                copied.append(relative_dest)
+                copied = []
+                for relative_src, relative_dest in artifact_specs:
+                    src = item / relative_src
+                    if not src.exists() or not src.is_file():
+                        continue
+                    dest = archive_dir / relative_dest
+                    ensure_dir(dest.parent)
+                    shutil.copy2(src, dest)
+                    copied.append(relative_dest)
 
-            write_json(
-                archive_dir / "archive_manifest.json",
-                {
-                    "archived_at": datetime.utcnow().isoformat(),
-                    "source_run_dir": str(item),
-                    "archived_files": copied,
-                },
-            )
+                write_json(
+                    archive_dir / "archive_manifest.json",
+                    {
+                        "archived_at": datetime.utcnow().isoformat(),
+                        "source_run_dir": str(item),
+                        "archived_files": copied,
+                    },
+                )
 
-            shutil.rmtree(item)
-            summary["archived_run_count"] += 1
-            summary["deleted_run_count"] += 1
-            summary["archived_runs"].append(
-                {
-                    "run_name": item.name,
-                    "archive_dir": str(archive_dir),
-                    "archived_files": copied,
-                }
-            )
+                shutil.rmtree(item)
+                summary["archived_run_count"] += 1
+                summary["deleted_run_count"] += 1
+                summary["archived_runs"].append(
+                    {
+                        "run_name": item.name,
+                        "archive_dir": str(archive_dir),
+                        "archived_files": copied,
+                    }
+                )
+            except PermissionError as err:
+                summary["skipped_entries"].append(
+                    {
+                        "path": str(item),
+                        "reason": f"permission_error: {err}",
+                    }
+                )
             continue
 
         if item.is_file():
-            item.unlink()
-            summary["deleted_file_count"] += 1
-            summary["deleted_files"].append(str(item))
+            try:
+                item.unlink()
+                summary["deleted_file_count"] += 1
+                summary["deleted_files"].append(str(item))
+            except PermissionError as err:
+                summary["skipped_entries"].append(
+                    {
+                        "path": str(item),
+                        "reason": f"permission_error: {err}",
+                    }
+                )
 
     return summary
 
@@ -2315,6 +2336,8 @@ def run_flow(args):
             "writer_words": args.writer_words,
         },
     }
+    strategy_version = str(getattr(args, "strategy_version", "")).strip() or DEFAULT_STRATEGY_VERSION
+    context_store["_strategy_version"] = strategy_version
     cli_activity_path = Path(
         str(
             getattr(
@@ -2342,6 +2365,7 @@ def run_flow(args):
             "chapter_number": args.chapter_number,
             "chapter_title": args.chapter_title,
             "section_title": args.section_title,
+            "strategy_version": strategy_version,
         },
     )
     update_cli_runtime_activity(
@@ -2932,10 +2956,27 @@ def run_flow(args):
         "focus": chapter_spec.get("purpose", ""),
         "diversity": "broad, global, inclusive",
     }
-    names_md = generate_names(wa_context)
-    technology_md = generate_technology(wa_context)
-    personalities_md = generate_personalities(wa_context)
-    dates_md = generate_dates_history(wa_context)
+    try:
+        names_md = generate_names(wa_context)
+        technology_md = generate_technology(wa_context)
+        personalities_md = generate_personalities(wa_context)
+        dates_md = generate_dates_history(wa_context)
+    except Exception as err:
+        # Non-critical enrichment should never block chapter production.
+        append_run_event(
+            run_journal,
+            "stage_warning",
+            {
+                "stage": "worldbuilding_enrichment",
+                "agent": "writing-assistant",
+                "warning": str(err),
+                "fallback": "empty_worldbuilding_artifacts",
+            },
+        )
+        names_md = "# Names\n\n(worldbuilding enrichment unavailable in this run)\n"
+        technology_md = "# Technology\n\n(worldbuilding enrichment unavailable in this run)\n"
+        personalities_md = "# Personalities\n\n(worldbuilding enrichment unavailable in this run)\n"
+        dates_md = "# History\n\n(worldbuilding enrichment unavailable in this run)\n"
     # Write outputs to book_project/
     book_project_root = Path(args.output_dir)
     write_text(book_project_root / "names.md", names_md)
@@ -3800,6 +3841,7 @@ def run_flow(args):
     validation = validate_required_artifacts(run_dir, expected_section_count=len(chapter_sections))
     used_fallbacks = collect_used_fallback_stages(run_journal)
     summary = {
+        "strategy_version": strategy_version,
         "run_dir": str(run_dir),
         "book_root": str(book_root),
         "framework_root": str(framework_root),
@@ -3935,6 +3977,7 @@ def run_flow(args):
             "publisher_attempts": publisher_attempts,
             "forced_completion": forced_completion,
             "run_summary": str(run_dir / "run_summary.json"),
+            "strategy_version": strategy_version,
         },
     )
     update_cli_runtime_activity_from_context(context_store, {}, clear=True)
@@ -3975,6 +4018,13 @@ def build_parser():
                    help="Publisher / company name for the copyright line")
 
     p.add_argument("--output-dir", "--output_dir", dest="output_dir", default="/home/daravenrk/dragonlair/book_project")
+    p.add_argument(
+        "--strategy-version",
+        "--strategy_version",
+        dest="strategy_version",
+        default=DEFAULT_STRATEGY_VERSION,
+        help="Strategy version tag stamped into run_journal and run_summary artifacts.",
+    )
     return p
 
 
