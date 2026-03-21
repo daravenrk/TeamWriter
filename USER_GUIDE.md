@@ -232,6 +232,12 @@ Start backend + frontend:
 /home/daravenrk/dragonlair/bin/agent-stack-up
 ```
 
+Important deployment note after code changes:
+
+- Changes to Python backend files require rebuild/restart of the API container. Run `agent-stack-up` again to apply them.
+- Changes to files under `agent_stack/static/` are bind-mounted and apply on browser refresh.
+- Changes to files under `agent_stack/agent_profiles/` are bind-mounted and hot-reloaded.
+
 Open frontend:
 
 - `http://127.0.0.1:11888`
@@ -246,6 +252,87 @@ Stop and logs:
 ```sh
 /home/daravenrk/dragonlair/bin/agent-stack-down
 /home/daravenrk/dragonlair/bin/agent-stack-logs
+```
+
+Validation commands (post-deploy):
+
+```sh
+docker compose -f /home/daravenrk/dragonlair/agent_stack/docker-compose.agent.yml ps
+curl -sS http://127.0.0.1:11888/api/health | jq .
+curl -sS http://127.0.0.1:11888/api/ui-state | jq '.task_counts, .latest_stage_event, .latest_gate_failure'
+python3 -m py_compile /home/daravenrk/dragonlair/agent_stack/api_server.py /home/daravenrk/dragonlair/agent_stack/book_flow.py /home/daravenrk/dragonlair/agent_stack/orchestrator.py
+bash /home/daravenrk/dragonlair/agent_stack/scripts/failure_path_integration_drill.sh
+```
+
+The failure-path integration drill exercises interruption recovery, paused review-gate resume across restart, task cancellation, and fallback-integrity checks as one repeatable operator validation.
+
+### Writing Feedback + Review Gate Flow
+
+The system now supports human-in-the-loop pause and resume decisions in book mode.
+
+1. Submit writing feedback (UI card or API).
+2. If `pause_before_continue=true`, the run enters review-gate wait state after section review.
+3. Review the paused section and reviewer output in the Web UI paused review card.
+4. Apply one action: `continue`, `rewrite`, or `defer`.
+
+API examples:
+
+```sh
+curl -sS -X POST http://127.0.0.1:11888/api/book-feedback \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task_id":"<task_id>",
+    "approved":false,
+    "needs_rewrite":true,
+    "score":4.0,
+    "comment":"Tone mismatch in middle beats.",
+    "feedback_type":"thumb",
+    "issue_tags":["tone_mismatch"],
+    "rewrite_scope":"ask_each_time",
+    "pause_before_continue":true,
+    "assistant_rewrite_requested":true
+  }' | jq .
+
+curl -sS -X POST http://127.0.0.1:11888/api/tasks/<task_id>/review-action \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"rewrite","note":"tighten tone and preserve canon","reviewer":"operator"}' | jq .
+
+curl -sS 'http://127.0.0.1:11888/api/book-feedback?run_id=<run_id>&chapter_number=1' | jq .
+```
+
+### Adaptive Quality Thresholds
+
+Book quality gates now support adaptive thresholds that can tighten over time based on observed rubric performance.
+
+Base floor controls:
+
+- `BOOK_QUALITY_MIN_SCORE`
+- `BOOK_QUALITY_MIN_AVG_SCORE`
+- `BOOK_QUALITY_MIN_CONTENT_SCORE`
+
+Adaptive controls:
+
+- `BOOK_QUALITY_ADAPTIVE_ENABLED`
+- `BOOK_QUALITY_ADAPTIVE_ALPHA`
+- `BOOK_QUALITY_ADAPTIVE_GAIN`
+- `BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS`
+- `BOOK_QUALITY_ADAPTIVE_MAX_SCORE`
+- `BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE`
+
+Run artifacts to inspect:
+
+- `run_journal.jsonl` includes `quality_thresholds_loaded` and `quality_learning_state_updated` events
+- `run_summary.json` includes a `quality_thresholds` block with base/effective values and learning snapshot
+- Per-book learning state is persisted in `quality_learning_state.json` at the book root
+
+Quick checks:
+
+```sh
+docker exec dragonlair_agent_stack env | grep BOOK_QUALITY_
+
+RUN_DIR=/home/daravenrk/dragonlair/book_project/<book-slug>/runs/<run-name>
+rg -n 'quality_thresholds_loaded|quality_learning_state_updated' "$RUN_DIR/run_journal.jsonl"
+jq '.quality_thresholds' "$RUN_DIR/run_summary.json"
 ```
 
 CLI status/watch for subagents and task queue:

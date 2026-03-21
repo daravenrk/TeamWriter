@@ -1,9 +1,8 @@
 ---
 name: nvidia-lowlatency
-route: ollama_nvidia
-model: qwen2.5-coder:3b
+runtime_preset: nvidia-qwen25-coder-3b-8192
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 24576
 num_predict: 256
 temperature: 0.2
 intent_keywords: emergency,sla,latency,fallback,speed

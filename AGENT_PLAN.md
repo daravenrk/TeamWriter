@@ -104,8 +104,17 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [ ] Add publisher registry and runtime selection service
 - [ ] Wrap existing book flow as `BookPublisher` adapter (no behavior change first)
 - [ ] Implement independent `CodePublisher` flow with structured output contract
+- [ ] Add governed nested delegation: `BookPublisher` can launch a linked `CodePublisher` child project when the manuscript requires a real software artifact
+- [ ] Replace hard book-vs-code global exclusion with policy-aware parent/child run controls and audit trail
 - [ ] Add intent-to-options API endpoint and approval checkpoint model
 - [ ] Add strategy version stamping for every approved plan and run artifact
+
+## Phase 6.5: Adaptive Quality Curriculum
+- [x] Add baseline adaptive threshold framework for book quality gates (effective thresholds vs base floors)
+- [x] Persist per-book quality learning state and threshold snapshots in run artifacts
+- [ ] Replace baseline EMA curriculum with ML recommendation-policy updates using shadow telemetry + user feedback
+- [ ] Add curriculum safety controller (bounded ramp, rollback trigger, stagnation detector)
+- [ ] Add operator dashboard view for threshold progression and quality trend lines
 
 ## Phase 7: Persistent Memory + Conversational Front-End
 - [ ] Add user memory profile schema (preferences, history, goals, interaction style)

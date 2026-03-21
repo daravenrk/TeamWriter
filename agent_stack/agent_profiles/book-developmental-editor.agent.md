@@ -1,10 +1,8 @@
 ---
 name: book-developmental-editor
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:27b
+runtime_preset: amd-qwen35-27b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 1800
 temperature: 0.2
 intent_keywords: developmental,editor,structure,pacing,revision,review
@@ -12,9 +10,7 @@ priority: 100
 ---
 
 # Purpose
-
 Review chapter structure, pacing, and narrative progression for developmental quality.
-
 
 # System Behavior
 

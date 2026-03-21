@@ -22,6 +22,8 @@
     .pill { padding:2px 8px; border-radius:999px; font-size:12px; }
     .queued { background:#3f3f46; }
     .running { background:#1d4ed8; }
+    .paused { background:#b45309; }
+    .cancelled { background:#475569; }
     .completed { background:#0f766e; }
     .failed { background:#991b1b; }
     .muted { color:var(--muted); font-size:12px; }
@@ -66,12 +68,40 @@
     .diag-head { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:12px; margin-bottom:6px; }
     .diag-title { color:#dbe8ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .diag-body { white-space:pre-wrap; font-size:12px; color:#b8c8ea; }
+    .feedback-panel { border:1px solid #2f4674; border-radius:12px; padding:12px; background:#0b1430; display:grid; gap:10px; }
+    .feedback-row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .thumb-row { display:flex; gap:8px; }
+    .thumb-btn { background:#334155; }
+    .thumb-btn.active-up { background:#0f766e; }
+    .thumb-btn.active-down { background:#991b1b; }
+    .issue-grid { display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size:12px; color:#c6d4f5; }
+    .issue-grid label { display:flex; align-items:center; gap:6px; margin:0; }
+    .feedback-result { font-size:12px; color:var(--muted); }
+    .review-gate-panel { border:1px solid #5b3a12; border-radius:12px; padding:12px; background:linear-gradient(180deg,#1a1622,#12131e); display:grid; gap:12px; }
+    .review-gate-head { display:flex; justify-content:space-between; gap:10px; align-items:center; flex-wrap:wrap; }
+    .review-gate-status { font-size:12px; border-radius:999px; padding:4px 10px; background:#6b7280; color:#fff; text-transform:capitalize; }
+    .review-gate-status.paused { background:#b45309; }
+    .review-gate-status.deferred { background:#334155; }
+    .review-gate-status.pending { background:#1d4ed8; }
+    .review-gate-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .review-gate-block { border:1px solid #2f4674; border-radius:10px; background:#0b1430; padding:10px; }
+    .review-gate-block h3 { margin:0 0 8px 0; font-size:12px; color:#c6d4f5; text-transform:uppercase; letter-spacing:0.05em; }
+    .review-gate-pre { margin:0; white-space:pre-wrap; max-height:360px; overflow:auto; font-size:12px; line-height:1.5; color:#dbe8ff; }
+    .review-gate-meta { display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px; color:#c6d4f5; }
+    .review-gate-actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .review-gate-actions button { min-width:110px; }
     @keyframes pulse {
       0% { box-shadow:0 0 0 1px rgba(45,212,191,0.2), 0 0 8px rgba(45,212,191,0.15); }
       50% { box-shadow:0 0 0 1px rgba(45,212,191,0.4), 0 0 18px rgba(45,212,191,0.28); }
       100% { box-shadow:0 0 0 1px rgba(45,212,191,0.2), 0 0 8px rgba(45,212,191,0.15); }
     }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .feedback-row { grid-template-columns: 1fr; }
+      .issue-grid { grid-template-columns: 1fr; }
+      .review-gate-grid { grid-template-columns: 1fr; }
+      .review-gate-meta { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -167,6 +197,123 @@
       </table>
     </div>
 
+    <div class="card" id="writingFeedbackCard" style="display:none;">
+      <h2>Writing Feedback</h2>
+      <div class="feedback-panel">
+        <div class="muted" id="feedbackContextLine">No active book context yet.</div>
+        <div class="feedback-row">
+          <div>
+            <label>Chapter Number</label>
+            <input id="feedbackChapterNumber" type="number" min="1" value="1" />
+          </div>
+          <div>
+            <label>Section Index (optional)</label>
+            <input id="feedbackSectionIndex" type="number" min="0" placeholder="0" />
+          </div>
+        </div>
+        <div class="feedback-row">
+          <div>
+            <label>Section Title</label>
+            <input id="feedbackSectionTitle" placeholder="Opening" />
+          </div>
+          <div>
+            <label>Stage ID (optional)</label>
+            <input id="feedbackStageId" placeholder="section_review_0" />
+          </div>
+        </div>
+        <div>
+          <label>Quality Signal</label>
+          <div class="thumb-row">
+            <button id="feedbackThumbUp" class="thumb-btn" type="button">Thumb Up</button>
+            <button id="feedbackThumbDown" class="thumb-btn" type="button">Thumb Down</button>
+          </div>
+          <input id="feedbackDecision" type="hidden" value="up" />
+        </div>
+        <div id="feedbackIssueWrap" style="display:none;">
+          <label>What needs improvement?</label>
+          <div class="issue-grid">
+            <label><input type="checkbox" name="feedbackIssue" value="canon_violation" />Canon violation</label>
+            <label><input type="checkbox" name="feedbackIssue" value="continuity_gap" />Continuity gap</label>
+            <label><input type="checkbox" name="feedbackIssue" value="tone_mismatch" />Tone mismatch</label>
+            <label><input type="checkbox" name="feedbackIssue" value="pacing_problem" />Pacing problem</label>
+            <label><input type="checkbox" name="feedbackIssue" value="structure_problem" />Structure problem</label>
+            <label><input type="checkbox" name="feedbackIssue" value="missing_world_detail" />Missing world detail</label>
+            <label><input type="checkbox" name="feedbackIssue" value="character_voice" />Character voice</label>
+            <label><input type="checkbox" name="feedbackIssue" value="clarity" />Clarity</label>
+            <label><input type="checkbox" name="feedbackIssue" value="other" />Other</label>
+          </div>
+        </div>
+        <div class="feedback-row">
+          <div>
+            <label>Score (0-10)</label>
+            <input id="feedbackScore" type="number" min="0" max="10" step="0.1" value="9" />
+          </div>
+          <div>
+            <label>Rewrite Scope</label>
+            <select id="feedbackRewriteScope">
+              <option value="ask_each_time" selected>Ask me each time</option>
+              <option value="section_only">Section only</option>
+              <option value="chapter_reflow">Chapter reflow</option>
+            </select>
+          </div>
+        </div>
+        <label>Comment (required for thumbs-down unless issue tags are selected)</label>
+        <textarea id="feedbackComment" placeholder="Tell the assistant what to fix while preserving accepted story facts."></textarea>
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input id="feedbackPauseBeforeContinue" type="checkbox" />
+          Pause writing cycle before continuing
+        </label>
+        <div>
+          <button id="submitWritingFeedback" type="button">Submit Feedback</button>
+          <span id="feedbackSubmitResult" class="feedback-result"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="reviewGateCard" style="display:none;">
+      <h2>Paused Review Gate</h2>
+      <div class="review-gate-panel">
+        <div class="review-gate-head">
+          <div class="muted" id="reviewGateContextLine">No paused review checkpoint.</div>
+          <span id="reviewGateStatus" class="review-gate-status">idle</span>
+        </div>
+        <div class="review-gate-meta">
+          <div id="reviewGateMetaLeft" class="muted"></div>
+          <div id="reviewGateMetaRight" class="muted"></div>
+        </div>
+        <div class="review-gate-grid">
+          <div class="review-gate-block">
+            <h3>Draft Section</h3>
+            <pre id="reviewGateSectionPreview" class="review-gate-pre">No section preview available.</pre>
+          </div>
+          <div class="review-gate-block">
+            <h3>Section Review</h3>
+            <pre id="reviewGateReviewPreview" class="review-gate-pre">No review preview available.</pre>
+          </div>
+        </div>
+        <div>
+          <label>Operator Note</label>
+          <textarea id="reviewGateNote" placeholder="Optional note for continue, rewrite, or defer."></textarea>
+        </div>
+        <div class="feedback-row">
+          <div>
+            <label>Reviewer</label>
+            <input id="reviewGateReviewer" value="operator" />
+          </div>
+          <div>
+            <label>Checkpoint Paths</label>
+            <div id="reviewGatePaths" class="muted"></div>
+          </div>
+        </div>
+        <div class="review-gate-actions">
+          <button id="reviewGateContinue" type="button">Continue</button>
+          <button id="reviewGateRewrite" type="button">Rewrite</button>
+          <button id="reviewGateDefer" class="secondary" type="button">Defer</button>
+        </div>
+        <div id="reviewGateResult" class="feedback-result"></div>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Pending Spawn Queue</h2>
       <div id="pendingSpawnGroups" class="spawn-groups muted">No pending agents.</div>
@@ -199,6 +346,37 @@ Schedule: 0, 5, 10, 15, 20, 25, 30, 35, 38, 43, 48, 53, 58 minutes</pre>
   </div>
 
 <script>
+let latestBookFeedbackContext = {task_id: null, title: null, chapter_number: null, section_title: null};
+let latestBookReviewContext = {taskId: null, panelKey: null};
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatEpoch(epochSeconds) {
+  const numeric = Number(epochSeconds || 0);
+  if (!numeric) return '-';
+  const date = new Date(numeric * 1000);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString();
+}
+
+function getReviewGatePreviewText(preview, emptyLabel) {
+  if (!preview) return emptyLabel;
+  if (preview.text) {
+    return preview.truncated ? `${preview.text}\n\n[preview truncated]` : preview.text;
+  }
+  if (preview.exists === false) {
+    return `Preview source not found: ${preview.path || '-'}`;
+  }
+  return emptyLabel;
+}
+
 function getSelectedProfile() {
   const mode = document.getElementById('mode').value;
   if (mode === 'book') return 'book-writer';
@@ -210,10 +388,225 @@ function syncModePanels() {
   const mode = document.getElementById('mode').value;
   const fields = document.getElementById('bookRunFields');
   const streamBtn = document.getElementById('streamTask');
+  const feedbackCard = document.getElementById('writingFeedbackCard');
   if (!fields || !streamBtn) return;
   fields.style.display = mode === 'book' ? 'block' : 'none';
   streamBtn.disabled = mode === 'book';
   streamBtn.title = mode === 'book' ? 'Use Send to launch book flow pipeline.' : '';
+  if (feedbackCard && mode !== 'book') {
+    feedbackCard.style.display = 'none';
+  }
+}
+
+function setFeedbackDecision(decision) {
+  const up = document.getElementById('feedbackThumbUp');
+  const down = document.getElementById('feedbackThumbDown');
+  const hidden = document.getElementById('feedbackDecision');
+  const issueWrap = document.getElementById('feedbackIssueWrap');
+  const score = document.getElementById('feedbackScore');
+  hidden.value = decision;
+  up.className = decision === 'up' ? 'thumb-btn active-up' : 'thumb-btn';
+  down.className = decision === 'down' ? 'thumb-btn active-down' : 'thumb-btn';
+  issueWrap.style.display = decision === 'down' ? 'block' : 'none';
+  if (decision === 'up' && Number(score.value || 0) < 7) score.value = '9';
+  if (decision === 'down' && Number(score.value || 10) > 7) score.value = '4.5';
+}
+
+function collectFeedbackIssueTags() {
+  const tags = [];
+  const checks = document.querySelectorAll('input[name="feedbackIssue"]:checked');
+  for (const box of checks) {
+    tags.push(box.value);
+  }
+  return tags;
+}
+
+function syncFeedbackContextFromTask(task) {
+  latestBookFeedbackContext.task_id = task ? task.id : null;
+  latestBookFeedbackContext.title = (task && task.book_request && task.book_request.title) || document.getElementById('bookTitle').value || null;
+  latestBookFeedbackContext.chapter_number = (task && task.book_request && task.book_request.chapter_number) || Number(document.getElementById('bookChapterNumber').value || 1);
+  latestBookFeedbackContext.section_title = (task && task.book_request && task.book_request.section_title) || document.getElementById('bookSectionTitle').value || null;
+
+  const chapterInput = document.getElementById('feedbackChapterNumber');
+  const sectionInput = document.getElementById('feedbackSectionTitle');
+  const contextLine = document.getElementById('feedbackContextLine');
+
+  chapterInput.value = String(latestBookFeedbackContext.chapter_number || 1);
+  sectionInput.value = latestBookFeedbackContext.section_title || '';
+  contextLine.textContent = latestBookFeedbackContext.task_id
+    ? `task=${String(latestBookFeedbackContext.task_id).slice(0, 8)} title=${latestBookFeedbackContext.title || '-'} chapter=${latestBookFeedbackContext.chapter_number || '-'} section=${latestBookFeedbackContext.section_title || '-'}`
+    : 'No active book context yet.';
+}
+
+function toggleFeedbackCardVisibility(tasks, data) {
+  const mode = document.getElementById('mode').value;
+  const card = document.getElementById('writingFeedbackCard');
+  if (!card) return;
+  const bookTasks = (tasks || []).filter((t) => t.profile === 'book-flow');
+  const hasBookRun = bookTasks.length > 0;
+  const hasBlockingFailure = Boolean(data.latest_gate_failure && data.latest_gate_failure.gate_message);
+  card.style.display = mode === 'book' && hasBookRun && !hasBlockingFailure ? 'block' : 'none';
+}
+
+function renderReviewGateCard(task) {
+  const card = document.getElementById('reviewGateCard');
+  if (!card) return;
+  const mode = document.getElementById('mode').value;
+  const reviewGate = (task && task.production_status && task.production_status.review_gate) || null;
+  const status = String((reviewGate && reviewGate.status) || '').toLowerCase();
+  const visibleStatuses = new Set(['pause_requested', 'paused', 'deferred', 'continue_requested', 'rewrite_requested']);
+  if (mode !== 'book' || !task || !reviewGate || !visibleStatuses.has(status)) {
+    card.style.display = 'none';
+    latestBookReviewContext = {taskId: null, panelKey: null};
+    return;
+  }
+
+  card.style.display = 'block';
+  const bookRequest = task.book_request || {};
+  const panelKey = `${task.id}:${reviewGate.checkpoint_section_index || reviewGate.section_index || ''}:${status}`;
+  if (latestBookReviewContext.panelKey !== panelKey) {
+    document.getElementById('reviewGateNote').value = reviewGate.note || '';
+    document.getElementById('reviewGateReviewer').value = reviewGate.reviewer || 'operator';
+  }
+  latestBookReviewContext = {taskId: task.id, panelKey};
+
+  const contextLine = document.getElementById('reviewGateContextLine');
+  const metaLeft = document.getElementById('reviewGateMetaLeft');
+  const metaRight = document.getElementById('reviewGateMetaRight');
+  const statusEl = document.getElementById('reviewGateStatus');
+  const sectionPreview = document.getElementById('reviewGateSectionPreview');
+  const reviewPreview = document.getElementById('reviewGateReviewPreview');
+  const paths = document.getElementById('reviewGatePaths');
+  const result = document.getElementById('reviewGateResult');
+  const continueBtn = document.getElementById('reviewGateContinue');
+  const rewriteBtn = document.getElementById('reviewGateRewrite');
+  const deferBtn = document.getElementById('reviewGateDefer');
+
+  const sectionTitle = reviewGate.checkpoint_section_title || bookRequest.section_title || '-';
+  const chapterNumber = bookRequest.chapter_number || '-';
+  const stage = reviewGate.checkpoint_stage || task.runtime_stage || '-';
+  contextLine.textContent = `task=${String(task.id || '').slice(0, 8)} title=${bookRequest.title || '-'} chapter=${chapterNumber} section=${sectionTitle}`;
+  metaLeft.textContent = `stage=${stage} section_index=${reviewGate.checkpoint_section_index ?? reviewGate.section_index ?? '-'} paused_at=${formatEpoch(reviewGate.paused_at_epoch)}`;
+  metaRight.textContent = `action=${reviewGate.review_action || '-'} reviewer=${reviewGate.reviewer || 'operator'} correlation=${String(reviewGate.correlation_id || '').slice(0, 12) || '-'}`;
+
+  let statusClass = 'paused';
+  let statusLabel = status;
+  if (status === 'pause_requested') {
+    statusClass = 'pending';
+    statusLabel = 'pause requested';
+  } else if (status === 'continue_requested') {
+    statusClass = 'pending';
+    statusLabel = 'continue requested';
+  } else if (status === 'rewrite_requested') {
+    statusClass = 'pending';
+    statusLabel = 'rewrite requested';
+  } else if (status === 'deferred') {
+    statusClass = 'deferred';
+  }
+  statusEl.className = `review-gate-status ${statusClass}`;
+  statusEl.textContent = statusLabel;
+
+  sectionPreview.textContent = getReviewGatePreviewText(reviewGate.section_preview, 'No section preview available.');
+  reviewPreview.textContent = getReviewGatePreviewText(reviewGate.section_review_preview, 'No review preview available.');
+
+  const pathLines = [];
+  if (reviewGate.section_path) pathLines.push(`section: ${reviewGate.section_path}`);
+  if (reviewGate.section_review_path) pathLines.push(`review: ${reviewGate.section_review_path}`);
+  paths.innerHTML = pathLines.length ? pathLines.map((line) => `<div>${escapeHtml(line)}</div>`).join('') : '<div>-</div>';
+
+  const actionable = status === 'paused' || status === 'deferred';
+  continueBtn.disabled = !actionable;
+  rewriteBtn.disabled = !actionable;
+  deferBtn.disabled = !actionable;
+  if (!actionable) {
+    result.textContent = 'Waiting for the pipeline to reach or acknowledge this checkpoint.';
+  } else if (!result.dataset.busy) {
+    result.textContent = reviewGate.note ? `Current note: ${reviewGate.note}` : 'Choose continue, rewrite, or defer.';
+  }
+}
+
+async function submitReviewGateAction(action) {
+  const result = document.getElementById('reviewGateResult');
+  const note = document.getElementById('reviewGateNote').value;
+  const reviewer = document.getElementById('reviewGateReviewer').value || 'operator';
+  if (!latestBookReviewContext.taskId) {
+    result.textContent = 'No paused review task is available.';
+    return;
+  }
+
+  result.dataset.busy = 'true';
+  result.textContent = `Submitting ${action}...`;
+  try {
+    const res = await fetch(`/api/tasks/${latestBookReviewContext.taskId}/review-action`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action, note, reviewer}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.textContent = `Action failed: ${data.detail || res.status}`;
+      delete result.dataset.busy;
+      return;
+    }
+    result.textContent = `${action} recorded for task ${String(latestBookReviewContext.taskId).slice(0, 8)}.`;
+    delete result.dataset.busy;
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Action failed: ${err}`;
+    delete result.dataset.busy;
+  }
+}
+
+async function submitWritingFeedback() {
+  const result = document.getElementById('feedbackSubmitResult');
+  const decision = document.getElementById('feedbackDecision').value;
+  const comment = document.getElementById('feedbackComment').value;
+  const issueTags = collectFeedbackIssueTags();
+  result.textContent = 'Submitting feedback...';
+
+  try {
+    const payload = {
+      task_id: latestBookFeedbackContext.task_id,
+      title: latestBookFeedbackContext.title,
+      chapter_number: Number(document.getElementById('feedbackChapterNumber').value || 1),
+      section_index: document.getElementById('feedbackSectionIndex').value === ''
+        ? null
+        : Number(document.getElementById('feedbackSectionIndex').value),
+      section_title: document.getElementById('feedbackSectionTitle').value,
+      stage_id: document.getElementById('feedbackStageId').value || null,
+      approved: decision === 'up',
+      needs_rewrite: decision === 'down',
+      score: Number(document.getElementById('feedbackScore').value || 0),
+      comment,
+      feedback_type: 'thumb',
+      issue_tags: issueTags,
+      rewrite_scope: document.getElementById('feedbackRewriteScope').value,
+      pause_before_continue: document.getElementById('feedbackPauseBeforeContinue').checked,
+      assistant_rewrite_requested: decision === 'down',
+    };
+
+    const res = await fetch('/api/book-feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.textContent = `Submit failed: ${data.detail || res.status}`;
+      return;
+    }
+
+    result.textContent = `Saved feedback ${String(data.feedback_id || '').slice(0, 8)}.`;
+    document.getElementById('feedbackComment').value = '';
+    document.getElementById('feedbackSectionIndex').value = '';
+    for (const box of document.querySelectorAll('input[name="feedbackIssue"]')) {
+      box.checked = false;
+    }
+    setFeedbackDecision('up');
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Submit failed: ${err}`;
+  }
 }
 
 function pill(st) {
@@ -632,7 +1025,7 @@ async function refreshStatus() {
   ].join('  ');
 
   const c = data.task_counts || {queued: 0, running: 0, completed: 0, failed: 0};
-  document.getElementById('counts').textContent = `queued=${c.queued || 0} running=${c.running || 0} completed=${c.completed || 0} failed=${c.failed || 0}`;
+  document.getElementById('counts').textContent = `queued=${c.queued || 0} running=${c.running || 0} paused=${c.paused || 0} completed=${c.completed || 0} failed=${c.failed || 0} cancelled=${c.cancelled || 0}`;
 
   const tbody = document.getElementById('tasks');
   tbody.innerHTML = '';
@@ -645,6 +1038,17 @@ async function refreshStatus() {
     tr.innerHTML = `<td>${(t.id || '').slice(0,8)}</td><td>${pill(t.status || '')}</td><td>${t.queue_position || ''}</td><td>${t.profile || ''}</td><td>${runtimeLabel}</td><td>${t.backend_type || '-'}</td><td>${t.route || ''}</td><td>${t.model || ''}</td><td>${t.error || ''}</td>`;
     tbody.appendChild(tr);
   }
+  const bookTasks = tasks
+    .filter((t) => t.profile === 'book-flow')
+    .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+  const latestBookTask = bookTasks[0] || null;
+  const activeReviewTask = bookTasks.find((t) => {
+    const status = String((((t || {}).production_status || {}).review_gate || {}).status || '').toLowerCase();
+    return ['pause_requested', 'paused', 'deferred', 'continue_requested', 'rewrite_requested'].includes(status);
+  }) || latestBookTask;
+  syncFeedbackContextFromTask(latestBookTask);
+  toggleFeedbackCardVisibility(tasks, data);
+  renderReviewGateCard(activeReviewTask);
 
   renderPendingSpawnGroups(data.pending_spawn_groups || []);
   renderCrontabTimer(data.crontab_next_execution || null);
@@ -695,7 +1099,7 @@ async function refreshStatus() {
   let bookMode = false;
   let codingMode = false;
   for (const t of tasks) {
-    if (t.profile === 'book-flow' && (t.status === 'queued' || t.status === 'running')) {
+    if (t.profile === 'book-flow' && (t.status === 'queued' || t.status === 'running' || t.status === 'paused')) {
       bookMode = true;
     }
     if (['amd-coder', 'nvidia-fast', 'nvidia-lowlatency'].includes(t.profile) && (t.status === 'queued' || t.status === 'running')) {
@@ -848,6 +1252,13 @@ document.getElementById('refreshStatus').addEventListener('click', refreshStatus
 document.getElementById('clearHistory').addEventListener('click', clearHistory);
 document.getElementById('recoverAgents').addEventListener('click', () => recoverAgents(false));
 document.getElementById('mode').addEventListener('change', syncModePanels);
+document.getElementById('feedbackThumbUp').addEventListener('click', () => setFeedbackDecision('up'));
+document.getElementById('feedbackThumbDown').addEventListener('click', () => setFeedbackDecision('down'));
+document.getElementById('submitWritingFeedback').addEventListener('click', submitWritingFeedback);
+document.getElementById('reviewGateContinue').addEventListener('click', () => submitReviewGateAction('continue'));
+document.getElementById('reviewGateRewrite').addEventListener('click', () => submitReviewGateAction('rewrite'));
+document.getElementById('reviewGateDefer').addEventListener('click', () => submitReviewGateAction('defer'));
+setFeedbackDecision('up');
 syncModePanels();
 refreshStatus();
 setInterval(refreshStatus, 2000);

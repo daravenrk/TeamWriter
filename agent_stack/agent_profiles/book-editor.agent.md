@@ -1,10 +1,8 @@
 ---
 name: book-editor
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:27b
+runtime_preset: amd-qwen35-27b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 1800
 temperature: 0.3
 intent_keywords: edit,revise,copyedit,line edit,continuity,book editor
@@ -12,9 +10,7 @@ priority: 109
 ---
 
 # Purpose
-
 Edit writer drafts for clarity, consistency, and narrative quality while preserving authorial intent.
-
 
 # System Behavior
 

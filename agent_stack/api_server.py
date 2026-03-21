@@ -14,7 +14,7 @@ from typing import Dict, Optional, List, Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .book_flow import run_flow, slugify
 from .exceptions import AgentStackError, AgentUnexpectedError, OpenClawProfileConfigError
@@ -47,6 +47,12 @@ class BookHoldRequest(BaseModel):
     hold: bool = True
 
 
+class BookReviewActionRequest(BaseModel):
+    action: str
+    note: Optional[str] = None
+    reviewer: str = "operator"
+
+
 class BookFlowRequest(BaseModel):
     title: str
     premise: str
@@ -73,6 +79,33 @@ class BookFlowRequest(BaseModel):
     # Attribution / ownership fields
     pen_name: str = "DaRaVeNrK"
     publisher_name: str = "DaRaVeNrK LLC"
+
+
+class FeedbackTextRange(BaseModel):
+    start: int
+    end: int
+
+
+class WritingFeedbackRequest(BaseModel):
+    task_id: Optional[str] = None
+    run_dir: Optional[str] = None
+    output_dir: Optional[str] = "/home/daravenrk/dragonlair/book_project"
+    title: Optional[str] = None
+    chapter_number: Optional[int] = None
+    section_index: Optional[int] = None
+    section_title: Optional[str] = None
+    stage_id: Optional[str] = None
+    approved: bool
+    needs_rewrite: bool
+    score: float
+    comment: Optional[str] = None
+    feedback_type: str = "thumb"
+    issue_tags: List[str] = Field(default_factory=list)
+    rewrite_scope: str = "ask_each_time"
+    pause_before_continue: bool = False
+    assistant_rewrite_requested: bool = False
+    selected_text_range: Optional[FeedbackTextRange] = None
+    reviewer: str = "operator"
 
 
 class OpenClawCompatMessage(BaseModel):
@@ -158,6 +191,30 @@ RESOURCE_TRACKER_PATH = Path(
 RESOURCE_EVENTS_PATH = Path(
     os.environ.get("AGENT_RESOURCE_EVENTS_PATH", "/home/daravenrk/dragonlair/book_project/resource_events.jsonl")
 )
+BOOK_FEEDBACK_PATH = Path(
+    os.environ.get("AGENT_BOOK_FEEDBACK_PATH", "/home/daravenrk/dragonlair/book_project/book_feedback_events.jsonl")
+)
+REVIEW_GATE_STATE_FILENAME = "review_gate_state.json"
+REVIEW_GATE_PREVIEW_MAX_CHARS = max(
+    1200,
+    int(os.environ.get("REVIEW_GATE_PREVIEW_MAX_CHARS", "6000") or 6000),
+)
+ALLOWED_FEEDBACK_TYPES = {"thumb", "numeric", "editorial"}
+ALLOWED_REWRITE_SCOPES = {"ask_each_time", "section_only", "chapter_reflow"}
+ALLOWED_REVIEW_ACTIONS = {"continue", "rewrite", "defer"}
+REVIEW_GATE_ACTIVE_PAUSE_STATUSES = {"pause_requested", "paused", "deferred"}
+REVIEW_GATE_RESUME_STATUSES = {"continue_requested", "rewrite_requested"}
+ALLOWED_FEEDBACK_ISSUE_TAGS = {
+    "canon_violation",
+    "continuity_gap",
+    "tone_mismatch",
+    "pacing_problem",
+    "structure_problem",
+    "missing_world_detail",
+    "character_voice",
+    "clarity",
+    "other",
+}
 TASK_LEDGER_PATH = Path(
     os.environ.get("AGENT_TASK_LEDGER_PATH", "/home/daravenrk/dragonlair/book_project/task_ledger.json")
 )
@@ -250,7 +307,11 @@ def _load_cli_runtime_activity(stale_seconds: float = 1800.0) -> List[dict]:
             continue
         state = str(item.get("state") or "running")
         updated_at = float(item.get("updated_at_epoch") or item.get("started_at_epoch") or 0.0)
-        if state not in {"running", "starting", "recovering"}:
+        run_dir_raw = str(item.get("run_dir") or "").strip()
+        if state not in {"running", "starting", "recovering", "paused", "deferred"}:
+            dirty = True
+            continue
+        if run_dir_raw and not Path(run_dir_raw).exists():
             dirty = True
             continue
         if updated_at and (now - updated_at) > stale_seconds:
@@ -374,6 +435,12 @@ def _append_resource_event(event_type: str, payload: dict):
         handle.write(json.dumps(entry) + "\n")
 
 
+def _append_jsonl(path: Path, payload: dict):
+    _ensure_parent(path)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
 def _append_run_journal_event(run_dir: Optional[str], event_type: str, payload: dict):
     if not run_dir:
         return
@@ -470,7 +537,7 @@ def _resource_switch_event_locked(mode: str, reason: str, depth: int):
 def _build_resource_tracker_payload_locked(reason: str) -> dict:
     now = time.time()
     records = list(_tasks.values())
-    status_counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
+    status_counts = {"queued": 0, "running": 0, "paused": 0, "completed": 0, "failed": 0, "cancelled": 0}
     route_counts: Dict[str, int] = {}
     model_counts: Dict[str, int] = {}
     book_runtime_hints: Dict[str, dict] = {}
@@ -635,6 +702,7 @@ def _latest_book_stage_runtime_hint(record: TaskRecord) -> Optional[dict]:
                     "profile": profile,
                     "route": route,
                     "model": model,
+                    "correlation_id": details.get("correlation_id"),
                     "attempt": details.get("attempt"),
                     "ts": obj.get("timestamp"),
                     "source": "changes.log",
@@ -660,6 +728,7 @@ def _latest_book_stage_runtime_hint(record: TaskRecord) -> Optional[dict]:
                 "profile": profile,
                 "route": route,
                 "model": model,
+                "correlation_id": details.get("correlation_id"),
                 "attempt": details.get("attempt"),
                 "ts": obj.get("timestamp"),
                 "source": "run_journal.jsonl",
@@ -735,6 +804,7 @@ def _build_status_payload(
             task["runtime_profile"] = effective.get("profile")
         if book_runtime_hints.get(v.id):
             task["runtime_stage"] = book_runtime_hints[v.id].get("stage")
+            task["runtime_correlation_id"] = book_runtime_hints[v.id].get("correlation_id")
 
         # Optional filters for fallback provenance visibility in /api/status
         provenance = task.get("fallback_provenance_summary") or {}
@@ -773,7 +843,7 @@ def _build_status_payload(
             }
         )
 
-    counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0, "cancelled": 0}
+    counts = {"queued": 0, "running": 0, "paused": 0, "completed": 0, "failed": 0, "cancelled": 0}
     for task in tasks:
         st = task["status"]
         if st in counts:
@@ -1047,6 +1117,22 @@ def _schedule_spawn(task_id: str, runner, *runner_args):
     threading.Thread(target=delayed_spawn, daemon=True).start()
 
 
+def _book_task_review_gate_status(record: TaskRecord, req: Optional[BookFlowRequest] = None) -> str:
+    if record.profile != "book-flow":
+        return ""
+    if req is None:
+        if not record.book_request:
+            return ""
+        try:
+            req = BookFlowRequest(**record.book_request)
+        except ValidationError:
+            return ""
+
+    record.production_status = _analyze_book_production(req)
+    review_gate = (record.production_status or {}).get("review_gate") or {}
+    return str(review_gate.get("status") or "").strip().lower()
+
+
 def _bootstrap_task_ledger():
     loaded = _load_tasks_from_disk()
     if not loaded:
@@ -1058,6 +1144,32 @@ def _bootstrap_task_ledger():
         _tasks.update(loaded)
 
         for task_id, record in _tasks.items():
+            if record.profile == "book-flow" and record.book_request:
+                try:
+                    req = BookFlowRequest(**record.book_request)
+                except ValidationError:
+                    record.status = "failed"
+                    record.error = "Invalid persisted book request payload"
+                    record.finished_at = time.time()
+                    continue
+
+                gate_status = _book_task_review_gate_status(record, req)
+                if record.status == "paused":
+                    # A restarted API process has no live runner for paused tasks.
+                    # Clear runtime-only fields so later review actions can safely
+                    # detect that resume must requeue the task.
+                    record.started_at = None
+                    record.spawn_release_at = None
+                    record.next_retry_at = None
+                    if gate_status in REVIEW_GATE_RESUME_STATUSES:
+                        record.status = "queued"
+                        record.hold = False
+                        _set_spawn_release_locked(record, delay_seconds=0.0)
+                        queued_for_resume.append((task_id, _run_book_task, req))
+                        continue
+                    if gate_status in REVIEW_GATE_ACTIVE_PAUSE_STATUSES:
+                        record.hold = True
+
             if record.status != "queued":
                 continue
             _set_spawn_release_locked(record, delay_seconds=0.0)
@@ -1069,7 +1181,6 @@ def _bootstrap_task_ledger():
                     record.error = "Invalid persisted book request payload"
                     record.finished_at = time.time()
                     continue
-                record.production_status = _analyze_book_production(req)
                 fallback_integrity = (record.production_status or {}).get("fallback_integrity") or {}
                 _fi_failed, _fi_issues, _fi_stages = _any_fallback_stage_failed(fallback_integrity)
                 if _fi_failed:
@@ -1214,6 +1325,174 @@ def submit_correction(payload: dict = Body(...)):
     _schedule_spawn(new_id, _run_book_task, new_req)
     _refresh_ui_state_snapshot(event_type="user_correction_submitted")
     return {"ok": True, "message": "Correction submitted and retry started."}
+
+
+@app.post("/api/book-feedback")
+def submit_book_feedback(req: WritingFeedbackRequest):
+    _validate_feedback_request(req)
+    resolved_run_dir = _resolve_feedback_run_dir(req)
+    run_dir_str = str(resolved_run_dir) if resolved_run_dir else (str(req.run_dir or "").strip() or None)
+    linked_record = None
+    runtime_hint = None
+
+    if req.task_id:
+        with _task_lock:
+            linked_record = _tasks.get(str(req.task_id))
+            if linked_record:
+                runtime_hint = _latest_book_stage_runtime_hint(linked_record)
+
+    feedback_id = uuid.uuid4().hex
+    event = {
+        "feedback_id": feedback_id,
+        "timestamp": time.time(),
+        "reviewer": str(req.reviewer or "operator").strip() or "operator",
+        "task_id": str(req.task_id or "").strip() or None,
+        "run_dir": run_dir_str,
+        "run_id": Path(run_dir_str).name if run_dir_str else None,
+        "title": str(req.title or "").strip() or None,
+        "chapter_number": req.chapter_number,
+        "section_index": req.section_index,
+        "section_title": str(req.section_title or "").strip() or None,
+        "stage_id": str(req.stage_id or "").strip() or None,
+        "approved": bool(req.approved),
+        "needs_rewrite": bool(req.needs_rewrite),
+        "score": float(req.score),
+        "comment": str(req.comment or "").strip(),
+        "feedback_type": str(req.feedback_type or "thumb").strip().lower(),
+        "issue_tags": [str(tag).strip().lower() for tag in (req.issue_tags or []) if str(tag).strip()],
+        "rewrite_scope": str(req.rewrite_scope or "ask_each_time").strip().lower(),
+        "pause_before_continue": bool(req.pause_before_continue),
+        "assistant_rewrite_requested": bool(req.assistant_rewrite_requested),
+        "selected_text_range": req.selected_text_range.model_dump() if req.selected_text_range else None,
+        "correlation_id": (runtime_hint or {}).get("correlation_id"),
+    }
+    _append_jsonl(BOOK_FEEDBACK_PATH, event)
+
+    review_gate_state = None
+    if event.get("pause_before_continue") and run_dir_str:
+        review_gate_state = _write_review_gate_state(
+            run_dir_str,
+            {
+                "status": "pause_requested",
+                "feedback_id": feedback_id,
+                "task_id": event.get("task_id"),
+                "run_id": event.get("run_id"),
+                "chapter_number": event.get("chapter_number"),
+                "section_index": event.get("section_index"),
+                "section_title": event.get("section_title"),
+                "stage_id": event.get("stage_id"),
+                "comment": event.get("comment"),
+                "issue_tags": event.get("issue_tags"),
+                "rewrite_scope": event.get("rewrite_scope"),
+                "assistant_rewrite_requested": event.get("assistant_rewrite_requested"),
+                "reviewer": event.get("reviewer"),
+                "requested_at_epoch": time.time(),
+                "correlation_id": event.get("correlation_id"),
+            },
+        )
+        _append_run_journal_event(
+            run_dir_str,
+            "human_review_pause_requested",
+            {
+                "feedback_id": feedback_id,
+                "task_id": event.get("task_id"),
+                "chapter_number": event.get("chapter_number"),
+                "section_index": event.get("section_index"),
+                "section_title": event.get("section_title"),
+                "stage_id": event.get("stage_id"),
+                "rewrite_scope": event.get("rewrite_scope"),
+                "correlation_id": event.get("correlation_id"),
+            },
+        )
+        with _task_lock:
+            if linked_record and linked_record.profile == "book-flow":
+                linked_record.hold = True
+                if linked_record.status == "running":
+                    linked_record.status = "paused"
+                _write_resource_tracker_locked(reason="book_feedback_pause_requested")
+                _update_pressure_state_locked()
+
+    # Feed Todo 173 signal into reward events stream for downstream training tuples.
+    _append_jsonl(
+        orchestrator.agent_reward_events_path,
+        {
+            "timestamp": time.time(),
+            "profile": None,
+            "reason": "human_writing_feedback",
+            "delta": 0,
+            "tokens_before": None,
+            "tokens_after": None,
+            "details": {
+                "feedback_id": feedback_id,
+                "task_id": event.get("task_id"),
+                "run_dir": event.get("run_dir"),
+                "run_id": event.get("run_id"),
+                "chapter_number": event.get("chapter_number"),
+                "section_index": event.get("section_index"),
+                "section_title": event.get("section_title"),
+                "stage_id": event.get("stage_id"),
+                "approved": event.get("approved"),
+                "needs_rewrite": event.get("needs_rewrite"),
+                "score": event.get("score"),
+                "comment": event.get("comment"),
+                "feedback_type": event.get("feedback_type"),
+                "issue_tags": event.get("issue_tags"),
+                "rewrite_scope": event.get("rewrite_scope"),
+                "pause_before_continue": event.get("pause_before_continue"),
+                "assistant_rewrite_requested": event.get("assistant_rewrite_requested"),
+                "selected_text_range": event.get("selected_text_range"),
+            },
+        },
+    )
+    _append_resource_event("book_feedback_submitted", event)
+    _refresh_ui_state_snapshot(event_type="book_feedback_submitted")
+    return {
+        "ok": True,
+        "feedback_id": feedback_id,
+        "run_dir": run_dir_str,
+        "linked": bool(run_dir_str),
+        "review_gate_state": review_gate_state,
+    }
+
+
+@app.get("/api/book-feedback")
+def list_book_feedback(
+    run_id: Optional[str] = None,
+    chapter_number: Optional[int] = None,
+    section_index: Optional[int] = None,
+    stage_id: Optional[str] = None,
+    needs_rewrite: Optional[bool] = None,
+    limit: int = 100,
+):
+    rows = _read_jsonl(BOOK_FEEDBACK_PATH)
+    filtered: List[dict] = []
+
+    normalized_stage = str(stage_id or "").strip()
+    target_run_id = str(run_id or "").strip()
+    max_rows = max(1, min(int(limit), 500))
+
+    for item in reversed(rows):
+        if not isinstance(item, dict):
+            continue
+        if target_run_id and str(item.get("run_id") or "") != target_run_id:
+            continue
+        if chapter_number is not None and int(item.get("chapter_number") or 0) != int(chapter_number):
+            continue
+        if section_index is not None and int(item.get("section_index") or 0) != int(section_index):
+            continue
+        if normalized_stage and str(item.get("stage_id") or "") != normalized_stage:
+            continue
+        if needs_rewrite is not None and bool(item.get("needs_rewrite")) != bool(needs_rewrite):
+            continue
+        filtered.append(item)
+        if len(filtered) >= max_rows:
+            break
+
+    return {
+        "count": len(filtered),
+        "items": filtered,
+        "source": str(BOOK_FEEDBACK_PATH),
+    }
 
 
 def _compose_prompt(direction: Optional[str], prompt: str) -> str:
@@ -1583,6 +1862,142 @@ def _latest_book_run_dir(output_dir: str, title: str) -> Optional[Path]:
     return runs[0] if runs else None
 
 
+def _review_gate_state_path(run_dir: Optional[str]) -> Optional[Path]:
+    run_dir_str = str(run_dir or "").strip()
+    if not run_dir_str:
+        return None
+    return Path(run_dir_str).expanduser() / "handoff" / REVIEW_GATE_STATE_FILENAME
+
+
+def _read_text_preview(path_value: Any, max_chars: int = REVIEW_GATE_PREVIEW_MAX_CHARS) -> Optional[dict]:
+    path_str = str(path_value or "").strip()
+    if not path_str:
+        return None
+    path = Path(path_str).expanduser()
+    if not path.exists() or not path.is_file():
+        return {
+            "path": str(path),
+            "exists": False,
+            "text": None,
+            "truncated": False,
+            "char_count": 0,
+        }
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "path": str(path),
+            "exists": True,
+            "text": None,
+            "truncated": False,
+            "char_count": 0,
+        }
+
+    preview_text = text[:max_chars]
+    return {
+        "path": str(path),
+        "exists": True,
+        "text": preview_text,
+        "truncated": len(text) > len(preview_text),
+        "char_count": len(text),
+    }
+
+
+def _read_review_gate_state(run_dir: Optional[str]) -> dict:
+    path = _review_gate_state_path(run_dir)
+    if path is None:
+        return {}
+    payload = _read_json_file(path)
+    if not isinstance(payload, dict):
+        return {}
+    section_preview = _read_text_preview(payload.get("section_path"))
+    if section_preview is not None:
+        payload["section_preview"] = section_preview
+    review_preview = _read_text_preview(payload.get("section_review_path"))
+    if review_preview is not None:
+        payload["section_review_preview"] = review_preview
+    return payload
+
+
+def _write_review_gate_state(run_dir: Optional[str], patch: dict) -> dict:
+    path = _review_gate_state_path(run_dir)
+    if path is None:
+        return {}
+    existing = _read_json_file(path)
+    payload = existing if isinstance(existing, dict) else {}
+    payload.update(patch or {})
+    payload["updated_at_epoch"] = time.time()
+    _write_json_atomic(path, payload)
+    return payload
+
+
+def _resolve_feedback_run_dir(req: WritingFeedbackRequest) -> Optional[Path]:
+    if req.run_dir:
+        candidate = Path(str(req.run_dir)).expanduser()
+        return candidate if candidate.exists() else None
+
+    if req.task_id:
+        with _task_lock:
+            rec = _tasks.get(str(req.task_id))
+        if rec and isinstance(rec.book_request, dict):
+            req_title = str((rec.book_request or {}).get("title") or "").strip()
+            req_output_dir = str((rec.book_request or {}).get("output_dir") or "/home/daravenrk/dragonlair/book_project").strip()
+            if req_title:
+                return _latest_book_run_dir(req_output_dir, req_title)
+
+    if req.title:
+        out_dir = str(req.output_dir or "/home/daravenrk/dragonlair/book_project").strip()
+        return _latest_book_run_dir(out_dir, str(req.title))
+
+    return None
+
+
+def _validate_feedback_request(req: WritingFeedbackRequest) -> None:
+    if req.approved and req.needs_rewrite:
+        raise HTTPException(status_code=400, detail="approved and needs_rewrite cannot both be true")
+    if req.score < 0 or req.score > 10:
+        raise HTTPException(status_code=400, detail="score must be between 0 and 10")
+    normalized_feedback_type = str(req.feedback_type or "thumb").strip().lower()
+    if normalized_feedback_type not in ALLOWED_FEEDBACK_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"feedback_type must be one of: {', '.join(sorted(ALLOWED_FEEDBACK_TYPES))}",
+        )
+    normalized_scope = str(req.rewrite_scope or "ask_each_time").strip().lower()
+    if normalized_scope not in ALLOWED_REWRITE_SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rewrite_scope must be one of: {', '.join(sorted(ALLOWED_REWRITE_SCOPES))}",
+        )
+
+    issue_tags = [str(tag).strip().lower() for tag in (req.issue_tags or []) if str(tag).strip()]
+    invalid_tags = sorted({tag for tag in issue_tags if tag not in ALLOWED_FEEDBACK_ISSUE_TAGS})
+    if invalid_tags:
+        raise HTTPException(
+            status_code=400,
+            detail=f"issue_tags contains unsupported values: {', '.join(invalid_tags)}",
+        )
+
+    has_comment = bool(str(req.comment or "").strip())
+    if req.needs_rewrite and (not has_comment and not issue_tags):
+        raise HTTPException(status_code=400, detail="needs_rewrite feedback requires a comment or at least one issue tag")
+    if req.selected_text_range is not None:
+        start = int(req.selected_text_range.start)
+        end = int(req.selected_text_range.end)
+        if start < 0 or end < 0 or end <= start:
+            raise HTTPException(status_code=400, detail="selected_text_range must have start >= 0 and end > start")
+
+
+def _validate_review_action(action: str) -> str:
+    normalized = str(action or "").strip().lower()
+    if normalized not in ALLOWED_REVIEW_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"action must be one of: {', '.join(sorted(ALLOWED_REVIEW_ACTIONS))}",
+        )
+    return normalized
+
+
 def _read_jsonl(path: Path) -> List[dict]:
     rows: List[dict] = []
     if not path.exists():
@@ -1897,6 +2312,7 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
             "latest_stage_event": None,
             "last_error": None,
             "interruption": _assess_run_interruption(None),
+            "review_gate": {},
         }
 
     changes_log = run_dir / "changes.log"
@@ -2009,6 +2425,7 @@ def _analyze_book_production(req: BookFlowRequest) -> dict:
         "latest_stage_event": latest_stage_event,
         "last_error": last_error,
         "interruption": _assess_run_interruption(run_dir),
+        "review_gate": _read_review_gate_state(str(run_dir)),
         "fallback_integrity": _verify_all_stage_fallback_integrity(run_dir),
         "evaluated_at": time.time(),
     }
@@ -2354,6 +2771,7 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
 
     try:
         args = SimpleNamespace(
+            task_id=task_id,
             title=req.title,
             premise=req.premise,
             chapter_number=req.chapter_number,
@@ -2941,6 +3359,92 @@ def hold_book_task(task_id: str, req: BookHoldRequest):
     return {"status": "ok", "task": payload}
 
 
+@app.post("/api/tasks/{task_id}/review-action")
+def review_book_task(task_id: str, req: BookReviewActionRequest):
+    action = _validate_review_action(req.action)
+    trigger_resume = False
+    book_req = None
+    run_dir = None
+    runtime_hint = None
+
+    with _task_lock:
+        record = _tasks.get(task_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="task not found")
+        if record.profile != "book-flow":
+            raise HTTPException(status_code=400, detail="review actions are only supported for book-flow tasks")
+        if not record.book_request:
+            raise HTTPException(status_code=404, detail="book request payload not found")
+
+        book_req = BookFlowRequest(**record.book_request)
+        if not isinstance(record.production_status, dict) or not record.production_status.get("run_dir"):
+            record.production_status = _analyze_book_production(book_req)
+        run_dir = (record.production_status or {}).get("run_dir")
+        runtime_hint = _latest_book_stage_runtime_hint(record)
+        orphaned_paused_task = record.status == "paused" and record.started_at is None
+
+        if action in {"continue", "rewrite"}:
+            record.hold = False
+            record.next_retry_at = None
+            if orphaned_paused_task:
+                record.status = "queued"
+                record.finished_at = None
+                record.error = None
+                trigger_resume = True
+            elif record.status == "paused":
+                record.status = "running"
+        else:
+            record.hold = True
+            record.next_retry_at = None
+            record.status = "paused"
+
+        if action in {"continue", "rewrite"} and record.status in {"failed", "queued"}:
+            trigger_resume = True
+
+        _write_resource_tracker_locked(reason="book_task_review_action")
+        _update_pressure_state_locked()
+        queue_positions = _compute_queue_positions(list(_tasks.values()))
+        payload = _task_to_dict(record, queue_position=queue_positions.get(record.id))
+
+    review_gate_state = _write_review_gate_state(
+        run_dir,
+        {
+            "status": {
+                "continue": "continue_requested",
+                "rewrite": "rewrite_requested",
+                "defer": "deferred",
+            }[action],
+            "note": str(req.note or "").strip() or None,
+            "reviewer": str(req.reviewer or "operator").strip() or "operator",
+            "review_action": action,
+            "review_action_requested_at_epoch": time.time(),
+            "correlation_id": (runtime_hint or {}).get("correlation_id"),
+        },
+    )
+    _append_run_journal_event(
+        run_dir,
+        "human_review_action_requested",
+        {
+            "task_id": task_id,
+            "action": action,
+            "reviewer": str(req.reviewer or "operator").strip() or "operator",
+            "note": str(req.note or "").strip() or None,
+            "correlation_id": (runtime_hint or {}).get("correlation_id"),
+        },
+    )
+
+    _refresh_ui_state_snapshot(event_type="book_task_review_action")
+
+    if trigger_resume and book_req is not None:
+        with _task_lock:
+            record = _tasks.get(task_id)
+            if record and record.status == "queued":
+                _set_spawn_release_locked(record, delay_seconds=0.0)
+        _schedule_spawn(task_id, _run_book_task, book_req)
+
+    return {"status": "ok", "action": action, "task": payload, "review_gate_state": review_gate_state}
+
+
 @app.post("/api/book-jobs/reconcile")
 def reconcile_book_jobs():
     resumed = []
@@ -2950,6 +3454,33 @@ def reconcile_book_jobs():
     with _task_lock:
         for task_id, record in _tasks.items():
             if record.profile != "book-flow":
+                continue
+
+            req = None
+            if record.book_request:
+                try:
+                    req = BookFlowRequest(**record.book_request)
+                except ValidationError:
+                    req = None
+
+            gate_status = _book_task_review_gate_status(record, req) if req is not None else ""
+
+            if record.status == "paused" and (not record.hold) and gate_status in REVIEW_GATE_RESUME_STATUSES:
+                if req is None:
+                    skipped.append({"task_id": task_id, "reason": "paused_invalid_request_payload"})
+                    continue
+                record.status = "queued"
+                record.started_at = None
+                record.finished_at = None
+                record.next_retry_at = None
+                record.error = None
+                _set_spawn_release_locked(record, delay_seconds=0.0)
+                resumed.append({
+                    "task_id": task_id,
+                    "retry_count": record.retry_count,
+                    "reason": f"review_gate_{gate_status}",
+                })
+                _schedule_spawn(task_id, _run_book_task, req)
                 continue
 
             if record.hold:
@@ -3053,9 +3584,7 @@ def reconcile_book_jobs():
                 skipped.append({"task_id": task_id, "reason": "backoff_pending"})
                 continue
 
-            try:
-                req = BookFlowRequest(**record.book_request)
-            except ValidationError:
+            if req is None:
                 skipped.append({"task_id": task_id, "reason": "invalid_request_payload"})
                 continue
 

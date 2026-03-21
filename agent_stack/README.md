@@ -54,6 +54,17 @@ Start:
 /home/daravenrk/dragonlair/bin/agent-stack-up
 ```
 
+Deployment behavior after edits:
+
+- Python backend changes (for example `api_server.py`, `book_flow.py`, `orchestrator.py`) require a container rebuild/restart:
+
+```sh
+/home/daravenrk/dragonlair/bin/agent-stack-up
+```
+
+- Static UI changes under `agent_stack/static/` are bind-mounted and become available without a rebuild (browser refresh required).
+- Profile changes under `agent_stack/agent_profiles/` are bind-mounted and hot-reloaded by the orchestrator.
+
 Frontend:
 
 - `http://127.0.0.1:11888`
@@ -75,6 +86,44 @@ Service status and queue monitoring from CLI:
 agentctl server-status
 agentctl server-watch --interval 1
 agentctl server-submit "reply with ok" --profile nvidia-fast
+```
+
+Runtime validation checklist:
+
+```sh
+docker compose -f /home/daravenrk/dragonlair/agent_stack/docker-compose.agent.yml ps
+curl -sS http://127.0.0.1:11888/api/health | jq .
+curl -sS http://127.0.0.1:11888/api/ui-state | jq '.task_counts, .latest_stage_event'
+python3 -m py_compile /home/daravenrk/dragonlair/agent_stack/api_server.py /home/daravenrk/dragonlair/agent_stack/book_flow.py /home/daravenrk/dragonlair/agent_stack/orchestrator.py
+bash /home/daravenrk/dragonlair/agent_stack/scripts/failure_path_integration_drill.sh
+```
+
+The integrated failure-path drill covers interruption recovery, paused review-gate restart/resume, task cancellation, and fallback-integrity validation in one operator run.
+
+New feedback and review-gate APIs:
+
+- `POST /api/book-feedback` records section feedback and can request pause (`pause_before_continue=true`).
+- `GET /api/book-feedback` returns filtered feedback rows.
+- `POST /api/tasks/{task_id}/review-action` accepts `continue`, `rewrite`, or `defer` for paused review checkpoints.
+
+Example payloads:
+
+```sh
+curl -sS -X POST http://127.0.0.1:11888/api/book-feedback \
+	-H 'Content-Type: application/json' \
+	-d '{
+		"task_id": "<task_id>",
+		"approved": true,
+		"needs_rewrite": false,
+		"score": 8.5,
+		"comment": "Section works, pause for approval.",
+		"feedback_type": "thumb",
+		"pause_before_continue": true
+	}' | jq .
+
+curl -sS -X POST http://127.0.0.1:11888/api/tasks/<task_id>/review-action \
+	-H 'Content-Type: application/json' \
+	-d '{"action":"continue","note":"approved","reviewer":"operator"}' | jq .
 ```
 
 ## Markdown Agent Profiles
@@ -329,6 +378,38 @@ For book flow, use `-v` / `--verbose` (or API `verbose=true`) to enable full dia
 - Default mode: lightweight operational logging in `changes.log`.
 - Verbose mode: adds `diagnostics/agent_diagnostics.jsonl` with full per-attempt prompt/output payloads and timestamps.
 
+### Runtime Presets And Ollama Boundaries
+
+Profile-driven inference is now preset-governed.
+
+- Agent profiles must declare `runtime_preset`.
+- `agent_stack/runtime_presets.json` owns the effective `route`, `model`, `num_ctx`, and `num_gpu` baseline.
+- The orchestrator resolves runtime settings through `OrchestratorAgent._resolve_profile_runtime_settings(...)` before any Ollama call is issued.
+- Inline profile overrides for `route`, `model`, `num_ctx`, and `num_gpu` are rejected by profile lint/runtime validation.
+
+This means the supported path for book flow is:
+
+- `book_flow.py` -> orchestrator profile selection / overrides -> runtime preset resolution -> `OllamaSubagent.run()` -> Ollama `/api/generate`
+
+Direct Ollama calls still exist, but only as intentional exceptions for maintenance or diagnostics.
+
+- `orchestrator.py::_unload_route_model(...)` sends a direct empty-prompt request to unload a model during hibernation.
+- Calibration/probe scripts under `agent_stack/scripts/` may call `/api/generate` directly to test endpoint behavior, GPU offload, or context limits.
+
+Those direct probe utilities bypass runtime preset abstraction by design. They are valid for endpoint calibration, but they should not be used as proof that book-flow or agent-profile execution bypassed preset governance.
+
+When diagnosing a book-flow regression, use this sequence first:
+
+- Read `run_journal.jsonl` for stage lifecycle and the last completed event.
+- Read `diagnostics/agent_diagnostics.jsonl` for the stage prompt, resolved profile, resolved route/model/options, and correlation ID.
+- Search `book_project/ollama_run_ledger.jsonl` for the same correlation ID.
+
+Interpretation:
+
+- If diagnostics show a correlation ID but the run ledger has no matching entry, the failure happened before or outside `OllamaSubagent.run()`.
+- If the run ledger has a matching entry with `success=false`, the endpoint call was attempted and the error field is the next diagnostic anchor.
+- If the run ledger shows successful calls but book flow stalls later, the issue is in stage parsing, quality gates, or downstream artifact handling rather than preset resolution.
+
 ### Prompt Contracts And Gates
 
 Every stage uses a strict contract structure:
@@ -346,6 +427,12 @@ Quality gates and retries are enforced for:
 - developmental editor scoring
 - continuity blocking issues
 - publisher approval decision
+
+Quality scoring thresholds are runtime configurable and can be adaptive:
+
+- Base floors: `BOOK_QUALITY_MIN_SCORE`, `BOOK_QUALITY_MIN_AVG_SCORE`, `BOOK_QUALITY_MIN_CONTENT_SCORE`
+- Adaptive controls: `BOOK_QUALITY_ADAPTIVE_ENABLED`, `BOOK_QUALITY_ADAPTIVE_ALPHA`, `BOOK_QUALITY_ADAPTIVE_GAIN`, `BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS`, `BOOK_QUALITY_ADAPTIVE_MAX_SCORE`, `BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE`
+- Per-book learning state is persisted at `quality_learning_state.json`; threshold snapshots are recorded in run artifacts for traceability.
 
 ### Memory Layers
 

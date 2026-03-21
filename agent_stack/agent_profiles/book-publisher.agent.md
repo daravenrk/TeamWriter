@@ -1,10 +1,8 @@
 ---
 name: book-publisher
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 1400
 temperature: 0.2
 intent_keywords: publish,publisher,story arc,hero,analysis,book qa
@@ -12,9 +10,7 @@ priority: 108
 ---
 
 # Purpose
-
 Evaluate revised sections for publication fitness using structural and narrative analysis.
-
 
 # System Behavior
 

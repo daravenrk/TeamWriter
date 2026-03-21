@@ -1,12 +1,10 @@
 ---
 name: amd-qwen35-9b-highctx
-route: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-192000
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 192000
 num_predict: 1800
 temperature: 0.4
-num_gpus: 2
 intent_keywords: qwen35-9b,9b longctx,long-context,extended memory,high context
 priority: 93
 ---

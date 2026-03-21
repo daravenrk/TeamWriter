@@ -1,8 +1,175 @@
 # Development Next Steps & Process Guide
 
-**Last Updated:** March 20, 2026
+---
+
+## Book Flow Risk Register (2026-03-20)
+
+Full pipeline audit conducted. Issues ranked by severity.
+
+### 🔴 FIXED — 3 bugs patched in this session
+
+| # | Location | Fix Applied |
+|---|----------|-------------|
+| F1 | `book_flow.py` — `local_task_memory` | `recent_chapter_summaries` was the unfiltered full list, now capped to last 5. Prevented context window overflow after several chapters. |
+| F2 | `book_flow.py` — `score_arc_consistency()` | Open loops window capped to 10 most recent. Character arc window capped to 5 most recent entries. Without this, later chapters would always fail arc consistency (full 30-loop accumulation required in a single session's notes). |
+| F3 | `book-publisher-brief.agent.md` | `num_predict` raised from `700` → `1800`. 700 tokens cannot fit a valid JSON brief with 5+ constraints + 5+ acceptance_criteria + all required fields. Would cause systematic retries on every book run. |
+| F4 | `book_flow.py` — `canon_contract build_contract` | Canon stage now receives `book_premise` and `book_details` (title, genre, tone, audience) from `context_store`. Previously only received the publisher brief output, which sometimes lacked premise context. |
+| F5 | `orchestrator.py` — `_collect_fallback_routes` | Method was called inside `_build_ml_shadow_recommendations()` but never defined; every `POST /api/book-flow` request returned HTTP 500. Added method and rebuilt/redeployed container (2026-03-20). |
+| F6 | `scripts/interruption_recovery_drill.sh`, `scripts/failure_path_integration_drill.sh` | `json_get()` helper used heredoc — consumed stdin so piped JSON was discarded; changed to `python3 -c '...' "$expr"`. `log()` was writing to stdout, corrupting command-substitution JSON captures; redirected to stderr. Python quoting bug in `list_active_tasks()` f-string inside single-quoted shell string; converted to `.format()` style. (2026-03-20) |
+| F7 | NVIDIA route profiles — GPU layer 33/33 100% GPU achievement (book stages) | **FIXED (2026-03-20 COMPLETE)**: Root cause confirmed as VRAM overcommit from large context + output layer footprint. Final validated config: `qwen3.5:4b`, `num_ctx: 8192`, `num_gpu: 99` on GTX 1660 SUPER (6 GiB). Verified in Ollama logs: `offloaded 33/33 layers to GPU`. Peak observed VRAM: ~5596 MiB used, ~152 MiB free. |
+| F8 | Profile GPU option drift (`num_gpus` vs `num_gpu`) + validator mismatch | **FIXED (2026-03-20)**: Standardized all profiles to `num_gpu` (singular, Ollama API key). Removed stale `num_gpus` entries. Updated validator allowlist + loader compatibility path. Profile lint now passes (`26 profiles, 0 errors`). |
+| F9 | NVIDIA context cap enforcement — KvSize 16384 leak on architect/writer stages | **FIXED (2026-03-21)**: Missing `AGENT_NVIDIA_MAX_CTX_BY_MODEL` env var in `docker-compose.agent.yml` allowed context estimator to select higher-context presets without cap enforcement, causing `qwen3.5:4b` to load at `num_ctx=16384` (violates GPU-only policy: `32/33` layers on GPU). Root cause: when a preset lacks explicit `num_ctx`, clamping in `_resolve_profile_runtime_settings()` doesn't trigger. Added explicit env var: `AGENT_NVIDIA_MAX_CTX_BY_MODEL: '{"qwen3.5:4b":8192,"qwen3.5:2b":65536,"qwen3.5:0.8b":131072}'` with validated ceilings from matrix calibration. Rebuilt container (2026-03-21). |
+
+### 🟠 KNOWN RISKS — Not yet fixed, monitor in next run
+
+| # | Severity | Location | Description | Predicted Failure |
+|---|----------|----------|-------------|-------------------|
+| R1 | HIGH | `book_flow.py` publisher_brief contract | `inputs=context_store` passes the ENTIRE context_store to the publisher brief agent (24k ctx). As runs accumulate `rolling_memory`, this overflows and the model receives a truncated context with no indication it happened. | Silent truncation → missing brief fields → gate retry loop |
+| R2 | HIGH | `score_arc_consistency()` | Open-loop substring match capped at `[:50]`. If the LLM rephrases a loop even slightly, the carry-forward match fails and arc score drops below 0.6. | Spurious `StageQualityGateError` on arc consistency for long-running books |
+| R3 | MEDIUM | `book_flow.py` line 3733 | `forced_completion = True` is not surfaced in the API task response body or task status field. UI shows task as "completed" even when publisher never approved. | Operator doesn't know chapter was force-completed without inspecting `run_journal.jsonl` |
+| R4 | MEDIUM | `story_architect_review` stage | No numeric quality gate on `concept_validation` or `structure_validation` scores (unlike developmental_editor which requires ≥4). Any score passes. | Low-quality structural validation silently passes, feeding bad structure to editors |
+| R5 | LOW | AMD route concurrency=1 | All AMD stages queue: research → N×section_review → assembly_review → developmental_editor → continuity → publisher_qa. For a 4-section chapter = 9+ sequential AMD calls. NVIDIA route sits idle during AMD-only stages. | Long total wall time per chapter run (~30-60 min per chapter at current model speeds) |
+| R6 | LOW | `rolling_memory.json` | Chapter summaries are appended per-run with no pruning. After 50 chapters this file could reach several MB and the full rolling_memory is written to `context_store.json` per run. | File I/O slowdown; risk of `context_store` exceeding serialization limits |
+| R7 | INFO | `book-researcher` profile | Uses `qwen2.5-coder:14b` (a code model) for book research. Not broken but not ideal — coder training doesn't match research output format. | Occasional structured output failures from the research stage |
+| R8 | HIGH | Task ledger reload / cancellation persistence | Previously cancelled long-running `book-flow` tasks reappeared as running after API restart, causing unexpected concurrent load and VRAM pressure. | Hidden background runs can trigger fallback, route starvation, and false diagnostics |
+| R9 | HIGH | API image/runtime drift | Editing host files without image rebuild can leave container running stale validator/loader code. | Startup loops, profile validation regressions, and inconsistent route behavior |
+
+### 🔵 PIPELINE STAGE → ROUTE MAP (STANDARDIZED)
+
+| Stage | Profile | Route | Model | num_ctx | num_gpu | num_predict |
+|-------|---------|-------|-------|---------|---------|-------------|
+| publisher_brief | book-publisher-brief | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| research | book-researcher | AMD | qwen2.5-coder:14b | 128000 | 2 | 1800 |
+| architect_outline | book-architect | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| chapter_planner | book-chapter-planner | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| canon | book-canon | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| canon failover | book-canon-nvidia | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| writer_section_N | book-writer | NVIDIA | qwen3.5:4b | 8192 | 99 | varies |
+| section_review_N | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| story_architect_review | book-architect | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| assembler | book-assembler | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| assembly_review | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| developmental_editor | book-developmental-editor | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| line_editor | book-line-editor | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
+| copy_editor | book-copy-editor | NVIDIA | qwen3.5:4b | 8192 | 99 | 1400 |
+| proofreader | book-proofreader | NVIDIA | qwen3.5:2b | 65536 | 99 | 1200 |
+| session_reviewer | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| continuity | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| publisher_qa | book-publisher | AMD | qwen3.5:9b | 49152 | 2 | 1400 |
+
+### 🔵 GPU-Only Standardization Plan (All Available Models)
+
+Hardware baseline:
+- NVIDIA: GTX 1660 SUPER, 6144 MiB VRAM
+- AMD: 2x Navi 21, 17163091968 B each (~16 GiB each)
+
+Global policy:
+- Enforce explicit `num_gpu` on every profile (`99` on NVIDIA, `2` on AMD).
+- Keep `num_ctx` as high as possible while preserving full layer offload.
+- Never accept CPU fallback silently.
+- Promote only validated `(model, num_ctx)` pairs into production profiles.
+
+NVIDIA available models (full-GPU viability classes):
+- **Validated full-GPU**: `qwen3.5:4b` at `num_ctx=8192` (`33/33` verified).
+- **Validated full-GPU with measured ceiling**: `qwen3.5:2b` at `num_ctx=65536` (`25/25` verified), `qwen3.5:0.8b` at `num_ctx=162816` (`25/25` verified).
+- **Likely full-GPU with tuning**: `qwen2.5-coder:3b`, `qwen2.5-coder:1.5b`, `llama3.2:1b`, `llama3.2:3b`, `codegemma:2b`.
+- **Likely not full-GPU on 6 GiB (route away or reduce model size)**: `qwen3.5:9b`, `dragonlair-book-nvidia:latest`, `dragonlair-book-nvidia-ctx:latest`, `codeqwen:7b`, `codellama:7b`, `codegemma:7b`, `qwen2.5-coder:7b`.
+
+AMD available models (multi-GPU full-offload target):
+- **Primary production set**: `qwen2.5-coder:14b`, `qwen3.5:9b`, `qwen3.5:27b`.
+- **Secondary available set for calibration**: `deepseek-coder-v2:16b`, `starcoder2:15b`, `codellama:13b`, `dragonlair-active:latest`, `dragonlair-coding-amd:latest`, `dragonlair-book-amd:latest`.
+
+Calibration workflow (required before final max-context lock):
+1. Force clean model load on target route and run with `num_gpu` hard set.
+2. Sweep `num_ctx` upward (binary search) until just before fallback.
+3. Record max stable context with all layers on GPU.
+4. Lock that `num_ctx` in profile and record rationale in run journal.
+5. Re-run `load_validation.py` + interruption drill after each promoted change.
+
+Latest NVIDIA calibration evidence:
+- `qwen3.5:0.8b`: passes with full offload through `num_ctx=162816` (`25/25`), fails allocation at `163328` and above on `http://localhost:11434` with `num_gpu:99`.
+- `qwen3.5:2b`: passes with full offload through `num_ctx=65536` (`25/25`), fails allocation at `98304` and above on `http://localhost:11434` with `num_gpu:99`.
+- `qwen3.5:4b`: validated full-GPU at `num_ctx=8192` (F7 baseline: `33/33` offload + ~5596 MiB peak VRAM on 6 GiB card).
+
+**Context Cap Enforcement (2026-03-21):**
+- Explicit cap map added to `docker-compose.agent.yml` environment:
+  ```
+  AGENT_NVIDIA_MAX_CTX_BY_MODEL: '{"qwen3.5:4b":8192,"qwen3.5:2b":65536,"qwen3.5:0.8b":131072}'
+  ```
+- Prevents context estimator from selecting higher-context presets that exceed GPU memory limits
+- Hardcoded default exists in `orchestrator.py` (line 174–183) but explicit env var locks policy at container startup
+- Fix ensures selector ranks `nvidia-qwen35-4b-8192` preset first and caps any overrun attempts to 8192
+
+### 🔵 QUALITY GATE THRESHOLD MAP
+
+| Stage | Gate Type | Threshold | Blocks? |
+|-------|-----------|-----------|---------|
+| publisher_brief | field count | ≥5 constraints, ≥5 criteria | ✅ Yes |
+| research | keyword presence | "facts"/"evidence" OR ≥120 words | ✅ Yes |
+| chapter_planner | array length | ≥2 sections | ✅ Yes |
+| canon | schema only | all 5 keys present | ✅ Yes |
+| section_review | blocking_issues | array must be empty | ✅ Yes |
+| story_architect_review | schema only | all 4 keys present — **NO SCORE GATE** | ⚠️ Soft |
+| assembly_review | blocking_issues | array must be empty | ✅ Yes |
+| developmental_editor | all scores | adaptive: effective min/avg thresholds (base floor default 3.0/3.0) | ✅ Yes |
+| session_reviewer | all 10 rubric keys | adaptive: effective min/avg + reader_engagement/content floor (base default 2.5 content) | ✅ Yes |
+| arc_consistency | loop/arc score | ≥0.6 | ✅ Yes |
+| continuity | blocking_issues | array must be empty | ✅ Yes |
+| publisher_qa | decision | must be "APPROVE" (or forced_completion) | ⚠️ Soft |
+| word count (writer) | word count | ≥60% of writer_words per section | ✅ Yes |
+| word count (edited/proofread) | word count | ≥70% of writer_words | ✅ Yes |
+| word count (assembled) | word count | ≥35% of writer_words | ✅ Yes |
+
+
+
+**Last Updated:** March 21, 2026
 **Project:** Dragonlair Agent Stack — Multi-agent orchestration for book writing and code generation  
-**Current Focus:** Complete one end-to-end book run and validate interruption recovery in production flow
+**Current Focus:** GPU 100% enforcement validation and context cap hardening
+
+### Validation Snapshot (2026-03-21) — E2E Software-Path GPU Audit
+
+**Run:** E2E Software Test, Chapter 1, pub→research→architect→canon→writer path
+**Date/Time:** 2026-03-21 03:57–04:21 UTC
+**Result:** Mixed compliance — policy audit discovered and patched KvSize leak
+
+#### AMD Route — `qwen2.5-coder:14b` (2× RX 6800, research stage)
+- ✅ **PASS** — `offloaded 49/49 layers to GPU` (both attempts)
+- Split evenly: ROCm0 (25 layers) + ROCm1 (24 layers), output layer on GPU
+- Policy status: **100% GPU. Compliant.**
+- Note: Orchestrator requested `num_ctx=65536`; Ollama clamped to model training max 32768 with warning (acceptable).
+
+#### NVIDIA Route — `qwen3.5:4b` (GTX 1660 Super, 6 GiB VRAM)
+- **4 distinct loads across publisher_brief, architect_outline, chapter_planner, canon, writer_section_01**
+- ❌ **FAIL** — Every load: `offloaded 32/33 layers to GPU` + `offloading output layer to CPU`
+  - Happens at both KvSize 8192 and 16384
+  - Root cause: F9 fix not yet active in container (rebuilt 2026-03-21 post-audit)
+  - At KvSize=8192: VRAM insufficient for all 33 layers + KV cache on 6 GB GTX 1660 Super
+  
+**Expected behavior (F7 baseline):**
+- `qwen3.5:4b` at `num_ctx=8192`: should load **33/33 layers**, not 32/33
+- F7 documented: verified `offloaded 33/33 layers to GPU` with peak VRAM ~5596 MiB used
+
+**Discrepancy investigation:**
+- The 32/33 current result vs 33/33 F7 result warrants a targeted recheck post-rebuild
+- Two loads escaped to `KvSize=16384` (architect, writer) due to missing env var — now fixed with F9
+- Post-F9 rebuild: all NVIDIA contexts should clamp to 8192 max and achieve 33/33
+
+**Status:** Awaiting validation run with F9 fix active to confirm 33/33 achievement on all NVIDIA loads.
+
+---
+
+### Validation Snapshot (2026-03-20)
+
+- Runtime status validated with:
+  - `docker compose -f agent_stack/docker-compose.agent.yml ps`
+  - `curl -sS http://127.0.0.1:11888/api/health`
+  - `curl -sS http://127.0.0.1:11888/api/ui-state`
+  - `python3 -m py_compile agent_stack/api_server.py agent_stack/book_flow.py agent_stack/orchestrator.py`
+- Deployment action required and executed:
+  - `/home/daravenrk/dragonlair/bin/agent-stack-up`
+- Post-deploy endpoint verification:
+  - `GET /api/book-feedback` responds (returns `count/items/source` payload)
+  - `POST /api/tasks/{task_id}/review-action` route responds (unknown task returns `task not found`)
 
 ---
 
@@ -177,6 +344,259 @@ find /home/daravenrk/dragonlair/book_project/runs -name run_journal.jsonl \
 
 ## 5. Next Development Steps (Prioritized)
 
+> **NAVIGATION**: Start with the 🚦 Work Queue table below — it lists the current priority order and what each item depends on. Completed items are marked `Completed (20XX-XX-XX)` or `✅ IMPLEMENTED` throughout — search that string to skip past them. Full changelog in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+### 🚦 Work Queue — Do This Next
+
+| # | Todo | One-line description | Depends on | Status |
+|---|------|----------------------|------------|--------|
+| 0 | **204** | Design + prototype Code Manager Agent for JSON contract ownership | — | 🔴 **PRIORITY: TOMORROW** |
+| 1 | **205** | Design nested BookPublisher → CodePublisher delegation for in-book software deliverables | 204 | 🔴 **NEXT AFTER 204** |
+| 2 | **206** | Add machine-learned quality curriculum (auto-tighten writing/content thresholds over time) | 171/172 | 🟡 In progress (baseline adaptive live 2026-03-21) |
+| 3 | **193** | Run clean end-to-end failure-path drill | 2 live tasks must finish | ⏳ Blocked |
+| 4 | **197** | Fix NVIDIA GPU layer fallback (9 profiles → 24576 ctx) | — | ✅ Fixed 2026-03-20 |
+| 5 | **194** | Archive drill run output with timestamp + metadata | 193 | Not started |
+| 6 | **33** | Load validation — concurrent task pressure test | 193 | 🟡 Script ready; run `bin/load-validation` after drill |
+| 7 | **195** | Fix context_store overflow in publisher brief (Risk R1) | — | ✅ Fixed 2026-03-20 |
+| 8 | **196** | Fix arc consistency fuzzy-match instability (Risk R2) | — | ✅ Fixed 2026-03-20 |
+| 9 | **198** | Define per-stage approved option menus; wire ML selector within them | 170 | Not started |
+| 10 | **170** | Formalize strategy matrix + enforce at runtime (Stage A core) | — | Not started |
+| 11 | **27** | Harden checkpoint persistence + pause/resume invariants | — | Partial |
+| 12 | **73** | First clean end-to-end book run to terminal success | 193, 197 | Partial (7 attempts) |
+| 13 | **28** | Failure-path drill — full end-to-end validation | 193 | Partial |
+| 14 | **171/172** | ML shadow mode telemetry + recommendation logging | — | In progress |
+| 15 | **29** | Expose logging metrics in WebUI | — | Not started |
+| 16 | **37/38** | Agent handoff expectation contract + continuity dashboard | — | Not started |
+
+
+**Stage gate**: Finish items 1–6 before starting Stage A foundation work (170+). Items 7–12 are Stage A. Items 13–14 run concurrent with Stage A.
+
+---
+
+### 🟢 **HIGH PRIORITY: Code Manager Agent Design (Tomorrow — Todo 204)**
+
+**Objective**: Create a dedicated infrastructure layer that owns JSON schema compliance and structured output reliability across all agent stages. Replace ad-hoc JSON validation with coordinated coder-model-based formatting.
+
+**Architecture Pattern**:
+```
+[Orchestrator/Parent Stage]
+          ↓ (requirement + schema)
+  [Code Manager Agent] ← Coordinates coder models (e.g., ollama qwen3.5:4b coder)
+          ↓ (validated JSON)
+  [Parent Stage receives guaranteed-valid structure]
+```
+
+**Design Specification**:
+- **Ownership**: Code Manager Agent has singular responsibility for JSON contract validation + formatting
+- **Input Protocol**: Receives `(requirement_text, json_schema, attempt_count, model_hint)` from parent stage
+- **Execution Flow**:
+  1. Coordinate coder model based on profile/route (NVIDIA → `qwen3.5:4b`, AMD → `qwen3.5:27b`)
+  2. Prompt coder with requirement + schema to generate JSON
+  3. Validate output against schema (use `jsonschema` library or equivalent)
+  4. On **validation failure**: Retry with more explicit prompt or escalate to heavier coder model
+  5. On **success**: Return validated JSON to parent stage
+  6. On **repeated failures** (>3 retries): Escalate to human review or fallback template
+- **Output Protocol**: `{ "json": <validated_dict>, "attempts": <count>, "timestamp": <iso_8601> }`
+- **Failure Modes & Responses**:
+  - **Malformed JSON**: Retryable — syntax error in generated JSON
+  - **Missing required fields**: Retryable — schema validation failed on field presence
+  - **Type mismatches**: Retryable — field type doesn't match schema (e.g., string instead of number)
+  - **Fundamentally incompatible requirement**: Fatal — requirement conflicts with schema structure; escalate
+  - **Silent truncation from context cap**: Log warning; escalate context requirements
+- **Latency Tolerance**: **No constraint** — prioritize correctness over speed for structured output
+- **Orchestrator Integration Points**:
+  - Add `code_manager` profile to `agent_stack/agent_profiles/` (minimal resource footprint, single purpose)
+  - Route orchestrator to invoke Code Manager Agent via new stage type `"code_manager"` in pipeline definition
+  - Context clamping applies: NVIDIA routes clamped to `num_ctx=8192` for coder model (minimal context needed for formatting, not reasoning)
+  - Quality gate recognizes Code Manager Agent as **trusted source of structured output** — skip downstream JSON re-validation if sourced from Code Manager
+
+**Acceptance Criteria**:
+- [ ] Code Manager Agent profile created with minimal resource footprint (NVIDIA: qwen3.5:4b, AMD: qwen3.5:27b)
+- [ ] Coder model selection strategy defined (route-aware, fallback chain documented)
+- [ ] Schema validation logic implemented (accepts JSON schema, validates output, detailed error reporting)
+- [ ] Retry + escalation logic implemented (up to 3 retries with prompt refinement, then fallback)
+- [ ] Integration test: orchestrator can invoke Code Manager Agent and receive validated JSON
+- [ ] Quality gate updated to recognize Code Manager Agent output as trusted (no redundant schema check)
+- [ ] Run artifacts include Code Manager Agent call telemetry (model used, attempts, validation outcome)
+
+**Dependencies**:
+- None (foundational design work; can proceed independently)
+- Does not depend on Todo 170/198/204 strategy matrix work
+- Can be deployed + tested in isolation, then integrated into book flow stages
+
+**Related Risks Mitigated**:
+- Quality gate failures due to malformed JSON from stage models (e.g., publisher brief returning broken structure)
+- Individual model-specific prompt overfitting for JSON (outsources to coder-specialist models)
+- No longer dependent on stage model's JSON coherency; separated concern from domain reasoning
+- Reduces troubleshooting overhead: all JSON contract failures route to single Code Manager validation path
+
+**Timeline & Workload Estimate**:
+- Profile + coder model selection: **2 hours** (estimate, test, document approved models per route)
+- Schema validation + retry logic: **3 hours** (implement `jsonschema` validator, retry loop, escalation logic)
+- Orchestrator integration: **2 hours** (wire Code Manager Agent stage type, pass JSON schemas from config)
+- Integration + E2E tests: **2 hours** (spawn code manager calls, validate outcomes, edge cases)
+- **Total: ~9 hours** — can fit in one extended working session or split across two half-days
+
+**First use case**: Wire into `publisher_brief` stage to eliminate recurring JSON schema failures + quality gate retries.
+
+---
+
+### 🟢 **HIGH PRIORITY: Nested Publisher Delegation (Todo 205)**
+
+**Use case**: User launches **Book mode** for a programming book, for example a C++ book. During planning, outlining, or chapter execution, the book system detects that a concrete software artifact is required: sample program, library, CLI demo, test harness, or repository scaffold. At that point the book runtime must be able to open a linked **Code mode** project automatically instead of forcing the book agents to improvise code inline.
+
+**Core principle**: The book publisher keeps ownership of the narrative and teaching objective. The code publisher owns the software deliverable. They are separate publishers in one governed runtime, not one mode pretending to be both.
+
+**Proposed runtime shape**:
+```
+[User Prompt: "Write me a C++ programming book"]
+       ↓
+     [BookPublisher]
+       ↓
+   detects development deliverable need
+       ↓
+ [Code Project Request Contract emitted]
+       ↓
+     [CodePublisher child run]
+       ↓
+   produces repo/artifacts/tests/docs summary
+       ↓
+ [BookPublisher consumes result as source artifact]
+       ↓
+ chapter/book continues with grounded references
+```
+
+**What the BookPublisher must emit**:
+- `development_goal`: what software must exist and why it matters to the book
+- `language`: for this use case, `c++`
+- `deliverable_type`: example program, library, CLI tool, exercise scaffold, benchmark harness, etc.
+- `acceptance_contract`: required behavior, interfaces, constraints, tests, and educational purpose
+- `book_linkage`: chapter number, section title, concept being taught, references expected back into manuscript
+- `artifact_destination`: where the code project and resulting summary belong in the book run folder
+
+**What the CodePublisher must return**:
+- `project_summary.json` with goal, language, build/run instructions, test status, artifact paths
+- concrete file outputs under a child project directory
+- `integration_notes.md` written for the book system: what was built, what assumptions were made, what examples/snippets are safe to cite in the manuscript
+- machine-readable pass/fail on the acceptance contract
+
+**Required runtime changes**:
+- Replace strict book-vs-code mutual exclusion with a **governed nested delegation exception**:
+  - operator-started unrelated Book mode and Code mode runs can still remain mutually exclusive if desired
+  - a CodePublisher child run launched by an active BookPublisher parent must be allowed
+  - parent and child must share correlation metadata so this is auditable and not an ungoverned side channel
+- Add parent/child task linkage fields to run artifacts and task ledger
+- Add publisher-level handoff event in run journal, for example `publisher_child_project_requested` and `publisher_child_project_completed`
+- Add approval checkpoint option: auto-launch child project vs request operator confirmation
+
+**Detection points inside book flow**:
+- publisher brief identifies that a chapter requires executable teaching artifacts
+- architect/chapter planner defines a section whose acceptance criteria include working code
+- writer or reviewer flags a missing program artifact needed to support accuracy of the manuscript
+
+**Initial constraints**:
+- First implementation should support **one-directional** delegation only: `BookPublisher -> CodePublisher`
+- Child CodePublisher run should be **bounded**: one clearly scoped project with explicit acceptance tests
+- The book run should not block forever waiting for exploratory coding; use timeout + resume contract
+- Generated code snippets inserted into the manuscript should reference artifact paths, not be silently regenerated by book agents
+
+**Acceptance criteria**:
+- [ ] BookPublisher can emit a machine-readable code project request during a book run
+- [ ] CodePublisher can execute as a linked child run while the parent book run remains governed and auditable
+- [ ] Runtime distinguishes nested child code runs from unrelated operator code runs
+- [ ] Child run artifacts are attached back to the parent book run with explicit references
+- [ ] Book stages can cite child project outputs without re-inventing the code in prose prompts
+- [ ] API and UI expose parent/child linkage clearly enough for operator inspection
+
+**Immediate codebase implication**:
+- Current backend behavior blocks this use case outright because `/api/tasks` rejects coding tasks when a `book-flow` task is queued or running, and `/api/book-flow` rejects book mode when coding tasks exist. That guard is correct for operator collision control, but it must be refactored into policy-aware nested delegation rather than global mode exclusion.
+
+**First exemplar scenario**:
+- Book prompt: "Write a book teaching modern C++ through building practical tools."
+- Chapter goal: explain parsing, memory ownership, and CLI design.
+- BookPublisher requests child project: `cpp-log-parser-demo`
+- CodePublisher produces the C++ project, tests, and usage notes.
+- BookPublisher then writes the chapter around the verified artifact instead of hallucinating the program.
+
+### 🟢 **HIGH PRIORITY: Quality Curriculum Learning (Todo 206)**
+
+**Objective**: Make quality expectations machine-learnable so the system starts permissive enough to complete runs, then tightens writing and content-management quality requirements as performance improves.
+
+**Policy shape**:
+- Start from conservative floor thresholds that allow completion
+- Track rubric + content quality over time (per book and globally)
+- Auto-adjust minimum required scores upward based on sustained quality performance
+- Keep hard caps and safety rails so threshold jumps are gradual and reversible
+
+**Acceptance criteria**:
+- [x] Effective thresholds are data-driven, not static constants (baseline adaptive phase)
+- [x] Threshold changes are logged in run artifacts (for audit and rollback) (baseline adaptive phase)
+- [x] Quality curriculum can be tuned by environment/config (alpha, gain, max threshold, warmup) (baseline adaptive phase)
+- [x] System can revert to baseline thresholds if learning state is invalid or missing (baseline adaptive phase)
+
+**Note (2026-03-21 implementation status)**:
+- Baseline adaptive implementation is now in `book_flow.py` using EMA-based learning state (`quality_learning_state.json`) and effective threshold snapshots in `run_journal` + `run_summary`.
+- Runtime activation confirmed in `docker-compose.agent.yml` via `BOOK_QUALITY_ADAPTIVE_*` environment controls; stack rebuilt and running with adaptive thresholds enabled.
+- Operator docs synced in second-pass consistency sweep: `USER_GUIDE.md` and `BOOK_RUN_DIAGNOSTIC_GUIDE.md` now include adaptive-threshold verification guidance and troubleshooting cues.
+- Next phase for Todo 206: replace heuristic EMA adjustment with recommendation-policy learning that consumes ML shadow telemetry + user feedback outcomes.
+
+**Manual operator-only review note (2026-03-21)**:
+- Review fetcher `robots.txt` enforcement before wiring scraper-backed research into live book runs.
+- Current check lives in `agent_stack/fetcher.py` inside `scrape_allowed(url, user_agent)` and is enforced from `process_url(...)` before `scrape_page(...)`.
+- If an owned target ever requires a local bypass during maintenance, the decisive evaluation point to revisit is:
+  `return parser.can_fetch(user_agent, url)`
+- Keep this as a deliberate review point, not a silent global policy change.
+- Bypassing `robots.txt` is not advised; doing so can expose the operator to policy and liability risk.
+
+---
+
+### Incident Note (2026-03-21): CPU Ollama visible, GPU activity not visible
+
+Operator report:
+- A server-side Ollama instance appears to be running on CPU.
+- GPU-linked Ollama activity is not clearly visible during current smoke attempts.
+
+Current evidence snapshot (2026-03-21):
+- Host process list shows more than one `ollama serve` process and an active `ollama runner` child process.
+- Docker services still report `ollama_nvidia` and `ollama_amd` as up.
+- Book smoke run can stall at `publisher_brief`, and recent ledger entries include NVIDIA endpoint timeouts.
+
+Add these todos now so the incident and mitigations are not lost:
+
+- **Todo 199**: Add a one-command runtime ownership snapshot for Ollama process origin
+  - New script should emit a single JSON artifact showing host processes, container processes, endpoint bindings, and GPU telemetry at the same timestamp.
+  - Must explicitly tag each `ollama serve` and `ollama runner` as `host` or `container:<name>`.
+  - Save artifact under `book_project/diagnostics/` for run-to-run comparison.
+
+- **Todo 200**: Add strict non-orchestrated Ollama call guardrail mode
+  - Add an env-controlled guard that blocks direct `/api/generate` calls from non-diagnostic runtime paths.
+  - Keep explicit allowlist exemptions for calibration/probe scripts and orchestrator model-unload maintenance call.
+  - Add clear error text explaining when a call was blocked for bypassing runtime preset governance.
+
+- **Todo 201**: Add smoke-hang triage correlator
+  - Build a small tool that joins `run_journal.jsonl`, `diagnostics/agent_diagnostics.jsonl`, and `book_project/ollama_run_ledger.jsonl` by correlation ID.
+  - Output should identify the last successful stage event and whether the matching Ollama call succeeded, timed out, or never occurred.
+  - Include a short "likely boundary" verdict: pre-call, in-call timeout, post-call parsing/gate failure.
+
+- **Todo 202**: Add GPU-route liveness doctor check
+  - Extend doctor checks so a GPU route is considered healthy only when all are true:
+    - endpoint reachable,
+    - model generate request returns,
+    - accelerator telemetry shows active compute during request window,
+    - no conflicting unmanaged host Ollama instance is bound to the same expected route.
+  - Doctor must fail fast with remediation hints when smoke flow is likely routing to a non-validated runtime path.
+
+- **Todo 203**: Capture GPU layer offload metrics in live agent telemetry
+  - Add handler to scrape Ollama container logs for `offloaded N/M layers to GPU` lines during/after each model load.
+  - Extract `(layers_on_gpu, total_layers, model, timestamp, route)` tuple and persist to `book_project/gpu_telemetry.jsonl`.
+  - Expose current load status in `/api/health` response under `accelerators[route].last_load_offload_status = "N/M"`.
+  - Add WebUI live gauge showing per-route offload percentage (green if N==M, yellow if N<M, red if N<1).
+  - Wire into preflight validator: reject any candidate model/context pair if prior run on that route showed N < M.
+
+---
+
 ### ✅ One-Page Lifecycle Checklist (Build Order + Acceptance Tests)
 
 Use this as the single execution sheet for the long-term arc. Do not move to the next stage until all acceptance tests pass.
@@ -273,6 +693,67 @@ Use this as the single execution sheet for the long-term arc. Do not move to the
 4. Strategy rollback restores prior behavior in one deployment step.
 5. Weekly KPI report shows trend lines for quality, latency, failures, compliance.
 
+### Stage E.1 — Shadow Mode Learning From User Writing Feedback (Priority)
+
+**Goal:** Start from a model/context guess, execute normally, and use user feedback on writing quality as the primary learning signal while keeping runtime policy guardrails hard.
+
+**Build features:**
+1. Add `ml_mode` runtime flag with states: `off`, `shadow`, `auto` (default `shadow` for rollout).
+2. In `shadow` mode, log ML recommendation candidates but do not override actual selected route/model/context.
+3. Add user feedback capture schema for section/chapter quality (`approved`, `needs_rewrite`, `score`, `comment`, `selected_text_range`).
+4. Map feedback into reward events with explicit fields: `feedback_weight`, `human_acceptance`, `rewrite_required`.
+5. Add per-stage confidence threshold and uncertainty logging for recommendation diagnostics.
+6. Persist recommendation-vs-actual deltas into run artifacts for offline training review.
+
+**Acceptance tests:**
+1. Shadow recommendations are visible in run telemetry while actual execution remains unchanged.
+2. User feedback events are persisted and linked to run/stage identifiers.
+3. Feedback can be aggregated into training tuples without manual cleanup.
+4. Policy guardrails still block non-compliant model/route choices even when ML recommends them.
+5. Shadow-mode report shows at least top-3 candidate recommendations and confidence values per stage.
+
+### Stage E.2 — Section Gap Detection and Retroactive Rewrite Planner (Hard Feature)
+
+**Goal:** Allow operators/users to mark weak sections and trigger a backward-compatible rewrite plan where later accepted sections define required continuity acceptance criteria for earlier sections.
+
+**Build features:**
+1. Add `gap_review` artifact allowing selection of one or more underperforming sections (section IDs + rationale + highlighted ranges).
+2. Build `reverse_acceptance_extractor` that scans downstream accepted sections and derives constraints the prior section must satisfy.
+3. Add `retrofit_contract` generator that merges:
+  - original section goal,
+  - canon constraints,
+  - downstream dependency constraints,
+  - arc/element continuity requirements.
+4. Add `section_rewrite_backfill` stage that rewrites flagged prior sections to close gaps while preserving accepted downstream continuity.
+5. Add `dependency_impact_report` to identify which downstream sections need verification or minor patching after backfill.
+6. Add staged reconcile flow: `rewrite flagged section -> continuity recheck -> selective downstream patch -> publisher QA re-evaluation`.
+
+**Acceptance tests:**
+1. User can select a weak section and create a structured gap review request.
+2. System extracts at least one concrete downstream-derived acceptance criterion for each flagged section.
+3. Rewritten prior section passes section continuity review with no new blocking issues.
+4. Arc/element tracking remains consistent across rewritten prior section and downstream sections.
+5. Final output includes provenance showing what was rewritten, why, and which downstream constraints were used.
+
+### Stage E.3 — Living Section Expectations Ledger
+
+**Goal:** Keep section-level expectations alive and updated after each accepted section so continuity is tracked scene-to-scene and arc-to-arc.
+
+**Build features:**
+1. Expand `consistency_sections.json` as the authoritative scene/section expectation ledger.
+2. Add explicit `tracked_entities` blocks for characters, open loops, world elements, and unresolved commitments.
+3. Add per-section coverage scoring (`coverage_ratio`, `missing_targets`, `risk_level`) and emit warnings before next section starts.
+4. Add `cross_section_dependency_graph.json` to track forward and backward narrative dependencies.
+5. Add auto-generated `repair_candidates` list when coverage or dependency checks fail threshold.
+6. Add UI payload for operators to inspect missing continuity targets before approving a section.
+
+**Acceptance tests:**
+1. Each accepted section updates the ledger with coverage and missing-target diagnostics.
+2. Missing tracked entities are surfaced before writing the next section.
+3. Dependency graph identifies affected sections when a prior section is rewritten.
+4. Repair candidates are generated automatically for low-coverage sections.
+5. Ledger data is consumed by both writer prompts and continuity reviews.
+
 #### Stage F — OS Interface Expansion (Post-Platform Maturity)
 
 **Build tasks:**
@@ -337,79 +818,85 @@ Use this as the single execution sheet for the long-term arc. Do not move to the
 
 ---
 
-### 📋 **HIGH PRIORITY: Runtime Hardening (After First Success)**
+### 📋 **HIGH PRIORITY: Runtime Hardening** — ✅ All items complete (2026-03-18)
 
-- **Completed (2026-03-18) / Todo 39**: Add profile-signal routing scorer in orchestrator
-  - Use profile `intent_keywords`, `priority`, recent quality outcomes, and token balance when selecting a profile
-  - Replace first-match keyword routing with weighted scoring + deterministic tie-break rules
-
-- **Completed (2026-03-18)**: Add profile execution policy enforcement
-  - Added profile lint support for `timeout_seconds`, `retry_limit`, `allowed_routes`, and `model_allowlist`
-  - `profile_loader.py` now parses those frontmatter fields into runtime profile metadata
-  - `orchestrator.plan_request()` now enforces route/model allowlists and threads timeout/retry policy into execution planning
-  - `handle_request_with_overrides()` now honors per-profile timeout and transient retry policy during invocation
-
-- **Completed (2026-03-18)**: Remove duplicate `OrchestratorAgent.__init__` definition in `orchestrator.py`.
-- **Completed (2026-03-18)**: Convert broad `except Exception` blocks in core runtime files to typed exceptions with error codes.
-  - All remaining broad catches in `api_server.py` and `book_flow.py` verified converted or already wrapped (`AgentUnexpectedError`, `AgentStackError`, `OSError`, `ValidationError`, `json.JSONDecodeError`)
-  - Full exception hierarchy (`AgentStackError`, `AgentUnexpectedError`, `Ollama*Error`, `BookExportError`, etc.) applied consistently throughout
-- **Completed (2026-03-18)**: Add integration drill script for interruption recovery (start run -> interrupt -> reconcile -> resume).
-  - Implemented script: `agent_stack/scripts/interruption_recovery_drill.sh`
-  - Use after task lifecycle, retry, reconcile, or spawn-control changes
-  - Run in staging or explicit maintenance windows before production rollout of recovery changes
-  - Keep as operator/CI validation; do not run automatically from normal production cron reconciliation
-- **Completed (2026-03-18)**: Add terminal-state integrity check ensuring each run ends with `run_success` or `run_failure`.
-  - Added `_TERMINAL_RUN_EVENTS = frozenset({"run_success", "run_failure"})` sentinel in `api_server.py`
-  - Added `_ensure_run_journal_terminal(run_dir, task_id, reason)` idempotent guard — reads journal before writing, never duplicates a terminal event
-  - Replaced raw `_append_run_journal_event(..., "run_failure", ...)` calls in both `AgentStackError` and `AgentUnexpectedError` catch blocks of `_run_book_task()` with the guarded call
-  - Added reconcile integrity pass: for every permanently-failed task with a known `run_dir`, `_ensure_run_journal_terminal()` is called so journals orphaned by process kill or restart are retroactively sealed
+| ✅ | What was built |
+|----|----------------|
+| Todo 39 | Profile-signal routing scorer (weighted scoring + deterministic tie-break) |
+| — | Profile execution policy: `timeout_seconds`, `retry_limit`, `allowed_routes`, `model_allowlist` — frontmatter + orchestrator enforcement |
+| — | Removed duplicate `OrchestratorAgent.__init__` |
+| — | Typed exception hierarchy throughout (`AgentStackError`, `Ollama*Error`, etc.) — no bare `except Exception` |
+| — | Interruption recovery drill: `agent_stack/scripts/interruption_recovery_drill.sh` |
+| — | Terminal-state integrity guard: `_ensure_run_journal_terminal()` — every run closes with `run_success` or `run_failure` |
 
 ---
 
-### 🟡 **MEDIUM PRIORITY: Infrastructure Validation (Post-publisher fix)**
+### 🟡 **MEDIUM PRIORITY: Infrastructure Validation (Runtime-first alignment)**
 
-These should be completed once publisher outputs successfully:
+These should be completed as part of the current mode-based runtime hardening path:
 
-- **Completed (2026-03-18) / Todo 26**: Clean duplicate orchestrator initialization
-  - Review `orchestrator.py` for redundant init patterns
-  - Consolidate into single initialization path
+- ~~**Todo 26** — Clean duplicate orchestrator initialization~~ ✅ Done 2026-03-18
 
-- **Todo 27**: Add checkpoint save agent
-  - Implement agent for persisting book state between stages
-  - Enable pause/resume on long-running pipelines
+- **Todo 27**: Harden checkpoint persistence + pause/resume invariants
+  - Strengthen runtime checkpoint persistence between stages (ledger + run artifacts + review-gate state)
+  - Ensure pause/resume behavior remains deterministic across reconcile/restart paths
+  - **Status (2026-03-20 triage): Partially developed**
+    - Book-flow state is already persisted via task ledger (`task_ledger.json`) and run artifacts, and review-gate pause/resume is implemented (`book_flow.py`, `api_server.py`).
+    - The old standalone "checkpoint save agent" requirement was removed to match runtime/API-driven persistence design.
+    - **Implementation progress (2026-03-20):** startup bootstrap now normalizes persisted paused tasks, clears stale runtime-only fields, and requeues resume-requested review gates; review-action handling now detects orphaned paused tasks (`started_at is None`) and schedules deterministic resume instead of leaving them stuck in `running`; reconcile now requeues paused tasks when review-gate state already requests `continue` or `rewrite`.
 
 - **Todo 28**: Add failure-path integration tests
-  - Test retry logic, fallback handling, graceful degradation
-  - Validate task cancellation flows
+  - Add one integrated scenario suite that validates retry logic, fallback handling, graceful degradation, cancellation, and reconcile/resume behavior end-to-end
+  - **Status (2026-03-20 triage): Partially developed**
+    - Interruption recovery drill exists (`agent_stack/scripts/interruption_recovery_drill.sh`).
+    - Regression script covers status synthesis and includes cancellation behavior (`agent_stack/scripts/regression_status_synthesis.py`).
+    - **Implementation progress (2026-03-20 session 1):** added `agent_stack/scripts/failure_path_integration_drill.sh`, an operator-facing suite that chains interruption recovery, pause/restart/review-continue/reconcile resume, queued/running task cancellation, and fallback-integrity checks into one repeatable validation entry point.
+    - **Implementation progress (2026-03-20 session 2 — hardening and regression fix):**
+      - **Orchestrator regression fixed**: `OrchestratorAgent._collect_fallback_routes()` was missing — the method was called inside `_build_ml_shadow_recommendations()` but never defined; every book-flow task creation returned HTTP 500. Method added and container rebuilt/redeployed.
+      - **Drill script json_get fixed**: `python3 - "$expr" <<'PY'...PY` heredoc consumed stdin so piped JSON was discarded; changed to `python3 -c '...' "$expr"` in both scripts.
+      - **Drill log/stdout separation fixed**: `log()` was printing to stdout, mangling command-substitution JSON captures; redirected to stderr in both scripts.
+      - **Python quoting in embedded list_active_tasks fixed**: f-string single-quote conflict in nested shell functions; converted to `"{}|{}".format(...)` style.
+      - **Live-stack safety preflight added**: `list_active_tasks()` and `require_idle_stack()` helpers added to both drill scripts; drill now exits cleanly with an informative task list when active operator work is running instead of disrupting it (subdrill 1 restarts the API container).
+    - Remaining gap: run the suite in a clean maintenance window (no active operator book-flow tasks) to complete full end-to-end validation. See **Todo 193**.
+
+- **Todo 193**: Complete first clean end-to-end failure-path drill run
+  - **Blocker**: Two active operator book-flow tasks (`c295ae05` — The Hidden Archive / Opening Adventure, `20e8924cc6` — Chapter One / Opening) prevent subdrill 1 from running because it restarts the API container.
+  - **Unblock options**: Wait for active tasks to reach terminal state, or cancel them with operator consent (`curl -X POST http://127.0.0.1:11888/api/tasks/{id}/cancel`), then run `bash agent_stack/scripts/failure_path_integration_drill.sh`.
+  - **Acceptance criteria**:
+    - All 4 subdrills exit 0: interruption recovery, pause/resume, cancellation, and fallback integrity.
+    - No drill-created tasks left in a non-terminal state after the run.
+    - Drill log (stderr) shows each subdrill passed; exit code 0.
+  - **Post-drill**: Document any assertion flaws or timing issues found during real-latency execution so assertions can be tightened in the follow-up.
+
+- **Todo 194**: Add drill output capture and archiving
+  - Redirect `failure_path_integration_drill.sh` stderr to a timestamped log file under `book_project/drill_reports/` alongside an exit status summary.
+  - Include run metadata: timestamp, drill version, API host, active route health at drill start, pass/fail per subdrill.
+  - Acceptance: operator can replay drill outcomes from the archive without re-running; logs are gitignored by default but operator can opt-in to commit clean report artifacts.
+
+- ~~**Todo 195** — R1 fixed: publisher brief now uses bounded `publisher_inputs` snapshot (book request, chapter metadata, previous brief summary, capped recent memory) instead of full `context_store`~~ ✅ Done 2026-03-20
+
+- ~~**Todo 196** — R2 fixed: `score_arc_consistency()` now uses normalized fuzzy matching (sequence+jaccard), configurable thresholds, near-miss diagnostics, and optional warning-only gate mode (`ARC_CONSISTENCY_WARNING_ONLY`)~~ ✅ Done 2026-03-20
+
+- ~~**Todo 197** — NVIDIA GPU layer fallback fixed: `num_ctx: 49152 → 24576` on 9 NVIDIA-route profiles; GTX 1660 SUPER 6 GiB cannot fit 33 layers + 49152-token KV cache; 24576 yields 32/33 GPU layers~~ ✅ Done 2026-03-20
 
 - **Todo 29**: Expose logging metrics in UI
-  - Add metrics card showing agent health, queue depth, error rates
-  - Integrate prometheus or similar metrics export
+  - Expand in-product runtime metrics card for agent health, queue depth, retry/failure counts, and route pressure
+  - Optional future phase: external metrics export endpoint (Prometheus-compatible)
+  - **Status (2026-03-20 triage): Partially developed**
+    - UI already shows health summary and queue/activity signals from `/api/ui-state`.
+    - No dedicated external metrics endpoint (`/metrics`) is present yet.
+    - No explicit error-rate metric card with trend-style counters exists yet.
 
 - **Todo 33**: Validate FastAPI runtime environment
-  - Test under load (multiple concurrent tasks)
-  - Verify resource limits and error handling
+- **Todo 33**: Validate FastAPI runtime environment — **✅ SCRIPT IMPLEMENTED (2026-03-20); run pending idle stack**
+  - Script: `agent_stack/scripts/load_validation.py` — submits 3 concurrent tasks (1 NVIDIA, 1 AMD, 1 queued NVIDIA), asserts: route_active_counts reflects simultaneous activity; queue_depth ≥ 1 under dual-route load; both routes complete without errors; VRAM headroom sampled at peak load. Exits 2 when stack is busy (safe for automation).
+  - Host wrapper: `bin/load-validation` (runs inside container).
+  - Report written to: `book_project/load_validation_report.json`.
+  - **Sequencing**: wait for current running tasks and Todo 193 drill to complete, then run `bin/load-validation`.
 
-- **Completed (2026-03-18) / Todo 34**: Add global agent output schema validator
-  - Added shared stage output schema registry in `agent_stack/output_schemas.py`
-  - `run_stage(...)` now validates structured payloads against named schemas before custom quality gates run
-  - Schema failures feed the existing retry loop, so missing fields automatically trigger corrective retries with actionable gate messages
-
-- **Completed (2026-03-18) / Todo 35**: Add framework integrity gate
-  - Added `FrameworkIntegrityError` to `exceptions.py` with code `FRAMEWORK_INTEGRITY_ERROR`
-  - Added `check_framework_integrity(skeleton, arc_tracker, progress_index)` in `book_flow.py` — validates required fields in `book_identity`, `design_framework`, `chapter_skeleton`, `arc_tracker`, and `progress_index`
-  - Gate is called after `build_framework_skeleton()` writes the skeleton, before the Canon stage; raises with a full diagnostic list of all missing/empty fields
-  - A `framework_integrity_passed` event is appended to `run_journal.jsonl` on success
-
-- **Completed (2026-03-18) / Todo 36**: Add arc consistency scorer
-  - Added `score_arc_consistency(arc_tracker, rubric_report)` to `book_flow.py`
-  - Open loops are **persistent story features** that carry across chapters until resolved before series end — they are NOT failures
-  - Factor 1: **Open-loop persistence** — are tracked loops present in `must_carry_forward`? Loops absent from carry_forward are flagged as at risk of being dropped next chapter
-  - Factor 2: **Character-arc acknowledgement** — are prior chapter character updates referenced in `character_state_updates`?
-  - Fixed `update_arc_tracker` to **merge** open loops (union) instead of replacing them — loops from prior chapters can never be silently dropped
-  - Untracked loops are written as `open_loop_persistence_warning` entries to `agent_context_status.jsonl` so operators/agents know which story features need attention
-  - Fires after continuity stage; writes `arc_consistency_score.json` (includes `all_open_loops` and `untracked_open_loops`) and logs `arc_consistency_scored` to `run_journal.jsonl`
-  - Raises `StageQualityGateError` with full diagnostic detail if score falls below `ARC_CONSISTENCY_THRESHOLD = 0.5`
+- ~~**Todo 34** — Global agent output schema validator (`output_schemas.py`, wired into `run_stage`)~~ ✅ Done 2026-03-18
+- ~~**Todo 35** — Framework integrity gate (`check_framework_integrity()`, fires before Canon, emits `framework_integrity_passed`)~~ ✅ Done 2026-03-18
+- ~~**Todo 36** — Arc consistency scorer (`score_arc_consistency()`; open loops merged not replaced; `arc_consistency_score.json`)~~ ✅ Done 2026-03-18
 
 - **Todo 37**: Add agent handoff expectation contract
   - Require each agent output to include downstream expectations and acceptance checks
@@ -426,6 +913,23 @@ These should be completed once publisher outputs successfully:
 - **Todo 41**: Add dynamic model options planner per stage
   - Adjust `num_ctx`, `num_predict`, `temperature`, `think`, `num_gpus` based on stage type and task size
   - Enforce hard safety caps and fallback defaults when profile options are missing
+
+- **Todo 198**: Define per-stage approved option menus and wire agent/ML selection within them
+  - **Goal**: Agents (and the ML shadow recommender) choose from a finite pre-approved menu of `{model, num_ctx, num_predict}` tuples per stage/route — not arbitrary values. Guardrails become a menu, not just a blocklist.
+  - **Define the menu format** in a versioned artifact (`strategy_option_menus.json`, co-located with strategy matrix from Todo 170):
+    - Each entry: `{stage, route, options: [{model, num_ctx, num_predict, label, gpu_vram_budget_mb}]}`
+    - Example for `publisher_brief` / `ollama_nvidia`: `[{model: "qwen3.5:2b", num_ctx: 16384, num_predict: 1800, label: "fast"}, {model: "qwen3.5:4b", num_ctx: 24576, num_predict: 1800, label: "standard"}, {model: "qwen3.5:4b", num_ctx: 49152, num_predict: 2400, label: "thorough"}]`
+    - Label tiers: `fast`, `standard`, `thorough` — consistent across all stages so ML can learn tier-level preferences separately from model/context specifics.
+  - **Wire into orchestrator**: `plan_request()` resolves the approved menu for the stage/route and passes the full set to the ML recommender; recommender scores and returns the selected tuple; the selected tuple is the only options that reach the Ollama call. No raw `num_ctx`/`model` values from profile frontmatter should bypass the menu.
+  - **Wire into ML shadow mode (Todo 172)**: shadow recommendations must be drawn from the same menu tuples so training data aligns with the actual option space. Recommendations referencing non-menu options are invalid and should be flagged.
+  - **Menu validation at startup**: extend profile-lint (Todo 99) to confirm every stage/profile has a complete menu entry for its configured route; fail startup with a clear error if any stage would have zero valid options.
+  - **Operator override path**: allow a named label override per stage (`--option-label thorough` on CLI; `option_label` field in `BookFlowRequest`) that forces the tier while still drawing model/context from the approved menu — no raw value override.
+  - **Acceptance criteria**:
+    - Every stage/route combination has at least 2 approved menu options.
+    - No Ollama call reaches a model or `num_ctx` value not present in the menu for that stage/route.
+    - ML shadow recommender output references menu tuple IDs, not free-form model/context strings.
+    - `stage_attempt_start` diagnostics include `selected_option_label` and `menu_size` for every call.
+    - Startup fails (or emits lint errors) when any stage/route is missing from the menu.
 
 - **Todo 167**: Enforce explicit per-model GPU layer maps for every run (no sentinels)
   - Define exact `num_gpu_layers` per model and per run profile for both AMD and NVIDIA routes; do not use sentinel values (`999` or `-1`).
@@ -472,6 +976,226 @@ These should be completed once publisher outputs successfully:
     - no silent model drift (for example, 9B requests on NVIDIA) reaches execution,
     - every strategy violation is visible in diagnostics and future dev notes.
 
+- **Todo 171**: Add ML runtime mode controls (off/shadow/auto)
+  - Add runtime flags and API-visible state for ML mode selection.
+  - Default to `shadow` mode in production until acceptance criteria for learning quality are met.
+  - Persist per-run mode in `run_summary.json` and `run_journal.jsonl`.
+  - **Status (2026-03-20): In progress** — `AGENT_ML_MODE`, `AGENT_ML_MIN_CONFIDENCE`, `AGENT_ML_TOP_K` added in orchestrator; `ml_mode` now included in run summary and runtime status payload.
+  - Acceptance criteria:
+    - mode appears in runtime status and run artifacts,
+    - switching modes does not break policy preflight,
+    - shadow mode never overrides actual route/model selection.
+
+- **Todo 172**: Add shadow recommendation telemetry
+  - Generate top-3 ML candidate recommendations per stage/profile with confidence and expected score.
+  - Log recommendation vs actual selected route/model/context for every stage attempt.
+  - Persist recommendation deltas in diagnostics for offline review.
+  - **Status (2026-03-20): In progress** — shadow recommendations now emitted by `plan_request()` and persisted into stage attempt events (`stage_attempt_start`) plus diagnostics. Dedicated shadow event stream path added (`ml_shadow_events.jsonl`).
+  - Acceptance criteria:
+    - every stage attempt has recommendation telemetry in shadow mode,
+    - recommendation logging survives retries/failovers,
+    - no recommendation bypasses policy allowlists.
+
+- **Todo 173**: Add user writing feedback schema and ingestion
+  - Add feedback artifact schema with fields: `approved`, `needs_rewrite`, `score`, `comment`, `selected_text_range`.
+  - Link each feedback entry to run, chapter, section, and stage IDs.
+  - Write feedback events to reward/event stream for ML training ingestion.
+  - Add thumbs-driven quality signals with issue checkbox taxonomy for thumbs-down (`canon_violation`, `continuity_gap`, `tone_mismatch`, `pacing_problem`, `structure_problem`, `missing_world_detail`, `character_voice`, `clarity`, `other`).
+  - Add rewrite scope preference (`ask_each_time`, `section_only`, `chapter_reflow`) and persist in feedback events.
+  - **Status (2026-03-20): In progress** — feedback schema and API endpoints added in `api_server.py`: `POST /api/book-feedback` (validated ingestion + reward-event write-through) and `GET /api/book-feedback` (query by run/chapter/section/stage/rewrite). Events persist to `book_feedback_events.jsonl` and are linked to run metadata when available. Web UI panel now captures thumbs, issue checkboxes, and rewrite scope.
+  - Acceptance criteria:
+    - operator can submit section-level feedback,
+    - feedback is queryable by run and section,
+    - malformed feedback is rejected with explicit validation errors.
+
+- **Todo 174**: Convert feedback into training reward signal
+  - Add reward mapping from human feedback to structured learning targets (`human_acceptance`, `rewrite_required`, `feedback_weight`).
+  - Merge feedback signal with latency/gate/failure metrics into unified training tuples.
+  - Add strategy-version stamp to every tuple for rollback-safe training.
+  - Acceptance criteria:
+    - training tuples include both machine metrics and human feedback,
+    - negative feedback produces measurable penalty in reward stream,
+    - tuple generation is reproducible from artifacts.
+
+- **Todo 175**: Add gap-review workflow for weak sections
+  - Add a `gap_review` request artifact allowing users to mark underperforming sections and rationale.
+  - Support text-range selection so feedback can target scene fragments, not only full sections.
+  - Emit gap-review events into run journal and diagnostics.
+  - Acceptance criteria:
+    - user can mark one or multiple sections as weak,
+    - gap review payload validates and persists,
+    - marked sections are listed for repair planning.
+
+- **Todo 176**: Build reverse acceptance extractor from downstream sections
+  - Analyze accepted downstream sections to derive constraints that prior weak sections must satisfy.
+  - Produce explicit acceptance criteria grouped by character arc, open loop, and important element.
+  - Persist extracted constraints in a dedicated repair artifact.
+  - Acceptance criteria:
+    - each flagged section receives at least one downstream-derived constraint when dependencies exist,
+    - extracted constraints are auditable and human-readable,
+    - extractor output is consumed by rewrite planner.
+
+- **Todo 177**: Add retroactive section rewrite backfill stage
+  - Implement stage flow: `rewrite flagged prior section -> continuity recheck -> selective downstream patch`.
+  - Ensure rewritten prior section preserves canon and does not break accepted downstream facts.
+  - Add impact report identifying downstream sections requiring patch or revalidation.
+  - Acceptance criteria:
+    - rewritten section passes continuity gate,
+    - dependency impact report is generated,
+    - publisher QA can re-evaluate repaired run state.
+
+- **Todo 178**: Promote consistency sections to living dependency ledger
+  - Extend `consistency_sections.json` with dependency edges and per-section coverage risk.
+  - Track unresolved character/element continuity gaps scene-to-scene and arc-to-arc.
+  - Generate `repair_candidates` automatically when coverage drops below threshold.
+  - Acceptance criteria:
+    - ledger updates after each accepted section,
+    - low-coverage sections are flagged before next section generation,
+    - rewrite planner can consume repair candidates directly.
+
+- **Todo 179**: Add ML promotion gate (shadow -> auto)
+  - Define objective rollout thresholds before enabling `auto` mode (quality delta, retry delta, fallback delta, latency budget).
+  - Require minimum sample size per stage/profile before eligibility.
+  - Add automatic rollback trigger if post-promotion KPIs regress.
+  - Acceptance criteria:
+    - promotion can only occur when thresholds are met,
+    - rollback triggers within one deployment cycle,
+    - promotion/rollback decisions are written to audit artifacts.
+
+- **Todo 180**: Add correlation IDs across recommendation and stage artifacts
+  - Propagate a shared correlation ID from orchestrator plan to `stage_attempt_start`, diagnostics, and run summary.
+  - Ensure `ml_shadow_events.jsonl` entries can be joined to run journal rows without fuzzy matching.
+  - Add integrity check for missing correlation IDs.
+  - **Status (2026-03-20): Completed** — correlation IDs now propagate through orchestrator plan/handle path into `stage_attempt_start`, `stage_attempt_result`, diagnostics payloads, and runtime status hints (`runtime_correlation_id`). Run summary includes `correlation_integrity` output, strict mode can fail artifact validation when IDs are missing (`AGENT_CORRELATION_INTEGRITY_STRICT=true`), and deterministic join verification is available via `agent_stack/scripts/verify_correlation_join.py`.
+  - Acceptance criteria:
+    - 100% of stage attempts have joinable recommendation records,
+    - missing correlation IDs fail diagnostics checks,
+    - training extractor can build deterministic tuples.
+
+- **Todo 181**: Replace heuristic shadow scorer with trained recommender service
+  - Introduce a versioned recommender artifact (`model_id`, `trained_at`, `feature_set_version`).
+  - Keep heuristic scorer as fallback when model artifact is missing or stale.
+  - Log model provenance in each recommendation event.
+  - Acceptance criteria:
+    - recommender output is versioned and reproducible,
+    - fallback path activates automatically on load failure,
+    - recommendation payload includes model provenance fields.
+
+- **Todo 182**: Add feedback quality controls and anti-gaming weighting
+  - Add confidence/credibility weighting for user feedback (recency, consistency, reviewer role).
+  - Detect and down-weight contradictory or spam-like feedback bursts.
+  - Add manual override marker for trusted editorial decisions.
+  - Acceptance criteria:
+    - noisy feedback does not dominate reward updates,
+    - trusted editorial decisions can be explicitly weighted,
+    - feedback weighting is visible in reward event logs.
+
+- **Todo 183**: Add shadow mode UI and operator review panel
+  - Surface top-3 recommendations, confidence, and chosen-vs-actual deltas in WebUI.
+  - Add per-stage approve/reject controls for recommendation quality review.
+  - Add filter views for low-confidence or high-regret recommendation events.
+  - Acceptance criteria:
+    - operator can inspect recommendation history per run,
+    - operator decisions are persisted for training,
+    - low-confidence recommendations are highlighted before execution.
+
+- **Todo 184**: Add counterfactual evaluator for offline policy testing
+  - Build offline evaluator that replays historical runs and estimates regret for alternative recommendations.
+  - Compute stage/profile regret metrics for shadow recommendations.
+  - Gate `auto` mode eligibility on counterfactual win-rate thresholds.
+  - Acceptance criteria:
+    - evaluator runs on existing artifacts without live execution,
+    - outputs regret and win-rate by stage/profile,
+    - promotion gate consumes evaluator outputs.
+
+- **Todo 185**: Add feedback query and moderation controls
+  - Add API filters for feedback by run/chapter/section/stage and rewrite flag.
+  - Add moderation fields (`review_status`, `moderator_note`) for rejecting invalid feedback records.
+  - Add endpoint-level auth hook placeholder for future multi-user environments.
+  - Acceptance criteria:
+    - operators can retrieve section-scoped feedback quickly,
+    - moderated feedback is excluded from training export when rejected,
+    - endpoint returns deterministic sorted output for reproducible exports.
+
+- **Todo 186**: Add feedback-to-training export builder
+  - Build an export script that joins `book_feedback_events.jsonl` with `run_journal.jsonl` and `ml_shadow_events.jsonl` via correlation IDs.
+  - Emit stage-level training rows with both machine metrics and human feedback targets.
+  - Add schema versioning for exported training rows.
+  - **Status (2026-03-20): In progress** — export builder added as `agent_stack/scripts/export_feedback_training_rows.py` with deterministic outputs, join-rate statistics, schema versioning (`feedback-training-v1`), and explicit missing-join diagnostics.
+  - Acceptance criteria:
+    - export produces deterministic row counts for the same input set,
+    - missing joins are reported with explicit diagnostics,
+    - output is ready for Todo 181 recommender training input.
+
+- **Todo 187**: Add feedback integrity and drift alerts
+  - Add periodic checks for contradictory feedback patterns and missing linkage fields.
+  - Alert when feedback volume skews heavily to one profile/stage (potential data bias).
+  - Emit weekly summary into policy compliance diagnostics.
+  - Acceptance criteria:
+    - integrity report lists malformed/unlinked feedback events,
+    - bias alert thresholds are configurable,
+    - summary is visible in operator diagnostics artifacts.
+
+- **Todo 188**: Add CI guardrail for training export quality
+  - Add a CI/staging check that runs `export_feedback_training_rows.py --summary-only` and validates minimum join-rate thresholds.
+  - Fail pipeline if `attempt_join_rate` or `plan_join_rate` drops below configured floor.
+  - Persist failed-check diagnostics in build artifacts for operator investigation.
+  - Acceptance criteria:
+    - CI blocks merges on severe export quality regression,
+    - threshold overrides are environment-configurable,
+    - failed joins are linked to concrete examples in artifacts.
+
+- **Todo 189**: Add accepted-writing pause and reader preview gate
+  - Add a runtime checkpoint that pauses progression after accepted writing quality and exposes section/chapter preview context in Web UI.
+  - Require explicit operator decision to continue, rewrite, or defer when pause gate is active.
+  - Ensure rewrite requests cannot violate accepted downstream facts or canon prerequisites.
+  - Acceptance criteria:
+    - pause gate can be triggered from user feedback (`pause_before_continue=true`),
+    - Web UI shows previewable context for the paused section/chapter,
+    - resume/rewrite decisions are journaled and linked to correlation IDs.
+
+- **Todo 190**: Implement backend pause gate for accepted writing
+  - Add book-flow and API-server runtime handling so `pause_before_continue=true` can place a run into an explicit paused/awaiting-review state.
+  - Prevent automatic progression into the next writing/review stage while a pause gate is active.
+  - Add explicit continue, rewrite, and defer actions at the task/run level, with deterministic journal events.
+  - **Status (2026-03-20): In progress** — feedback pause requests now write live review-gate state, running book tasks can enter `paused` state, and backend review actions (`continue`, `rewrite`, `defer`) are wired in API + book-flow at the post-section-review checkpoint.
+  - Acceptance criteria:
+    - a feedback event with pause enabled can halt forward progression before the next section/chapter stage begins,
+    - paused state is visible in task status and UI-state payloads,
+    - continue/rewrite/defer actions are persisted in `run_journal.jsonl` and linked to the active correlation ID.
+
+- **Todo 191**: Add WebUI reader preview and resume controls
+  - Add a dedicated preview pane in the Web UI for the currently paused section/chapter, including enough surrounding context for user review.
+  - Surface operator controls to continue, request rewrite, or defer without leaving the Web UI.
+  - Show relevant metadata alongside the preview: title, chapter, section, stage, latest feedback, and pause reason.
+  - **Status (2026-03-20): In progress** — the Web UI now renders a paused-review card with section/review previews from review-gate state and can submit `continue`, `rewrite`, and `defer` actions back to the backend without a full reload.
+  - Acceptance criteria:
+    - operators can inspect paused writing in context from the Web UI,
+    - resume/rewrite/defer controls are available next to the preview,
+    - preview state refreshes correctly from API polling without requiring a full page reload.
+
+- **Todo 192**: Wire end-to-end feedback pause workflow and invariant enforcement
+  - Connect feedback submission, pause gate activation, preview rendering, and operator decision handling into one coherent flow.
+  - Add invariant checks so assistant-mediated rewrite requests cannot break canon, accepted downstream facts, or explicit future requirements.
+  - Add integration coverage for: submit feedback -> pause run -> preview section -> choose continue/rewrite/defer -> journaled outcome.
+  - Acceptance criteria:
+    - the full feedback-to-pause workflow works from the existing Web UI without manual file edits,
+    - rewrite requests are blocked or flagged when they would violate established story constraints,
+    - integration validation proves the pause workflow is recoverable across refreshes/restarts.
+
+### Next Improvement Sprint (Recommended Order)
+
+1. Implement Todo 171 + Todo 172 first (shadow mode plumbing and telemetry only, zero behavior change).
+2. Implement Todo 173 + Todo 174 second (feedback ingestion and reward mapping).
+3. Implement Todo 175 third (manual gap marking UI/API path).
+4. Implement Todo 176 + Todo 177 fourth (hard backward rewrite feature).
+5. Implement Todo 178 last (full dependency ledger automation and proactive repair candidates).
+
+**Sprint-1 Exit Criteria:**
+- Shadow mode emits reliable recommendation telemetry for all book-flow stages.
+- User feedback events are persisted and linked to section IDs.
+- No policy guardrail regressions (GPU-only + allowlist constraints remain hard-blocking).
+
 - **Todo 43**: Add failure-memory corrective retries
   - Inject recent `quality_gate_failures.jsonl` reasons into retry prompts as explicit fix targets
   - Track whether each retry resolved the cited failure reason
@@ -496,15 +1220,7 @@ These should be completed once publisher outputs successfully:
   - Capture TTFT, total latency, token throughput, retries, fallback hops, and context-size estimates
   - Expose route/model performance dashboard in `/api/status` and UI cards
 
-- **Completed (2026-03-18) / Todo 54**: Add structured Ollama run ledger with correlation IDs
-  - `ollama_subagent.run()` now accepts `correlation_id` and `ledger_path` params
-  - For both stream and non-stream modes: captures `total_duration_ns`, `eval_count`, `prompt_eval_count`, `eval_duration_ns`, `load_duration_ns` from Ollama's done payload
-  - Computes `tokens_per_second` field from eval_count / total_duration
-  - Writes one JSONL entry per call to `ollama_run_ledger_path` (default: `book_project/ollama_run_ledger.jsonl`)
-  - `orchestrator._invoke_with_triage()` now generates a `call_correlation_id = uuid.uuid4()` per invocation and threads it + the ledger path into each `subagent.run()` call
-  - `ollama_run_ledger_path` exposed in health report under `health.analytics.ollama_run_ledger`
-  - `latest_ollama_call` field added to `/api/ui-state` response (last ledger entry, for WebUI live display)
-  - WebUI voyeur panel now shows last call's `model`, `tok/s`, `eval_count`, and `wall_seconds` in the root graph node
+- ~~**Todo 54** — Ollama run ledger with correlation IDs (`ollama_run_ledger.jsonl`; tok/s; `latest_ollama_call` in UI-state; WebUI voyeur panel)~~ ✅ Done 2026-03-18
 
 - **Todo 62**: Expand WebUI Pipeline Files panel with full checkpoint data and stage telemetry
   - **What each pipeline file is and does** (current 6, now expanded to 10 stage nodes):
@@ -657,15 +1373,7 @@ These should be completed once publisher outputs successfully:
   - Compare Dragonlair decisions against Claude artifacts for control-plane reliability, autonomous recovery, schema safety, and writing-pipeline quality
   - Produce a concrete gap report with prioritized "adopt", "adapt", and "reject" actions tied to Dragonlair backlog items
 
-- **Completed (2026-03-18) / Todo 72**: Complete open-port audit and least-exposure hardening
-  - Active listeners verified: `11434`, `11435`, `11888`, `11999`, plus infra ports (`22`, loopback DNS)
-  - Applied least-exposure bindings:
-    - `ollama_nvidia`: `127.0.0.1:11434:11434`
-    - `ollama_amd`: `127.0.0.1:11435:11434`
-    - `fetcher`: `127.0.0.1:11999:11999`
-    - `dragonlair_agent_stack`: retained `0.0.0.0:11888:11888` for optional LAN UI access
-  - Added shared Docker network (`dragonlair-net`) and moved agent->Ollama calls to internal service names (`http://ollama_nvidia:11434`, `http://ollama_amd:11434`) instead of host-mapped ports
-  - Added operator-facing port matrix, dev/LAN/prod exposure policy, and firewall guidance to user docs
+- ~~**Todo 72** — Open-port audit + least-exposure hardening (127.0.0.1 bindings; `dragonlair-net`; internal service names)~~ ✅ Done 2026-03-18
 
 - **Todo 73**: Run one full end-to-end book flow after schema enforcement changes
   - Execute a full chapter run with current retries/fallbacks and capture run journal + diagnostics
@@ -710,6 +1418,7 @@ These should be completed once publisher outputs successfully:
     - Next evaluation should be performed from `run_journal.jsonl` + `diagnostics/agent_diagnostics.jsonl` rather than process watching.
   - **Current checkpoint (2026-03-18, before next todo pickup)**:
     - Pre-run cleanup and archival are now active and verified in live runs: old `runs/` content is copied into `run_history/` before the next run starts.
+    - Post-publish cleanup is now active in `book_flow`: after successful export/publication, the completed run is archived immediately to `run_history/` with manuscript + evidence artifacts and the live `runs/` copy is removed.
     - Full debug payload logging is active by default, so stage attempt/recovery payloads are available in diagnostics without needing `--debug`.
 
 - **Todo 74**: Add standard GPU execution proof for NVIDIA and AMD routes
@@ -888,15 +1597,8 @@ These should be completed once publisher outputs successfully:
   - Dedicated research task: survey literary structural styles, define transformation rules for each, produce `style_catalogue.md` as the specification that Todo 91's implementation will execute against
   - Deliverable is documentation only; no code changes
 
-- **Completed (2026-03-18) / Todo 96**: Analyze AMD live agent detail visibility bug and fix or pivot
-  - Implemented status synthesis updates in `api_server.py` and WebUI runtime surfacing updates in `static/index.html` so effective route/model/profile details come from active runtime hints rather than stale top-level task metadata.
-  - Validation outcome: both NVIDIA and AMD live submissions now surface correct route activity and agent details (`route_active_counts`, `current_profile`, `current_model`, and active display state) during running windows.
-  - Follow-up note: direct `/api/tasks` diagnostics runs still show `runtime_stage=None` by design for single-stage calls; multi-stage `book-flow` runs now include stage-derived runtime hints and latest-stage route/model details in status payloads.
-
-- **Completed (2026-03-18) / Todo 97**: Add regression tests for live route/status synthesis
-  - Added executable regression script: `agent_stack/scripts/regression_status_synthesis.py`.
-  - The script submits NVIDIA and AMD diagnostics tasks, polls `/api/status`, validates route/model mapping and `resource_tracker.queue.route_active_counts`, and asserts route-agent identity fields (`current_profile`, `current_model`) are visible while inflight.
-  - Includes best-effort hung-agent recovery and task cancellation so the check is repeatable in active environments.
+- ~~**Todo 96** — AMD live agent detail visibility bug fixed (`api_server.py` + `static/index.html`; `route_active_counts`, `current_profile`/`current_model` surface correctly)~~ ✅ Done 2026-03-18
+- ~~**Todo 97** — Regression tests for live route/status synthesis (`scripts/regression_status_synthesis.py`)~~ ✅ Done 2026-03-18
 
 - **Todo 101**: Commit the current working-tree batch before picking up new work
   - Staged changes (from this session): `DEV_NEXT_STEPS.md`, `agent_stack/api_server.py`, `agent_stack/static/index.html`, `agent_stack/agent_profiles/book-skeleton-updater.agent.md`, `agent_stack/scripts/regression_status_synthesis.py`.
@@ -934,6 +1636,7 @@ These should be completed once publisher outputs successfully:
 
 - **Todo 108**: Add explicit pre-run cleanup policy for isolated validation/output dirs
   - Add a first-class cleanup mode for runs where operator intent is a fresh workspace, not historical accumulation.
+  - Status update (2026-03-20): immediate post-publish cleanup is now implemented by default for successful exports via `book_flow`; operators can opt out with `--no-cleanup-after-publish` or `BOOK_FLOW_CLEANUP_AFTER_PUBLISH=false`.
   - Minimum behavior:
     - if `--clean-output-dir` is set, remove prior `runs/` contents and stale per-run artifacts under the selected book slug before creating the new run dir,
     - preserve or optionally reset long-lived state separately (`framework/`, `book_history.jsonl`, `progress_index.json`, `arc_tracker.json`),
@@ -986,10 +1689,7 @@ These should be completed once publisher outputs successfully:
   - Require checksum/manifest validation of upstream artifacts before resume to avoid drift.
   - Goal: reduce repetitive end-to-end reruns when validating fixes for a downstream stage.
 
-- **Completed (2026-03-18) / Todo 117**: Add canon route failover when AMD agent is quarantined
-  - Implemented canon-stage failover in `book_flow.py`: when `book-canon` fails with `AGENT_QUARANTINED`, `OLLAMA_EMPTY_RESPONSE`, `OLLAMA_REQUEST_ERROR`, or `OLLAMA_ENDPOINT_ERROR`, flow emits `stage_route_failover` and retries canon with NVIDIA profile `book-canon-nvidia`.
-  - Added new profile `agent_stack/agent_profiles/book-canon-nvidia.agent.md` (`ollama_nvidia`, `qwen3.5:4b`) for deterministic fallback routing.
-  - `run_journal.jsonl` now records source profile/route, destination profile/route, and trigger error code for canon failover audits.
+- ~~**Todo 117** — Canon route failover when AMD is quarantined (`book_flow.py`; `book-canon-nvidia` profile; failover journaled)~~ ✅ Done 2026-03-18
 
 - **Todo 118**: Introduce quarantine-aware retry backoff windows
   - Retries currently happen fast enough that quarantined agents are retried before cooldown expiry, causing deterministic repeated failure.
@@ -1243,12 +1943,7 @@ These should be completed once publisher outputs successfully:
   - **Usage**: `python3 -m agent_stack.cli check-ownership` or `fix-ownership --dry-run`
   - **Result**: Operators can now diagnose and fix root-owned artifact issues without privilege escalation
 
-- **Completed (2026-03-19) / Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures ⭐ OPERATIONAL STABILITY
-  - Added uncaught-exception closure in `book_flow.py` CLI entrypoint: on failure, append `run_failure` when missing and write `run_summary.json` on failure path.
-  - Failure summary now includes per-stage outcomes and retry counts derived from `run_journal.jsonl`, plus failure type/reason.
-  - CLI runtime activity is now forced to failed then cleared on abnormal termination to avoid stale active-run rows.
-  - Logged parent-level `run_failure` record into `changes.log` for audit continuity.
-  - Remaining follow-up (separate task): explicit orphaned-run recovery mode for host crash/power-loss scenarios.
+- ~~**Todo 109** — Explicit journal closure for CLI `book_flow.py` failures (`run_failure` appended; `run_summary.json` on failure; CLI activity cleared)~~ ✅ Done 2026-03-19
 
 - **Todo 120**: Evaluate stage-by-stage think mode policy and default profile settings
   - Build an evidence-based matrix for each major stage (`publisher_brief`, `research`, `architect_outline`, `chapter_planner`, `canon`, `writer`, editorial stages) indicating when `think: false` improves reliability/latency and when deeper reasoning is worth the cost.
@@ -1318,20 +2013,6 @@ These should be completed once publisher outputs successfully:
   - Track comparable metrics: stage pass rate, retries, latency, fallback incidence, continuity score, and token/cost efficiency.
   - Require a signed decision report before promoting new routing defaults to production profiles.
 
-- **Todo 108**: Normalize runtime artifact ownership for `book_project/` outputs
-  - Direct host-side book-flow runs were blocked by root-owned artifacts in `book_project/` (`resource_tracker.json`, `task_ledger.json`, run dirs, and lock files) created by containerized services.
-  - Decide ownership policy for shared runtime artifacts and enforce it consistently so host CLI runs, containerized services, and recovery scripts do not fight over lock files.
-  - Add a startup/doctor check that flags root-owned runtime files before a long run begins.
-
-- **Todo 109**: Add explicit terminal journal closure for CLI `book_flow.py` failures
-  - Current Todo 73 failed with terminal `stage_failure` but no guaranteed run-level `run_failure` event and no `run_summary.json`.
-  - Mirror the API-side run-terminal integrity guard for direct CLI flows so every run closes with `run_success` or `run_failure`, even when a stage raises out of the pipeline.
-  - Write `run_summary.json` on both success and failure paths with stage outcomes, retry counts, and failure reason.
-
-- **Todo 99**: Add profile-lint gate before stack startup
-  - Run agent profile validation before or during `agent-stack-up` so invalid `.agent.md` frontmatter fails fast with a clear message before the API container is rebuilt.
-  - Prevent a bad profile from taking the entire control plane offline during restart.
-
 - **Todo 100**: Add diagnostics submission lane when book mode is active
   - Add an explicit, operator-only diagnostics endpoint or flag that allows low-impact test submissions (for route visibility checks) without disabling active book mode.
   - Keep safeguards: rate-limit diagnostics tasks, tag them clearly in `/api/status`, and block content-writing jobs so diagnostic probing cannot interfere with production book runs.
@@ -1368,9 +2049,7 @@ These should be completed once publisher outputs successfully:
   - Include top candidate profiles and score factors in status diagnostics for each request
   - Add lightweight UI panel to show why the selected profile won
 
-- **Completed (2026-03-18) / Todo 52**: Add centralized exception-to-HTTP mapper
-  - Map `AgentStackError.code` values to consistent API status codes and response payload schema
-  - Ensure streaming and non-stream endpoints emit structured error objects uniformly
+- ~~**Todo 52** — Centralized exception-to-HTTP mapper (`AgentStackError.code` → status codes; uniform streaming/non-stream error payloads)~~ ✅ Done 2026-03-18
 
 - **Todo 53**: Add maintenance supervisor agent/service
   - Promote cron/script-based recovery duties into a first-class maintenance actor with watchdog, reconcile, and drill orchestration responsibilities

@@ -1,9 +1,0 @@
-{
-  "archived_at": "2026-03-18T19:52:47.078682",
-  "source_run_dir": "/home/daravenrk/dragonlair/book_project/todo73-e2e/todo-73-e2e-validation/runs/20260318-191358-ch01-the-first-stable-loop",
-  "archived_files": [
-    "run_journal.jsonl",
-    "changes.log",
-    "diagnostics/agent_diagnostics.jsonl"
-  ]
-}

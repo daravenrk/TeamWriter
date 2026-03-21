@@ -1,12 +1,10 @@
 ---
 name: amd-coder
-route: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-192000
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 192000
 num_predict: 512
 temperature: 0.2
-num_gpus: 2
 intent_keywords: code,coder,python,bash,debug,refactor,test
 priority: 100
 ---

@@ -1,15 +1,12 @@
 ---
 name: book-skeleton-updater
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-131072
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
 intent_keywords: skeleton-updater,skeleton update,canonical extraction,law extraction,canon extraction,chapter acceptance,living skeleton,canonical record
 priority: 110
-num_ctx: 131072
 num_predict: 2000
 temperature: 0.1
-num_gpus: 2
 ---
 
 # Book Skeleton Updater

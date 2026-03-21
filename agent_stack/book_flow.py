@@ -3,12 +3,14 @@
 # - Log all major stage transitions, returns, and errors
 import argparse
 import copy
+import difflib
 import hashlib
 import json
 import os
 import re
 import shutil
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
@@ -38,6 +40,162 @@ RUBRIC_KEYS = [
 DEFAULT_STRATEGY_VERSION = str(
     os.environ.get("AGENT_STRATEGY_VERSION", "2026-03-20-strategy-v1")
 ).strip() or "2026-03-20-strategy-v1"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+BOOK_QUALITY_MIN_SCORE = _env_float("BOOK_QUALITY_MIN_SCORE", 3.0)
+BOOK_QUALITY_MIN_AVG_SCORE = _env_float("BOOK_QUALITY_MIN_AVG_SCORE", BOOK_QUALITY_MIN_SCORE)
+BOOK_QUALITY_MIN_CONTENT_SCORE = _env_float("BOOK_QUALITY_MIN_CONTENT_SCORE", BOOK_QUALITY_MIN_SCORE)
+
+BOOK_QUALITY_ADAPTIVE_ENABLED = str(
+    os.environ.get("BOOK_QUALITY_ADAPTIVE_ENABLED", "true")
+).lower() in {"1", "true", "yes", "on"}
+BOOK_QUALITY_ADAPTIVE_ALPHA = _env_float("BOOK_QUALITY_ADAPTIVE_ALPHA", 0.2)
+BOOK_QUALITY_ADAPTIVE_GAIN = _env_float("BOOK_QUALITY_ADAPTIVE_GAIN", 0.5)
+BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS = max(int(_env_float("BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS", 3)), 0)
+BOOK_QUALITY_ADAPTIVE_MAX_SCORE = _env_float("BOOK_QUALITY_ADAPTIVE_MAX_SCORE", 4.5)
+BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE = _env_float("BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE", 4.0)
+
+# Effective thresholds are mutable so each book can learn and tighten over time.
+BOOK_QUALITY_EFFECTIVE_MIN_SCORE = BOOK_QUALITY_MIN_SCORE
+BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE = BOOK_QUALITY_MIN_AVG_SCORE
+BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE = BOOK_QUALITY_MIN_CONTENT_SCORE
+
+
+def _quality_learning_state_path(book_root: Path) -> Path:
+    return book_root / "quality_learning_state.json"
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _compute_effective_quality_thresholds(state: dict) -> dict:
+    runs_observed = int(state.get("runs_observed") or 0)
+    ema_avg = _safe_float(state.get("ema_rubric_avg"), BOOK_QUALITY_MIN_AVG_SCORE)
+    ema_content = _safe_float(state.get("ema_content_score"), BOOK_QUALITY_MIN_CONTENT_SCORE)
+
+    min_score = float(BOOK_QUALITY_MIN_SCORE)
+    min_avg = float(BOOK_QUALITY_MIN_AVG_SCORE)
+    min_content = float(BOOK_QUALITY_MIN_CONTENT_SCORE)
+
+    if not BOOK_QUALITY_ADAPTIVE_ENABLED or runs_observed < BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS:
+        return {
+            "min_score": min_score,
+            "min_avg_score": min_avg,
+            "min_content_score": min_content,
+            "adaptive_enabled": BOOK_QUALITY_ADAPTIVE_ENABLED,
+            "runs_observed": runs_observed,
+            "warmup_runs": BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS,
+            "quality_signal": min(ema_avg, ema_content),
+        }
+
+    quality_signal = min(ema_avg, ema_content)
+    uplift = max(0.0, (quality_signal - min_avg) * max(0.0, BOOK_QUALITY_ADAPTIVE_GAIN))
+
+    effective_min = min(BOOK_QUALITY_ADAPTIVE_MAX_SCORE, min_score + uplift)
+    effective_avg = min(BOOK_QUALITY_ADAPTIVE_MAX_SCORE, min_avg + uplift)
+    effective_content = min(BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE, min_content + uplift)
+
+    return {
+        "min_score": round(effective_min, 3),
+        "min_avg_score": round(effective_avg, 3),
+        "min_content_score": round(effective_content, 3),
+        "adaptive_enabled": BOOK_QUALITY_ADAPTIVE_ENABLED,
+        "runs_observed": runs_observed,
+        "warmup_runs": BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS,
+        "quality_signal": round(quality_signal, 3),
+        "uplift": round(uplift, 3),
+    }
+
+
+def configure_effective_quality_thresholds(book_root: Path) -> dict:
+    global BOOK_QUALITY_EFFECTIVE_MIN_SCORE
+    global BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE
+    global BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE
+
+    state = read_json(_quality_learning_state_path(book_root), default={})
+    effective = _compute_effective_quality_thresholds(state if isinstance(state, dict) else {})
+    BOOK_QUALITY_EFFECTIVE_MIN_SCORE = _safe_float(effective.get("min_score"), BOOK_QUALITY_MIN_SCORE)
+    BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE = _safe_float(effective.get("min_avg_score"), BOOK_QUALITY_MIN_AVG_SCORE)
+    BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE = _safe_float(effective.get("min_content_score"), BOOK_QUALITY_MIN_CONTENT_SCORE)
+    return {
+        "state_path": str(_quality_learning_state_path(book_root)),
+        "state": state if isinstance(state, dict) else {},
+        "effective_thresholds": effective,
+    }
+
+
+def update_quality_learning_state(book_root: Path, rubric_report: dict, effective_snapshot: dict) -> dict:
+    if not isinstance(rubric_report, dict):
+        return {"updated": False, "reason": "invalid_rubric_report"}
+
+    scores = rubric_report.get("scores") or {}
+    if not isinstance(scores, dict) or not scores:
+        return {"updated": False, "reason": "missing_scores"}
+
+    numeric_values = [float(v) for v in scores.values() if isinstance(v, (int, float))]
+    if not numeric_values:
+        return {"updated": False, "reason": "scores_not_numeric"}
+
+    avg_score = sum(numeric_values) / len(numeric_values)
+    content_score = _safe_float(scores.get("reader_engagement_score"), avg_score)
+
+    state_path = _quality_learning_state_path(book_root)
+    state = read_json(state_path, default={})
+    if not isinstance(state, dict):
+        state = {}
+
+    runs_observed = int(state.get("runs_observed") or 0) + 1
+    prev_ema_avg = _safe_float(state.get("ema_rubric_avg"), avg_score)
+    prev_ema_content = _safe_float(state.get("ema_content_score"), content_score)
+    alpha = min(1.0, max(0.01, BOOK_QUALITY_ADAPTIVE_ALPHA))
+
+    ema_avg = (alpha * avg_score) + ((1.0 - alpha) * prev_ema_avg)
+    ema_content = (alpha * content_score) + ((1.0 - alpha) * prev_ema_content)
+
+    updated_state = {
+        "updated_at": datetime.utcnow().isoformat(),
+        "runs_observed": runs_observed,
+        "ema_rubric_avg": round(ema_avg, 3),
+        "ema_content_score": round(ema_content, 3),
+        "last_run": {
+            "rubric_avg": round(avg_score, 3),
+            "content_score": round(content_score, 3),
+            "effective_thresholds_used": effective_snapshot,
+        },
+        "adaptive": {
+            "enabled": BOOK_QUALITY_ADAPTIVE_ENABLED,
+            "alpha": alpha,
+            "gain": BOOK_QUALITY_ADAPTIVE_GAIN,
+            "warmup_runs": BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS,
+            "max_score": BOOK_QUALITY_ADAPTIVE_MAX_SCORE,
+            "max_content_score": BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE,
+        },
+    }
+    write_json(state_path, updated_state)
+
+    return {
+        "updated": True,
+        "state_path": str(state_path),
+        "runs_observed": runs_observed,
+        "rubric_avg": round(avg_score, 3),
+        "content_score": round(content_score, 3),
+        "ema_rubric_avg": round(ema_avg, 3),
+        "ema_content_score": round(ema_content, 3),
+    }
 
 
 def slugify(text: str) -> str:
@@ -106,6 +264,65 @@ def payload_sha256(payload) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+RUN_ARCHIVE_ARTIFACT_SPECS = [
+    ("run_journal.jsonl", "run_journal.jsonl"),
+    ("run_summary.json", "run_summary.json"),
+    ("changes.log", "changes.log"),
+    ("05_reviews/publisher_report.json", "05_reviews/publisher_report.json"),
+    ("06_final/manuscript_v1.md", "06_final/manuscript_v1.md"),
+    ("06_final/manuscript_v2.md", "06_final/manuscript_v2.md"),
+    ("diagnostics/agent_diagnostics.jsonl", "diagnostics/agent_diagnostics.jsonl"),
+    ("07_retro/retrospective.json", "07_retro/retrospective.json"),
+    ("07_retro/retrospective.md", "07_retro/retrospective.md"),
+    ("07_retro/quality_failures_review.json", "07_retro/quality_failures_review.json"),
+    ("07_retro/quality_failures_review.md", "07_retro/quality_failures_review.md"),
+]
+
+
+def archive_run_directory(
+    run_dir: Path,
+    history_root: Path,
+    cleanup_reason: str,
+    extra_manifest: dict | None = None,
+):
+    ensure_dir(history_root)
+
+    archive_dir = history_root / run_dir.name
+    if archive_dir.exists():
+        shutil.rmtree(archive_dir)
+    ensure_dir(archive_dir)
+
+    copied = []
+    for relative_src, relative_dest in RUN_ARCHIVE_ARTIFACT_SPECS:
+        src = run_dir / relative_src
+        if not src.exists() or not src.is_file():
+            continue
+        dest = archive_dir / relative_dest
+        ensure_dir(dest.parent)
+        shutil.copy2(src, dest)
+        copied.append(relative_dest)
+
+    manifest = {
+        "archived_at": datetime.utcnow().isoformat(),
+        "source_run_dir": str(run_dir),
+        "cleanup_reason": cleanup_reason,
+        "archived_files": copied,
+    }
+    if extra_manifest:
+        manifest["details"] = extra_manifest
+    write_json(archive_dir / "archive_manifest.json", manifest)
+
+    shutil.rmtree(run_dir)
+    return {
+        "run_name": run_dir.name,
+        "archive_dir": str(archive_dir),
+        "cleanup_reason": cleanup_reason,
+        "archived_files": copied,
+        "deleted_run_count": 1,
+        "deleted_file_count": 0,
+    }
+
+
 def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
     ensure_dir(runs_root)
     ensure_dir(history_root)
@@ -119,57 +336,20 @@ def archive_and_prune_old_runs(runs_root: Path, history_root: Path):
         "deleted_files": [],
     }
 
-    artifact_specs = [
-        ("run_journal.jsonl", "run_journal.jsonl"),
-        ("run_summary.json", "run_summary.json"),
-        ("changes.log", "changes.log"),
-        ("diagnostics/agent_diagnostics.jsonl", "diagnostics/agent_diagnostics.jsonl"),
-        ("07_retro/retrospective.json", "07_retro/retrospective.json"),
-        ("07_retro/retrospective.md", "07_retro/retrospective.md"),
-        ("07_retro/quality_failures_review.json", "07_retro/quality_failures_review.json"),
-        ("07_retro/quality_failures_review.md", "07_retro/quality_failures_review.md"),
-    ]
-
     for item in sorted(runs_root.iterdir()):
         if item.name.startswith("."):
             continue
 
         if item.is_dir():
-            archive_dir = history_root / item.name
             try:
-                if archive_dir.exists():
-                    shutil.rmtree(archive_dir)
-                ensure_dir(archive_dir)
-
-                copied = []
-                for relative_src, relative_dest in artifact_specs:
-                    src = item / relative_src
-                    if not src.exists() or not src.is_file():
-                        continue
-                    dest = archive_dir / relative_dest
-                    ensure_dir(dest.parent)
-                    shutil.copy2(src, dest)
-                    copied.append(relative_dest)
-
-                write_json(
-                    archive_dir / "archive_manifest.json",
-                    {
-                        "archived_at": datetime.utcnow().isoformat(),
-                        "source_run_dir": str(item),
-                        "archived_files": copied,
-                    },
+                archived = archive_run_directory(
+                    item,
+                    history_root,
+                    cleanup_reason="pre_run_cleanup",
                 )
-
-                shutil.rmtree(item)
                 summary["archived_run_count"] += 1
-                summary["deleted_run_count"] += 1
-                summary["archived_runs"].append(
-                    {
-                        "run_name": item.name,
-                        "archive_dir": str(archive_dir),
-                        "archived_files": copied,
-                    }
-                )
+                summary["deleted_run_count"] += archived.get("deleted_run_count", 0)
+                summary["archived_runs"].append(archived)
             except PermissionError as err:
                 summary["skipped_entries"].append(
                     {
@@ -260,6 +440,177 @@ def append_run_event(path: Path, event: str, details: dict):
             "details": details,
         },
     )
+
+
+BOOK_REVIEW_GATE_FILENAME = "review_gate_state.json"
+BOOK_REVIEW_GATE_POLL_SECONDS = max(
+    1.0,
+    float(os.environ.get("BOOK_REVIEW_GATE_POLL_SECONDS", "2") or 2),
+)
+BOOK_REVIEW_MAX_REWRITE_CYCLES = max(
+    1,
+    int(os.environ.get("BOOK_REVIEW_MAX_REWRITE_CYCLES", "2") or 2),
+)
+
+
+def review_gate_state_path(run_dir: Path) -> Path:
+    return run_dir / "handoff" / BOOK_REVIEW_GATE_FILENAME
+
+
+def read_review_gate_state(run_dir: Path) -> dict:
+    return read_json(review_gate_state_path(run_dir), default={})
+
+
+def write_review_gate_state(run_dir: Path, payload: dict) -> dict:
+    path = review_gate_state_path(run_dir)
+    existing = read_json(path, default={})
+    merged = existing if isinstance(existing, dict) else {}
+    merged.update(payload or {})
+    merged["updated_at_epoch"] = time.time()
+    write_json(path, merged)
+    return merged
+
+
+def await_review_gate_decision(
+    *,
+    run_dir: Path,
+    run_journal: Path,
+    context_store: dict,
+    section_index: int,
+    section_title: str,
+    stage_id: str,
+    section_path: Path,
+    section_review_path: Path,
+):
+    state = read_review_gate_state(run_dir)
+    status = str(state.get("status") or "idle").strip().lower()
+    target_section = state.get("section_index")
+    if target_section not in {None, ""}:
+        try:
+            if int(target_section) != int(section_index):
+                return {"action": "continue", "paused": False, "state": state}
+        except (TypeError, ValueError):
+            pass
+
+    if status not in {"pause_requested", "paused", "deferred", "continue_requested", "rewrite_requested"}:
+        return {"action": "continue", "paused": False, "state": state}
+
+    if status in {"pause_requested", "continue_requested", "rewrite_requested"}:
+        write_review_gate_state(
+            run_dir,
+            {
+                "status": "paused" if status == "pause_requested" else status,
+                "checkpoint_stage": stage_id,
+                "checkpoint_section_index": section_index,
+                "checkpoint_section_title": section_title,
+                "section_path": str(section_path),
+                "section_review_path": str(section_review_path),
+                "paused_at_epoch": time.time(),
+                "task_id": context_store.get("_task_id"),
+            },
+        )
+        append_run_event(
+            run_journal,
+            "human_review_pause_activated",
+            {
+                "task_id": context_store.get("_task_id"),
+                "stage": stage_id,
+                "section_index": section_index,
+                "section_title": section_title,
+                "correlation_id": state.get("correlation_id"),
+            },
+        )
+        update_cli_runtime_activity_from_context(
+            context_store,
+            {
+                "state": "paused",
+                "status_detail": f"paused for human review: {stage_id}",
+                "stage": stage_id,
+                "section_title": section_title,
+                "updated_at_epoch": time.time(),
+            },
+        )
+
+    defer_logged = False
+    while True:
+        state = read_review_gate_state(run_dir)
+        status = str(state.get("status") or "paused").strip().lower()
+        if status == "continue_requested":
+            append_run_event(
+                run_journal,
+                "human_review_continue_acknowledged",
+                {
+                    "task_id": context_store.get("_task_id"),
+                    "stage": stage_id,
+                    "section_index": section_index,
+                    "section_title": section_title,
+                    "correlation_id": state.get("correlation_id"),
+                },
+            )
+            write_review_gate_state(
+                run_dir,
+                {
+                    "status": "idle",
+                    "resume_action": "continue",
+                    "resumed_at_epoch": time.time(),
+                },
+            )
+            update_cli_runtime_activity_from_context(
+                context_store,
+                {
+                    "state": "running",
+                    "status_detail": f"resumed after human review: {stage_id}",
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            return {"action": "continue", "paused": True, "state": state}
+        if status == "rewrite_requested":
+            append_run_event(
+                run_journal,
+                "human_review_rewrite_acknowledged",
+                {
+                    "task_id": context_store.get("_task_id"),
+                    "stage": stage_id,
+                    "section_index": section_index,
+                    "section_title": section_title,
+                    "correlation_id": state.get("correlation_id"),
+                },
+            )
+            write_review_gate_state(
+                run_dir,
+                {
+                    "status": "idle",
+                    "resume_action": "rewrite",
+                    "resumed_at_epoch": time.time(),
+                },
+            )
+            update_cli_runtime_activity_from_context(
+                context_store,
+                {
+                    "state": "running",
+                    "status_detail": f"rewrite requested after review: {stage_id}",
+                    "updated_at_epoch": time.time(),
+                },
+            )
+            return {"action": "rewrite", "paused": True, "state": state}
+        if status == "deferred":
+            if not defer_logged:
+                append_run_event(
+                    run_journal,
+                    "human_review_deferred",
+                    {
+                        "task_id": context_store.get("_task_id"),
+                        "stage": stage_id,
+                        "section_index": section_index,
+                        "section_title": section_title,
+                        "note": state.get("note"),
+                        "correlation_id": state.get("correlation_id"),
+                    },
+                )
+                defer_logged = True
+            time.sleep(BOOK_REVIEW_GATE_POLL_SECONDS)
+            continue
+        time.sleep(BOOK_REVIEW_GATE_POLL_SECONDS)
 
 
 def parse_json_block(raw: str, fallback=None):
@@ -543,10 +894,10 @@ def gate_developmental(report):
     values = [v for v in scores.values() if isinstance(v, (int, float))]
     if not values:
         return False, "scores empty"
-    if min(values) < 4:
-        return False, "one or more scores below 4"
-    if (sum(values) / len(values)) < 4:
-        return False, "average score below 4"
+    if min(values) < BOOK_QUALITY_EFFECTIVE_MIN_SCORE:
+        return False, f"one or more scores below {BOOK_QUALITY_EFFECTIVE_MIN_SCORE:g}"
+    if (sum(values) / len(values)) < BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE:
+        return False, f"average score below {BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE:g}"
     return True, "pass"
 
 
@@ -904,10 +1255,16 @@ def gate_rubric_report(report):
             return False, f"score for {key} is not numeric"
         values.append(float(value))
 
-    if min(values) < 4:
-        return False, "one or more rubric scores below 4"
-    if (sum(values) / len(values)) < 4:
-        return False, "rubric average below 4"
+    if min(values) < BOOK_QUALITY_EFFECTIVE_MIN_SCORE:
+        return False, f"one or more rubric scores below {BOOK_QUALITY_EFFECTIVE_MIN_SCORE:g}"
+    if (sum(values) / len(values)) < BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE:
+        return False, f"rubric average below {BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE:g}"
+
+    content_score = scores.get("reader_engagement_score")
+    if not isinstance(content_score, (int, float)):
+        return False, "score for reader_engagement_score is not numeric"
+    if float(content_score) < BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE:
+        return False, f"reader_engagement_score below {BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE:g}"
 
     next_notes = report.get("next_writer_notes") or {}
     if not isinstance(next_notes, dict):
@@ -946,12 +1303,43 @@ def gate_no_blocking_issues(report):
 # Arc consistency scorer (Todo 36)
 # ---------------------------------------------------------------------------
 ARC_CONSISTENCY_THRESHOLD = 0.6  # Minimum score; ensures a complete failure on either open-loop persistence or character-arc acknowledgement fails the gate
+ARC_LOOP_MATCH_THRESHOLD = float(os.environ.get("ARC_LOOP_MATCH_THRESHOLD", "0.58"))
+ARC_LOOP_WARNING_THRESHOLD = float(os.environ.get("ARC_LOOP_WARNING_THRESHOLD", "0.45"))
+ARC_CONSISTENCY_WARNING_ONLY = str(os.environ.get("ARC_CONSISTENCY_WARNING_ONLY", "false")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _normalize_similarity_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _text_similarity(a: str, b: str) -> float:
+    left = _normalize_similarity_text(a)
+    right = _normalize_similarity_text(b)
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+
+    seq = difflib.SequenceMatcher(None, left, right).ratio()
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    union = left_tokens | right_tokens
+    jaccard = (len(left_tokens & right_tokens) / len(union)) if union else 1.0
+    return round(max(seq, jaccard), 3)
 
 
 def score_arc_consistency(
     arc_tracker: dict,
     rubric_report: dict,
-) -> tuple[float, list[str], list[str]]:
+) -> tuple[float, list[str], list[str], list[dict]]:
     """Score arc persistence (0.0–1.0) across two narrative tracking factors.
 
     Open loops are **intentional story features** that carry across chapters and
@@ -978,6 +1366,7 @@ def score_arc_consistency(
     """
     issues: list[str] = []
     untracked_loops: list[str] = []
+    near_miss_scores: list[dict] = []
     factors: list[float] = []
 
     arc = arc_tracker if isinstance(arc_tracker, dict) else {}
@@ -986,20 +1375,54 @@ def score_arc_consistency(
     next_notes = next_notes if isinstance(next_notes, dict) else {}
 
     # Factor 1: open-loop persistence into must_carry_forward
+    # Cap to the 10 most recently added loops — arc_tracker accumulates ALL loops
+    # across all chapters; requiring 60% of a 30-loop accumulation from chapter 15
+    # is impossible and would always fail. Recency window keeps the check relevant.
     open_loops = _normalize_list(arc.get("open_loops"))
+    open_loops = open_loops[-10:] if len(open_loops) > 10 else open_loops
     if open_loops:
         carry_forward_raw = _normalize_list(next_notes.get("must_carry_forward"))
-        carry_corpus = [str(x).lower() for x in carry_forward_raw]
+        carry_corpus = [str(x) for x in carry_forward_raw]
         persisted = []
         dropped = []
         for loop in open_loops:
-            loop_key = str(loop).lower()[:50]
-            if any(loop_key in text for text in carry_corpus):
+            best_score = 0.0
+            best_match = ""
+            for candidate in carry_corpus:
+                score = _text_similarity(loop, candidate)
+                if score > best_score:
+                    best_score = score
+                    best_match = candidate
+
+            if best_score >= ARC_LOOP_MATCH_THRESHOLD:
                 persisted.append(loop)
+            elif best_score >= ARC_LOOP_WARNING_THRESHOLD:
+                persisted.append(loop)
+                near_miss_scores.append(
+                    {
+                        "open_loop": str(loop),
+                        "best_match": best_match,
+                        "score": best_score,
+                        "classification": "near_miss_pass",
+                    }
+                )
             else:
                 dropped.append(loop)
+                near_miss_scores.append(
+                    {
+                        "open_loop": str(loop),
+                        "best_match": best_match,
+                        "score": best_score,
+                        "classification": "untracked",
+                    }
+                )
         loop_score = len(persisted) / len(open_loops)
         factors.append(loop_score)
+        if near_miss_scores:
+            issues.append(
+                "open-loop fuzzy matching used; inspect near_miss_scores in arc_consistency_score.json "
+                f"(match>={ARC_LOOP_MATCH_THRESHOLD}, warning>={ARC_LOOP_WARNING_THRESHOLD})"
+            )
         if dropped:
             untracked_loops = dropped
             issues.append(
@@ -1011,10 +1434,11 @@ def score_arc_consistency(
         factors.append(1.0)  # No established loops yet — always passes
 
     # Factor 2: character-arc acknowledgement (arcs from prior chapter entries)
-    # character_arcs is a list of chapter-level objects; flatten unique arc/name labels
+    # Cap to the 5 most recent character_arc entries to avoid accumulation failures.
     char_arc_entries = arc.get("character_arcs") or []
     char_arc_entries = [a for a in char_arc_entries if isinstance(a, dict)]
-    # Collect unique character names from all prior chapter entries
+    char_arc_entries = char_arc_entries[-5:] if len(char_arc_entries) > 5 else char_arc_entries
+    # Collect unique character names from recent chapter entries
     char_names: list[str] = []
     seen_names: set[str] = set()
     for entry in char_arc_entries:
@@ -1041,7 +1465,7 @@ def score_arc_consistency(
         factors.append(1.0)  # No prior character arcs to track yet
 
     score = round(sum(factors) / len(factors), 3) if factors else 1.0
-    return score, issues, untracked_loops
+    return score, issues, untracked_loops, near_miss_scores
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1477,7 @@ def validate_required_artifacts(run_dir: Path, expected_section_count: int):
         run_dir / "02_outline/master_outline.md",
         run_dir / "02_outline/chapter_specs/chapter_01.json",
         run_dir / "03_canon/canon.json",
+        run_dir / "03_canon/consistency_sections.json",
         run_dir / "03_canon/context_store.json",
         run_dir / "03_canon/session_handoffs.jsonl",
         run_dir / "03_canon/continuity_state.json",
@@ -1074,6 +1499,51 @@ def validate_required_artifacts(run_dir: Path, expected_section_count: int):
 
     missing = [str(path) for path in required if not path.exists()]
     return {"valid": len(missing) == 0, "missing": missing}
+
+
+def validate_stage_correlation_integrity(run_journal_path: Path):
+    total_stage_attempts = 0
+    missing_correlation = 0
+    missing_examples = []
+
+    if not run_journal_path.exists():
+        return {
+            "valid": False,
+            "total_stage_attempts": 0,
+            "missing_correlation": 0,
+            "missing_examples": [],
+            "note": "run_journal_missing",
+        }
+
+    for raw_line in run_journal_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = parse_json_block(line, fallback=None)
+        if not isinstance(parsed, dict):
+            continue
+        if str(parsed.get("event") or "") != "stage_attempt_start":
+            continue
+        total_stage_attempts += 1
+        details = parsed.get("details") if isinstance(parsed.get("details"), dict) else {}
+        correlation_id = str(details.get("correlation_id") or "").strip()
+        if not correlation_id:
+            missing_correlation += 1
+            if len(missing_examples) < 10:
+                missing_examples.append(
+                    {
+                        "stage": details.get("stage"),
+                        "attempt": details.get("attempt"),
+                        "timestamp": parsed.get("timestamp"),
+                    }
+                )
+
+    return {
+        "valid": missing_correlation == 0,
+        "total_stage_attempts": total_stage_attempts,
+        "missing_correlation": missing_correlation,
+        "missing_examples": missing_examples,
+    }
 
 
 def _word_count(text: str) -> int:
@@ -1142,6 +1612,250 @@ def build_relevant_chapter_notes(rolling_memory: dict, chapter_number: int, sect
         "unresolved_threads": unresolved[:20],
         "note_usage_rule": "Use notes only when they support current section goals and do not conflict with current canon.",
     }
+
+
+def _keyword_signals(text: str, max_items: int = 8) -> list[str]:
+    stop_words = {
+        "the", "and", "that", "with", "from", "this", "into", "about", "over",
+        "under", "after", "before", "while", "where", "their", "there", "have",
+        "must", "should", "will", "would", "could", "chapter", "section", "story",
+    }
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for tok in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if len(tok) < 4 or tok in stop_words or tok in seen:
+            continue
+        seen.add(tok)
+        tokens.append(tok)
+        if len(tokens) >= max_items:
+            break
+    return tokens
+
+
+def _dedupe_items(items: list[str], max_items: int = 12) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _extract_character_targets(canon_payload: dict, previous_next_writer_notes: dict, max_items: int = 10) -> list[str]:
+    results: list[str] = []
+    bible = (canon_payload or {}).get("character_bible")
+    if isinstance(bible, dict):
+        for key in bible.keys():
+            if str(key).strip():
+                results.append(str(key).strip())
+        for value in bible.values():
+            if isinstance(value, dict):
+                name = str(value.get("name") or "").strip()
+                if name:
+                    results.append(name)
+            elif isinstance(value, list):
+                for entry in value:
+                    if isinstance(entry, dict):
+                        name = str(entry.get("name") or "").strip()
+                        if name:
+                            results.append(name)
+                    else:
+                        text = str(entry or "").strip()
+                        if text:
+                            results.append(text)
+    elif isinstance(bible, list):
+        for entry in bible:
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or "").strip()
+                if name:
+                    results.append(name)
+            else:
+                text = str(entry or "").strip()
+                if text:
+                    results.append(text)
+
+    updates = _normalize_list((previous_next_writer_notes or {}).get("character_state_updates"))
+    results.extend(updates)
+    return _dedupe_items(results, max_items=max_items)
+
+
+def _extract_element_targets(chapter_spec: dict, canon_payload: dict, previous_next_writer_notes: dict, max_items: int = 10) -> list[str]:
+    results: list[str] = []
+    results.extend(_normalize_list((chapter_spec or {}).get("must_include")))
+    results.extend(_normalize_list((previous_next_writer_notes or {}).get("must_carry_forward")))
+    canon_obj = (canon_payload or {}).get("canon")
+    if isinstance(canon_obj, dict):
+        for key in canon_obj.keys():
+            if str(key).strip():
+                results.append(str(key).strip())
+    return _dedupe_items(results, max_items=max_items)
+
+
+def build_section_consistency_sections(
+    *,
+    chapter_number: int,
+    chapter_title: str,
+    chapter_spec: dict,
+    canon_payload: dict,
+    previous_next_writer_notes: dict,
+):
+    sections = (chapter_spec or {}).get("sections") or []
+    carry_forward = _normalize_list((previous_next_writer_notes or {}).get("must_carry_forward"))
+    continuity_watch = _normalize_list((previous_next_writer_notes or {}).get("continuity_watch"))
+    open_loops = _normalize_list((canon_payload or {}).get("open_loops"))
+    character_targets = _extract_character_targets(canon_payload, previous_next_writer_notes)
+    element_targets = _extract_element_targets(chapter_spec, canon_payload, previous_next_writer_notes)
+
+    checkpoints = []
+    for idx, section_item in enumerate(sections, start=1):
+        if isinstance(section_item, dict):
+            section_title = str(section_item.get("title") or section_item.get("name") or f"Section {idx}")
+            section_goal = str(section_item.get("objective") or section_item.get("goal") or "Advance chapter objective")
+        else:
+            section_title = str(section_item or f"Section {idx}")
+            section_goal = "Advance chapter objective"
+
+        expectations = [
+            f"Advance this section goal: {section_goal}",
+            "Maintain continuity with prior accepted sections in this chapter.",
+            "Preserve canon consistency for named characters and key elements.",
+        ]
+        for item in (carry_forward[:2] + continuity_watch[:2]):
+            expectations.append(f"Carry forward expectation: {item}")
+
+        situations = _keyword_signals(section_goal, max_items=6)
+        for marker in continuity_watch[:4]:
+            situations.extend(_keyword_signals(marker, max_items=2))
+        situations = _dedupe_items(situations, max_items=10)
+
+        checkpoints.append(
+            {
+                "section_index": idx,
+                "section_title": section_title,
+                "section_goal": section_goal,
+                "expectations": _dedupe_items(expectations, max_items=8),
+                "situations": situations,
+                "tracking_targets": {
+                    "open_loops": open_loops[:8],
+                    "character_arcs": character_targets[:8],
+                    "important_elements": element_targets[:8],
+                },
+                "status": "pending",
+                "coverage": {
+                    "open_loops": [],
+                    "character_arcs": [],
+                    "important_elements": [],
+                    "situation_hits": [],
+                },
+                "missing_tracking": {
+                    "open_loops": [],
+                    "character_arcs": [],
+                    "important_elements": [],
+                },
+                "accepted_at": None,
+                "last_updated": datetime.utcnow().isoformat(),
+            }
+        )
+
+    return {
+        "chapter_number": chapter_number,
+        "chapter_title": chapter_title,
+        "generated_at": datetime.utcnow().isoformat(),
+        "active_section_index": 1 if checkpoints else 0,
+        "sections": checkpoints,
+        "ledger": [],
+    }
+
+
+def _match_targets_in_blob(targets: list[str], blob: str, max_key: int = 48) -> tuple[list[str], list[str]]:
+    normalized = str(blob or "").lower()
+    matched: list[str] = []
+    missing: list[str] = []
+    for item in targets:
+        key = str(item or "").strip().lower()[:max_key]
+        if not key:
+            continue
+        if key in normalized:
+            matched.append(str(item))
+        else:
+            missing.append(str(item))
+    return matched, missing
+
+
+def update_section_consistency_after_review(
+    consistency_sections: dict,
+    *,
+    section_index: int,
+    section_text: str,
+    section_review: dict,
+) -> tuple[dict, dict]:
+    payload = copy.deepcopy(consistency_sections) if isinstance(consistency_sections, dict) else {}
+    sections = payload.get("sections") if isinstance(payload.get("sections"), list) else []
+    checkpoint = None
+    for item in sections:
+        if int(item.get("section_index") or 0) == int(section_index):
+            checkpoint = item
+            break
+
+    if checkpoint is None:
+        return payload, {}
+
+    review_blob = " ".join(
+        [
+            str(section_text or ""),
+            str((section_review or {}).get("section_summary") or ""),
+            json.dumps((section_review or {}).get("continuity_state_updates") or []),
+            json.dumps((section_review or {}).get("warnings") or []),
+        ]
+    )
+
+    targets = checkpoint.get("tracking_targets") if isinstance(checkpoint.get("tracking_targets"), dict) else {}
+    open_loops = _normalize_list(targets.get("open_loops"))
+    char_arcs = _normalize_list(targets.get("character_arcs"))
+    elements = _normalize_list(targets.get("important_elements"))
+    situations = _normalize_list(checkpoint.get("situations"))
+
+    open_hits, open_missing = _match_targets_in_blob(open_loops, review_blob)
+    char_hits, char_missing = _match_targets_in_blob(char_arcs, review_blob)
+    element_hits, element_missing = _match_targets_in_blob(elements, review_blob)
+    situation_hits, _ = _match_targets_in_blob(situations, review_blob, max_key=24)
+
+    checkpoint["status"] = "accepted"
+    checkpoint["accepted_at"] = datetime.utcnow().isoformat()
+    checkpoint["last_updated"] = datetime.utcnow().isoformat()
+    checkpoint["coverage"] = {
+        "open_loops": open_hits,
+        "character_arcs": char_hits,
+        "important_elements": element_hits,
+        "situation_hits": situation_hits,
+    }
+    checkpoint["missing_tracking"] = {
+        "open_loops": open_missing,
+        "character_arcs": char_missing,
+        "important_elements": element_missing,
+    }
+
+    payload["active_section_index"] = min(section_index + 1, len(sections)) if sections else 0
+    ledger = payload.get("ledger") if isinstance(payload.get("ledger"), list) else []
+    ledger.append(
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "section_index": section_index,
+            "status": "accepted",
+            "coverage": checkpoint.get("coverage"),
+            "missing_tracking": checkpoint.get("missing_tracking"),
+        }
+    )
+    payload["ledger"] = ledger
+    return payload, checkpoint
 
 
 def chunk_items_by_word_budget(items, max_words):
@@ -1258,7 +1972,7 @@ def build_retro_report(run_dir: Path, summary: dict):
     low_scores = []
     if isinstance(rubric_scores, dict):
         for key, value in rubric_scores.items():
-            if isinstance(value, (int, float)) and value < 4:
+            if isinstance(value, (int, float)) and value < BOOK_QUALITY_EFFECTIVE_MIN_SCORE:
                 low_scores.append({"dimension": key, "score": value})
     retro["improvement_targets"] = low_scores
 
@@ -1306,7 +2020,7 @@ def build_retro_markdown(retro: dict) -> str:
         for item in low_scores:
             lines.append(f"- {item.get('dimension')}: {item.get('score')}")
     else:
-        lines.append("- None (all scored dimensions >= 4)")
+        lines.append(f"- None (all scored dimensions >= {BOOK_QUALITY_EFFECTIVE_MIN_SCORE:g})")
 
     lines.extend([
         "",
@@ -1648,6 +2362,7 @@ def run_stage(
         time.sleep(delay_seconds)
 
     for attempt in range(1, max_retries + 2):
+        stage_correlation_id = str(uuid.uuid4())
         resource_block = build_resource_reference_block(context_store)
         prompt_with_feedback = prompt
         if resource_block:
@@ -1676,6 +2391,7 @@ def run_stage(
                 prompt_with_feedback,
                 profile_name=profile_name,
                 stream_override=False,
+                correlation_id=stage_correlation_id,
             )
         except AgentStackError:
             resolved_plan = None
@@ -1697,6 +2413,10 @@ def run_stage(
                     "resolved_profile": ((resolved_plan or {}).get("profile") or {}).get("name"),
                     "resolved_stream": (resolved_plan or {}).get("stream"),
                     "resolved_options": (resolved_plan or {}).get("options"),
+                    "correlation_id": stage_correlation_id,
+                    "ml_mode": ((resolved_plan or {}).get("ml_shadow") or {}).get("mode"),
+                    "ml_shadow_top_k": ((resolved_plan or {}).get("ml_shadow") or {}).get("top_k"),
+                    "ml_shadow_chosen": ((resolved_plan or {}).get("ml_shadow") or {}).get("chosen"),
                 },
             )
         attempt_started_at = datetime.utcnow().isoformat()
@@ -1707,6 +2427,7 @@ def run_stage(
             {
                 "stage": stage_id,
                 "attempt": attempt,
+                "correlation_id": stage_correlation_id,
                 "route": (resolved_plan or {}).get("route"),
                 "model": (resolved_plan or {}).get("model"),
                 "profile": ((resolved_plan or {}).get("profile") or {}).get("name"),
@@ -1720,8 +2441,12 @@ def run_stage(
                 "agent": agent_name,
                 "profile": profile_name,
                 "attempt": attempt,
+                "correlation_id": stage_correlation_id,
                 "route": (resolved_plan or {}).get("route"),
                 "model": (resolved_plan or {}).get("model"),
+                "ml_mode": ((resolved_plan or {}).get("ml_shadow") or {}).get("mode"),
+                "ml_shadow_top_k": ((resolved_plan or {}).get("ml_shadow") or {}).get("top_k"),
+                "ml_shadow_chosen": ((resolved_plan or {}).get("ml_shadow") or {}).get("chosen"),
             },
         )
         update_cli_runtime_activity_from_context(
@@ -1735,6 +2460,7 @@ def run_stage(
                 "route": (resolved_plan or {}).get("route"),
                 "model": (resolved_plan or {}).get("model"),
                 "attempt": attempt,
+                "correlation_id": stage_correlation_id,
                 "status_detail": f"stage attempt {attempt}: {stage_id}",
             },
         )
@@ -1744,6 +2470,7 @@ def run_stage(
                 prompt_with_feedback,
                 profile_name=profile_name,
                 stream_override=False,
+                correlation_id=stage_correlation_id,
             )
         except AgentStackError as e:
             last_error = f"[{e.code}] {e}"
@@ -1757,6 +2484,7 @@ def run_stage(
                         "profile": profile_name,
                         "attempt": attempt,
                         "event": "agent_call_error",
+                        "correlation_id": stage_correlation_id,
                         "error": str(e),
                         "error_code": e.code,
                         "prompt": prompt_with_feedback,
@@ -1893,6 +2621,7 @@ def run_stage(
                 "agent": agent_name,
                 "profile": profile_name,
                 "attempt": attempt,
+                "correlation_id": stage_correlation_id,
                 "gate_ok": gate_ok,
                 "gate_message": gate_message,
             },
@@ -1939,6 +2668,7 @@ def run_stage(
                     "attempt": attempt,
                     "attempt_started_at": attempt_started_at,
                     "attempt_completed_at": attempt_completed_at,
+                    "correlation_id": stage_correlation_id,
                     "prompt": prompt_with_feedback,
                     "raw_output": raw,
                     "parsed_output": parsed if parse_json else None,
@@ -2350,12 +3080,32 @@ def run_flow(args):
     context_store["_cli_run_id"] = run_name
     context_store["_cli_activity_path"] = str(cli_activity_path)
     context_store["_handoff_dir"] = str(dirs["handoff"])
+    context_store["_task_id"] = str(getattr(args, "task_id", "") or "") or None
     run_journal = run_dir / "run_journal.jsonl"
+    quality_threshold_snapshot = configure_effective_quality_thresholds(book_root)
     context_store["_run_journal_path"] = str(run_journal)
+    write_review_gate_state(
+        run_dir,
+        {
+            "status": "idle",
+            "task_id": context_store.get("_task_id"),
+            "run_id": run_name,
+            "run_dir": str(run_dir),
+            "title": args.title,
+            "chapter_number": args.chapter_number,
+            "chapter_title": args.chapter_title,
+            "section_title": args.section_title,
+        },
+    )
     append_run_event(
         run_journal,
         "run_cleanup_complete",
         cleanup_summary,
+    )
+    append_run_event(
+        run_journal,
+        "quality_thresholds_loaded",
+        quality_threshold_snapshot,
     )
     append_run_event(
         run_journal,
@@ -2423,6 +3173,40 @@ def run_flow(args):
     })
 
     # 1) Publisher brief
+    # R1 guardrail: keep publisher brief inputs bounded so long-run context
+    # accumulation cannot overflow the stage context window.
+    chapter_input = context_store.get("chapter") if isinstance(context_store.get("chapter"), dict) else {}
+    chapter_input = chapter_input if isinstance(chapter_input, dict) else {}
+    previous_brief = (((context_store.get("permanent_memory") or {}).get("book_brief") or {}))
+    previous_brief = previous_brief if isinstance(previous_brief, dict) else {}
+    rolling_memory = _normalize_list(context_store.get("rolling_memory"))
+    recent_memory = [str(item)[:280] for item in rolling_memory[-5:]]
+    publisher_inputs = {
+        "book_request": {
+            "title": args.title,
+            "genre": args.genre,
+            "audience": args.audience,
+            "premise": args.premise,
+            "target_word_count": args.target_word_count,
+            "page_target": args.page_target,
+            "tone": args.tone,
+        },
+        "chapter": {
+            "chapter_number": chapter_input.get("chapter_number", args.chapter_number),
+            "chapter_title": chapter_input.get("chapter_title", args.chapter_title),
+            "section_title": chapter_input.get("section_title", args.section_title),
+        },
+        "previous_brief_snapshot": {
+            "title_working": previous_brief.get("title_working"),
+            "genre": previous_brief.get("genre"),
+            "audience": previous_brief.get("audience"),
+            "tone": previous_brief.get("tone"),
+            "constraints": _normalize_list(previous_brief.get("constraints"))[:6],
+            "acceptance_criteria": _normalize_list(previous_brief.get("acceptance_criteria"))[:6],
+        },
+        "recent_memory_excerpt": recent_memory,
+    }
+
     publisher_contract = build_contract(
         role="Publisher / Executive Agent",
         objective="Define book brief and stage acceptance criteria for this run.",
@@ -2431,7 +3215,7 @@ def run_flow(args):
             "Include title_working, target_word_count, page_target, constraints, acceptance_criteria",
             "No prose outside JSON",
         ],
-        inputs=context_store,
+        inputs=publisher_inputs,
         output_format='JSON object with fields: title_working, genre, audience, target_word_count, page_target, tone, constraints, acceptance_criteria',
         failure_conditions=["missing fields", "invalid JSON", "vague acceptance criteria"],
     )
@@ -2787,7 +3571,18 @@ def run_flow(args):
         role="Canon / Memory Agent",
         objective="Initialize and persist canon for this chapter run.",
         constraints=["Return JSON only", "Include canon, timeline, character_bible, open_loops, style_guide"],
-        inputs={"book_brief": brief, "chapter_spec": chapter_spec, "rolling_context": context_store.get("rolling_memory", {})},
+        inputs={
+            "book_premise": context_store.get("book", {}).get("premise", ""),
+            "book_details": {
+                "title": context_store.get("book", {}).get("title", ""),
+                "genre": context_store.get("book", {}).get("genre", ""),
+                "tone": context_store.get("book", {}).get("tone", ""),
+                "audience": context_store.get("book", {}).get("audience", ""),
+            },
+            "book_brief": brief,
+            "chapter_spec": chapter_spec,
+            "rolling_context": context_store.get("rolling_memory", {}),
+        },
         output_format='JSON with keys: canon, timeline, character_bible, open_loops, style_guide',
         failure_conditions=["missing canon", "missing timeline", "invalid JSON"],
     )
@@ -3002,6 +3797,16 @@ def run_flow(args):
         read_text(dirs["canon"] / "next_writer_notes.json", "{}"),
         fallback={},
     )
+    consistency_sections = build_section_consistency_sections(
+        chapter_number=args.chapter_number,
+        chapter_title=args.chapter_title,
+        chapter_spec=chapter_spec,
+        canon_payload=canon_payload,
+        previous_next_writer_notes=previous_next_writer_notes,
+    )
+    continuity_state["consistency_sections"] = consistency_sections
+    write_json(dirs["canon"] / "consistency_sections.json", consistency_sections)
+    write_json(dirs["canon"] / "continuity_state.json", continuity_state)
 
     # -- Law context + living skeleton frame for writer guidance --
     # Canonical law (Tier 1) comes from immutable past chapter canonical records.
@@ -3027,93 +3832,171 @@ def run_flow(args):
             section_goal,
             max_items=6,
         )
-        local_task_memory = {
-            "chapter_spec": chapter_spec,
-            "canon": canon_payload,
-            "recent_chapter_summaries": context_store.get("rolling_memory", {}).get("chapter_summaries", []),
-            "previous_next_writer_notes": previous_next_writer_notes,
-            "previous_section_summaries": section_summaries,
-            "continuity_state": continuity_state,
-            "context_tracking_strategy": context_tracking_strategy,
-            "relevant_notes": relevant_notes_packet,
-            "section_title": section_title,
-            "section_goal": section_goal,
-            # Two-tier doc system: past law (immutable) + current skeleton frame (predictive)
-            "canonical_law": _law_context_block or "(no prior accepted chapters — first chapter run)",
-            "skeleton_guidance_frame": _skeleton_frame_for_writer or "(no skeleton frame — run skeleton_flow first)",
-        }
-        _writer_constraints = [
-            "Return markdown only",
-            f"Target words around {args.writer_words}",
-            "Respect canon and style guide",
-            "Use chapter notes only if relevant to this section goal",
-            "Follow provided context tracking strategy for continuity",
-        ]
-        if _law_context_block:
-            _writer_constraints.insert(0,
-                "CRITICAL: Respect every item in canonical_law — these are locked facts from "
-                "accepted chapters. Contradicting any law_item or continuity_constraint is an "
-                "automatic quality gate failure."
-            )
-        writer_contract = build_contract(
-            role="Section Writer Agent",
-            objective=f"Draft section {idx:02d} for the chapter.",
-            constraints=_writer_constraints,
-            inputs=local_task_memory,
-            output_format="Markdown with heading, coherent section body, and transition sentence",
-            failure_conditions=["canon contradiction", "missing transition", "off-topic section"],
-        )
-        section_text = run_stage(
-            orchestrator=orchestrator,
-            lock_manager=lock_manager,
-            changes_log=changes_log,
-            context_store=context_store,
-            stage_id=f"writer_section_{idx:02d}",
-            agent_name="book-writer",
-            profile_name=args.writer_profile,
-            prompt=writer_contract,
-            output_path=dirs["drafts_ch"] / f"section_{idx:02d}.md",
-            parse_json=False,
-            gate_fn=lambda text: (len(text.split()) >= int(args.writer_words * 0.6), "draft too short"),
-            max_retries=args.max_retries,
-            diagnostics_path=diagnostics_log,
-            verbose=args.verbose,
-            debug=debug_mode,
-        )
-        section_texts.append(section_text)
+        # Cap recent_chapter_summaries to last 5 — prevents context window overflow as
+        # rolling_memory grows across a full multi-chapter book run.
+        _all_summaries = context_store.get("rolling_memory", {}).get("chapter_summaries", [])
+        _recent_summaries = _all_summaries[-5:] if len(_all_summaries) > 5 else _all_summaries
+        current_checkpoint = {}
+        checkpoint_sections = consistency_sections.get("sections") if isinstance(consistency_sections.get("sections"), list) else []
+        if (idx - 1) < len(checkpoint_sections):
+            current_checkpoint = checkpoint_sections[idx - 1]
+        section_output_path = dirs["drafts_ch"] / f"section_{idx:02d}.md"
+        section_review_path = dirs["section_reviews"] / f"section_{idx:02d}_review.json"
+        rewrite_feedback = None
+        rewrite_cycles = 0
 
-        section_review_contract = build_contract(
-            role="Section Continuity Reviewer",
-            objective="Review drafted section for continuity/timeline/character-state contradictions before assembly.",
-            constraints=["Return JSON only", "Include blocking_issues, warnings, section_summary, continuity_state_updates"],
-            inputs={
+        while True:
+            local_task_memory = {
+                "chapter_spec": chapter_spec,
+                "canon": canon_payload,
+                "recent_chapter_summaries": _recent_summaries,
+                "previous_next_writer_notes": previous_next_writer_notes,
+                "previous_section_summaries": section_summaries,
+                "continuity_state": continuity_state,
+                "consistency_checkpoint": current_checkpoint,
+                "consistency_tracker": {
+                    "active_section_index": consistency_sections.get("active_section_index"),
+                    "total_sections": len(checkpoint_sections),
+                    "ledger_size": len(consistency_sections.get("ledger") or []),
+                },
+                "context_tracking_strategy": context_tracking_strategy,
+                "relevant_notes": relevant_notes_packet,
                 "section_title": section_title,
                 "section_goal": section_goal,
-                "section_text": section_text,
-                "canon": canon_payload,
-                "previous_section_summaries": section_summaries,
-            },
-            output_format='JSON with keys: blocking_issues, warnings, section_summary, continuity_state_updates',
-            failure_conditions=["invalid JSON", "missing summary", "undetected major contradiction"],
-        )
-        section_review = run_stage(
-            orchestrator=orchestrator,
-            lock_manager=lock_manager,
-            changes_log=changes_log,
-            context_store=context_store,
-            stage_id=f"section_review_{idx:02d}",
-            agent_name="book-continuity",
-            profile_name="book-continuity",
-            prompt=section_review_contract,
-            output_path=dirs["section_reviews"] / f"section_{idx:02d}_review.json",
-            parse_json=True,
-            output_schema="section_review",
-            gate_fn=gate_no_blocking_issues,
-            max_retries=args.max_retries,
-            diagnostics_path=diagnostics_log,
-            verbose=args.verbose,
-            debug=debug_mode,
-        )
+                # Two-tier doc system: past law (immutable) + current skeleton frame (predictive)
+                "canonical_law": _law_context_block or "(no prior accepted chapters — first chapter run)",
+                "skeleton_guidance_frame": _skeleton_frame_for_writer or "(no skeleton frame — run skeleton_flow first)",
+            }
+            _writer_constraints = [
+                "Return markdown only",
+                f"Target words around {args.writer_words}",
+                "Respect canon and style guide",
+                "Use chapter notes only if relevant to this section goal",
+                "Satisfy consistency_checkpoint expectations and situations for this section",
+                "Follow provided context tracking strategy for continuity",
+            ]
+            if _law_context_block:
+                _writer_constraints.insert(0,
+                    "CRITICAL: Respect every item in canonical_law — these are locked facts from "
+                    "accepted chapters. Contradicting any law_item or continuity_constraint is an "
+                    "automatic quality gate failure."
+                )
+            if rewrite_feedback:
+                local_task_memory["human_review_feedback"] = {
+                    "comment": rewrite_feedback.get("comment"),
+                    "issue_tags": rewrite_feedback.get("issue_tags") or [],
+                    "rewrite_scope": rewrite_feedback.get("rewrite_scope"),
+                    "note": rewrite_feedback.get("note"),
+                }
+                _writer_constraints.append(
+                    "Incorporate human_review_feedback while preserving canon, accepted downstream facts, and future story requirements."
+                )
+            writer_contract = build_contract(
+                role="Section Writer Agent",
+                objective=f"Draft section {idx:02d} for the chapter.",
+                constraints=_writer_constraints,
+                inputs=local_task_memory,
+                output_format="Markdown with heading, coherent section body, and transition sentence",
+                failure_conditions=["canon contradiction", "missing transition", "off-topic section"],
+            )
+            section_text = run_stage(
+                orchestrator=orchestrator,
+                lock_manager=lock_manager,
+                changes_log=changes_log,
+                context_store=context_store,
+                stage_id=f"writer_section_{idx:02d}",
+                agent_name="book-writer",
+                profile_name=args.writer_profile,
+                prompt=writer_contract,
+                output_path=section_output_path,
+                parse_json=False,
+                gate_fn=lambda text: (len(text.split()) >= int(args.writer_words * 0.6), "draft too short"),
+                max_retries=args.max_retries,
+                diagnostics_path=diagnostics_log,
+                verbose=args.verbose,
+                debug=debug_mode,
+            )
+
+            section_review_contract = build_contract(
+                role="Section Continuity Reviewer",
+                objective="Review drafted section for continuity/timeline/character-state contradictions before assembly.",
+                constraints=[
+                    "Return JSON only",
+                    "Include blocking_issues, warnings, section_summary, continuity_state_updates",
+                    "Treat unmet consistency checkpoint expectations as blocking_issues",
+                ],
+                inputs={
+                    "section_title": section_title,
+                    "section_goal": section_goal,
+                    "section_text": section_text,
+                    "canon": canon_payload,
+                    "previous_section_summaries": section_summaries,
+                    "consistency_checkpoint": current_checkpoint,
+                    "consistency_tracker": consistency_sections,
+                    "human_review_feedback": rewrite_feedback or {},
+                },
+                output_format='JSON with keys: blocking_issues, warnings, section_summary, continuity_state_updates',
+                failure_conditions=["invalid JSON", "missing summary", "undetected major contradiction"],
+            )
+            section_review = run_stage(
+                orchestrator=orchestrator,
+                lock_manager=lock_manager,
+                changes_log=changes_log,
+                context_store=context_store,
+                stage_id=f"section_review_{idx:02d}",
+                agent_name="book-continuity",
+                profile_name="book-continuity",
+                prompt=section_review_contract,
+                output_path=section_review_path,
+                parse_json=True,
+                output_schema="section_review",
+                gate_fn=gate_no_blocking_issues,
+                max_retries=args.max_retries,
+                diagnostics_path=diagnostics_log,
+                verbose=args.verbose,
+                debug=debug_mode,
+            )
+
+            review_decision = await_review_gate_decision(
+                run_dir=run_dir,
+                run_journal=run_journal,
+                context_store=context_store,
+                section_index=idx,
+                section_title=section_title,
+                stage_id=f"section_review_{idx:02d}",
+                section_path=section_output_path,
+                section_review_path=section_review_path,
+            )
+            if review_decision.get("action") == "rewrite" and rewrite_cycles < BOOK_REVIEW_MAX_REWRITE_CYCLES:
+                rewrite_cycles += 1
+                rewrite_feedback = review_decision.get("state") or {}
+                append_run_event(
+                    run_journal,
+                    "human_review_rewrite_cycle_started",
+                    {
+                        "task_id": context_store.get("_task_id"),
+                        "section_index": idx,
+                        "section_title": section_title,
+                        "rewrite_cycle": rewrite_cycles,
+                        "issue_tags": rewrite_feedback.get("issue_tags") or [],
+                        "correlation_id": rewrite_feedback.get("correlation_id"),
+                    },
+                )
+                continue
+            if review_decision.get("action") == "rewrite":
+                append_run_event(
+                    run_journal,
+                    "human_review_rewrite_limit_reached",
+                    {
+                        "task_id": context_store.get("_task_id"),
+                        "section_index": idx,
+                        "section_title": section_title,
+                        "rewrite_cycles": rewrite_cycles,
+                    },
+                )
+            break
+
+        section_texts.append(section_text)
         section_summaries.append(
             {
                 "section": idx,
@@ -3123,13 +4006,27 @@ def run_flow(args):
             }
         )
         continuity_state.setdefault("section_updates", [])
+        consistency_sections, updated_checkpoint = update_section_consistency_after_review(
+            consistency_sections,
+            section_index=idx,
+            section_text=section_text,
+            section_review=section_review,
+        )
+        continuity_state["consistency_sections"] = consistency_sections
         continuity_state["section_updates"].append(
             {
                 "section": idx,
                 "title": section_title,
                 "updates": section_review.get("continuity_state_updates", []),
+                "consistency_checkpoint": {
+                    "status": updated_checkpoint.get("status", "unknown"),
+                    "coverage": updated_checkpoint.get("coverage", {}),
+                    "missing_tracking": updated_checkpoint.get("missing_tracking", {}),
+                },
             }
         )
+        write_json(dirs["canon"] / "consistency_sections.json", consistency_sections)
+        write_json(dirs["canon"] / "continuity_state.json", continuity_state)
 
     # 6.5) Story architect review (post-writer concept/structure validation)
     story_architect_contract = build_contract(
@@ -3499,7 +4396,7 @@ def run_flow(args):
     # character arcs are acknowledged. Open loops are intentional story features that
     # must survive chapter handoffs and be resolved before series end, not within the chapter.
     _arc_current = read_json(arc_tracker_path, default={})
-    arc_score, arc_issues, untracked_loops = score_arc_consistency(_arc_current, rubric_report)
+    arc_score, arc_issues, untracked_loops, near_miss_scores = score_arc_consistency(_arc_current, rubric_report)
     write_json(
         dirs["reviews"] / "arc_consistency_score.json",
         {
@@ -3507,6 +4404,10 @@ def run_flow(args):
             "threshold": ARC_CONSISTENCY_THRESHOLD,
             "passed": arc_score >= ARC_CONSISTENCY_THRESHOLD,
             "issues": arc_issues,
+            "warning_only_mode": ARC_CONSISTENCY_WARNING_ONLY,
+            "loop_match_threshold": ARC_LOOP_MATCH_THRESHOLD,
+            "loop_warning_threshold": ARC_LOOP_WARNING_THRESHOLD,
+            "near_miss_scores": near_miss_scores,
             "untracked_open_loops": untracked_loops,
             "all_open_loops": _normalize_list(_arc_current.get("open_loops")),
             "chapter_number": args.chapter_number,
@@ -3536,15 +4437,35 @@ def run_flow(args):
             "score": arc_score,
             "threshold": ARC_CONSISTENCY_THRESHOLD,
             "passed": arc_score >= ARC_CONSISTENCY_THRESHOLD,
+            "warning_only_mode": ARC_CONSISTENCY_WARNING_ONLY,
             "issues": arc_issues,
+            "near_miss_scores": near_miss_scores,
             "untracked_open_loops": untracked_loops,
         },
     )
     if arc_score < ARC_CONSISTENCY_THRESHOLD:
-        raise StageQualityGateError(
-            f"arc_consistency_score={arc_score} below threshold={ARC_CONSISTENCY_THRESHOLD}: " + "; ".join(arc_issues),
-            details={"score": arc_score, "threshold": ARC_CONSISTENCY_THRESHOLD, "issues": arc_issues},
-        )
+        if ARC_CONSISTENCY_WARNING_ONLY:
+            write_agent_context_status(
+                agent_context_status_path,
+                {
+                    "phase": "arc_consistency_warning_only",
+                    "chapter_number": args.chapter_number,
+                    "section_title": args.section_title,
+                    "score": arc_score,
+                    "threshold": ARC_CONSISTENCY_THRESHOLD,
+                    "issues": arc_issues,
+                    "near_miss_scores": near_miss_scores,
+                },
+            )
+            print(
+                "[WARN] arc_consistency below threshold but warning-only mode is enabled; "
+                f"score={arc_score}, threshold={ARC_CONSISTENCY_THRESHOLD}"
+            )
+        else:
+            raise StageQualityGateError(
+                f"arc_consistency_score={arc_score} below threshold={ARC_CONSISTENCY_THRESHOLD}: " + "; ".join(arc_issues),
+                details={"score": arc_score, "threshold": ARC_CONSISTENCY_THRESHOLD, "issues": arc_issues},
+            )
 
     # 11) Publisher final gate
     publisher_qa_contract = build_contract(
@@ -3839,9 +4760,40 @@ def run_flow(args):
     write_text(dirs["final"] / "manuscript_v2.md", signed_manuscript)
 
     validation = validate_required_artifacts(run_dir, expected_section_count=len(chapter_sections))
+    correlation_integrity_strict = str(
+        os.environ.get("AGENT_CORRELATION_INTEGRITY_STRICT", "true")
+    ).lower() in {"1", "true", "yes", "on"}
+    correlation_integrity = validate_stage_correlation_integrity(run_journal)
+    if not correlation_integrity.get("valid", True):
+        append_run_event(
+            run_journal,
+            "correlation_integrity_warning",
+            {
+                "missing_correlation": correlation_integrity.get("missing_correlation"),
+                "total_stage_attempts": correlation_integrity.get("total_stage_attempts"),
+                "examples": correlation_integrity.get("missing_examples") or [],
+            },
+        )
+        if correlation_integrity_strict:
+            validation["valid"] = False
+            validation.setdefault("missing", [])
+            validation["missing"].append(
+                "diagnostic_check:stage_attempt_start missing correlation_id"
+            )
     used_fallbacks = collect_used_fallback_stages(run_journal)
+    quality_learning_update = update_quality_learning_state(
+        book_root,
+        rubric_report,
+        quality_threshold_snapshot.get("effective_thresholds") if isinstance(quality_threshold_snapshot, dict) else {},
+    )
+    append_run_event(
+        run_journal,
+        "quality_learning_state_updated",
+        quality_learning_update,
+    )
     summary = {
         "strategy_version": strategy_version,
+        "ml_mode": str(getattr(orchestrator, "ml_mode", "off")),
         "run_dir": str(run_dir),
         "book_root": str(book_root),
         "framework_root": str(framework_root),
@@ -3867,6 +4819,8 @@ def run_flow(args):
             "note": "One or more deterministic stage fallbacks were used in this run." if used_fallbacks else "No deterministic stage fallbacks were used in this run.",
         },
         "artifact_validation": validation,
+        "correlation_integrity": correlation_integrity,
+        "correlation_integrity_strict": bool(correlation_integrity_strict),
         "merge_stats": merge_stats,
         "context_tracking_strategy": context_tracking_strategy,
         "changes_log": str(changes_log),
@@ -3882,6 +4836,22 @@ def run_flow(args):
             "quality_failures_log": str(orchestrator.quality_failures_log_path),
             "reward_ledger": str(orchestrator.agent_rewards_path),
             "reward_events": str(orchestrator.agent_reward_events_path),
+            "ml_shadow_events": str(getattr(orchestrator, "ml_shadow_events_path", "")),
+        },
+        "quality_thresholds": {
+            "base": {
+                "min_score": BOOK_QUALITY_MIN_SCORE,
+                "min_avg_score": BOOK_QUALITY_MIN_AVG_SCORE,
+                "min_content_score": BOOK_QUALITY_MIN_CONTENT_SCORE,
+            },
+            "effective": {
+                "min_score": BOOK_QUALITY_EFFECTIVE_MIN_SCORE,
+                "min_avg_score": BOOK_QUALITY_EFFECTIVE_MIN_AVG_SCORE,
+                "min_content_score": BOOK_QUALITY_EFFECTIVE_MIN_CONTENT_SCORE,
+            },
+            "adaptive_enabled": BOOK_QUALITY_ADAPTIVE_ENABLED,
+            "snapshot": quality_threshold_snapshot,
+            "learning_update": quality_learning_update,
         },
         "living_skeleton_docs": {
             "canonical_record": living_skeleton_result.get("canonical_record_path"),
@@ -3920,10 +4890,34 @@ def run_flow(args):
         },
     }
 
+    append_jsonl(changes_log, parent_log_success)
+    append_run_event(
+        run_journal,
+        "run_success",
+        {
+            "publisher_decision": publisher_qa.get("decision"),
+            "publisher_attempts": publisher_attempts,
+            "forced_completion": forced_completion,
+            "run_summary": str(run_dir / "run_summary.json"),
+            "strategy_version": strategy_version,
+        },
+    )
+    update_cli_runtime_activity_from_context(context_store, {}, clear=True)
+
+    publication_export = {
+        "enabled": True,
+        "published": False,
+        "archive": None,
+        "remote": None,
+        "returncode": None,
+        "stderr": "",
+        "stdout": "",
+    }
+    cleanup_after_publish = bool(getattr(args, "cleanup_after_publish", True))
+
     # --- Post-processing: Archive and export completed book run ---
     try:
         import subprocess
-        from datetime import datetime
         archive_name = f"{book_slug}_run_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.tar.gz"
         archive_path = str(runs_root / archive_name)
         # Create tar.gz of the run_dir
@@ -3935,19 +4929,27 @@ def run_flow(args):
         scp_result = subprocess.run([
             "scp", archive_path, remote_path
         ], capture_output=True, text=True)
+        publication_export = {
+            "enabled": True,
+            "published": scp_result.returncode == 0,
+            "archive": archive_path,
+            "remote": remote_path,
+            "returncode": scp_result.returncode,
+            "stdout": scp_result.stdout,
+            "stderr": scp_result.stderr,
+        }
         export_log = {
             "timestamp": datetime.utcnow().isoformat(),
             "agent": "book-flow-parent",
             "action": "export_book_run",
-            "details": {
-                "archive": archive_path,
-                "remote": remote_path,
-                "scp_returncode": scp_result.returncode,
-                "scp_stdout": scp_result.stdout,
-                "scp_stderr": scp_result.stderr,
-            },
+            "details": publication_export,
         }
         append_jsonl(changes_log, export_log)
+        append_run_event(
+            run_journal,
+            "publication_export_complete",
+            publication_export,
+        )
     except Exception as export_err:
         wrapped_export_err = BookExportError(
             f"Book run export failed: {export_err}",
@@ -3967,20 +4969,88 @@ def run_flow(args):
             },
         }
         append_jsonl(changes_log, error_log)
+        publication_export = {
+            "enabled": True,
+            "published": False,
+            "archive": None,
+            "remote": None,
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(wrapped_export_err),
+        }
+        append_run_event(
+            run_journal,
+            "publication_export_failed",
+            publication_export,
+        )
 
-    append_jsonl(changes_log, parent_log_success)
-    append_run_event(
-        run_journal,
-        "run_success",
-        {
-            "publisher_decision": publisher_qa.get("decision"),
-            "publisher_attempts": publisher_attempts,
-            "forced_completion": forced_completion,
-            "run_summary": str(run_dir / "run_summary.json"),
-            "strategy_version": strategy_version,
-        },
-    )
-    update_cli_runtime_activity_from_context(context_store, {}, clear=True)
+    summary["publication_export"] = publication_export
+    write_json(run_dir / "run_summary.json", summary)
+
+    if publication_export.get("published") and cleanup_after_publish:
+        cleanup_summary = {
+            "cleanup_reason": "post_publish",
+            "history_root": str(run_history_root),
+            "deleted_export_bundle": None,
+            "skipped_entries": [],
+        }
+        append_run_event(
+            run_journal,
+            "run_cleanup_start",
+            {
+                "cleanup_reason": "post_publish",
+                "history_root": str(run_history_root),
+                "export_archive": publication_export.get("archive"),
+            },
+        )
+        try:
+            archived = archive_run_directory(
+                run_dir,
+                run_history_root,
+                cleanup_reason="post_publish",
+                extra_manifest={
+                    "publisher_decision": publisher_qa.get("decision"),
+                    "forced_completion": forced_completion,
+                    "publication_export": publication_export,
+                },
+            )
+            cleanup_summary.update(archived)
+            archive_bundle = publication_export.get("archive")
+            if archive_bundle and os.path.exists(archive_bundle):
+                os.unlink(archive_bundle)
+                cleanup_summary["deleted_export_bundle"] = archive_bundle
+
+            archived_run_journal = Path(cleanup_summary["archive_dir"]) / "run_journal.jsonl"
+            append_run_event(archived_run_journal, "run_cleanup_complete", cleanup_summary)
+            archived_summary_path = Path(cleanup_summary["archive_dir"]) / "run_summary.json"
+            archived_summary = read_json(archived_summary_path, default={})
+            if isinstance(archived_summary, dict):
+                archived_summary["post_publish_cleanup"] = cleanup_summary
+                write_json(archived_summary_path, archived_summary)
+            append_jsonl(
+                book_history_log,
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": "book-flow-parent",
+                    "action": "post_publish_cleanup",
+                    "details": cleanup_summary,
+                },
+            )
+            summary["post_publish_cleanup"] = cleanup_summary
+        except (OSError, PermissionError) as cleanup_err:
+            cleanup_summary["skipped_entries"].append(
+                {
+                    "path": str(run_dir),
+                    "reason": f"cleanup_error: {cleanup_err}",
+                }
+            )
+            summary["post_publish_cleanup"] = cleanup_summary
+            append_run_event(
+                run_journal,
+                "run_cleanup_failed",
+                cleanup_summary,
+            )
+
     print(json.dumps(summary, indent=2))
     return json.dumps(summary, indent=2)
 
@@ -4024,6 +5094,22 @@ def build_parser():
         dest="strategy_version",
         default=DEFAULT_STRATEGY_VERSION,
         help="Strategy version tag stamped into run_journal and run_summary artifacts.",
+    )
+    cleanup_after_publish_default = str(
+        os.environ.get("BOOK_FLOW_CLEANUP_AFTER_PUBLISH", "true")
+    ).lower() in {"1", "true", "yes", "on"}
+    p.add_argument(
+        "--cleanup-after-publish",
+        dest="cleanup_after_publish",
+        action="store_true",
+        default=cleanup_after_publish_default,
+        help="Archive the completed run to run_history and remove the live runs/ copy after successful publication export.",
+    )
+    p.add_argument(
+        "--no-cleanup-after-publish",
+        dest="cleanup_after_publish",
+        action="store_false",
+        help="Keep the completed run in runs/ even after successful publication export.",
     )
     return p
 

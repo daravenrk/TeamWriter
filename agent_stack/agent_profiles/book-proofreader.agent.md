@@ -1,10 +1,8 @@
 ---
 name: book-proofreader
-route: ollama_nvidia
-allowed_routes: ollama_nvidia
-model: qwen3.5:2b
+runtime_preset: nvidia-qwen35-2b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 1200
 temperature: 0.1
 intent_keywords: proofreader,proofread,final check,typos,final polish

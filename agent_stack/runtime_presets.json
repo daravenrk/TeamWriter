@@ -1,0 +1,260 @@
+{
+  "presets": {
+    "nvidia-qwen35-4b-8192": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:4b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-4b-16384": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:4b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-4b-32768": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:4b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-4b-49152": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:4b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-2b-49152": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:2b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-2b-32768": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:2b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-2b-16384": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:2b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-2b-8192": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:2b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-08b-49152": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:0.8b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-08b-32768": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:0.8b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-08b-16384": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:0.8b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen35-08b-8192": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:0.8b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-3b-32768": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:3b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-3b-16384": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:3b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-3b-8192": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:3b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-15b-32768": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:1.5b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-15b-16384": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:1.5b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-qwen25-coder-15b-8192": {
+      "route": "ollama_nvidia",
+      "model": "qwen2.5-coder:1.5b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-1b-49152": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:1b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-1b-32768": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:1b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-1b-16384": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:1b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-1b-8192": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:1b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-3b-32768": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:3b",
+      "options": {
+        "num_ctx": 32768,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-3b-16384": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:3b",
+      "options": {
+        "num_ctx": 16384,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-llama32-3b-8192": {
+      "route": "ollama_nvidia",
+      "model": "llama3.2:3b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "nvidia-codegemma-2b-8192": {
+      "route": "ollama_nvidia",
+      "model": "codegemma:2b",
+      "options": {
+        "num_ctx": 8192,
+        "num_gpu": 99
+      }
+    },
+    "amd-qwen25-coder-14b-128000": {
+      "route": "ollama_amd",
+      "model": "qwen2.5-coder:14b",
+      "options": {
+        "num_ctx": 128000,
+        "num_gpu": 2
+      }
+    },
+    "amd-qwen25-coder-14b-65536": {
+      "route": "ollama_amd",
+      "model": "qwen2.5-coder:14b",
+      "options": {
+        "num_ctx": 65536,
+        "num_gpu": 2
+      }
+    },
+    "amd-qwen35-27b-49152": {
+      "route": "ollama_amd",
+      "model": "qwen3.5:27b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 2
+      }
+    },
+    "amd-qwen35-9b-49152": {
+      "route": "ollama_amd",
+      "model": "qwen3.5:9b",
+      "options": {
+        "num_ctx": 49152,
+        "num_gpu": 2
+      }
+    },
+    "amd-qwen35-9b-131072": {
+      "route": "ollama_amd",
+      "model": "qwen3.5:9b",
+      "options": {
+        "num_ctx": 131072,
+        "num_gpu": 2
+      }
+    },
+    "amd-qwen35-9b-192000": {
+      "route": "ollama_amd",
+      "model": "qwen3.5:9b",
+      "options": {
+        "num_ctx": 192000,
+        "num_gpu": 2
+      }
+    }
+  }
+}

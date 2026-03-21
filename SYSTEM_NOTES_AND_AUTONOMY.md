@@ -62,12 +62,27 @@ This section documents the process for smoketesting both NVIDIA and AMD Ollama e
 - Publishers (for example book and code) are specialized tools in one shared runtime.
 - Each publisher defines its own flow contract while inheriting shared guardrails (policy checks, safety checks, GPU policy, rewards).
 - A pure code publisher must be able to execute a streamlined non-narrative flow independently of book-flow assumptions.
+- Publishers must also support governed handoff: a book publisher may request a linked child code project when the book requires a concrete software deliverable.
+- Cross-publisher handoff must be explicit, auditable, and bounded by a contract; this is not free-form mode switching.
+
+### Nested Publisher Handoff Principle
+- Canonical first case: `BookPublisher -> CodePublisher`.
+- Example: a C++ programming book needs a real sample program, library, or exercise project; the book runtime should spawn a linked code project rather than synthesize unverified code inline.
+- The parent publisher keeps ownership of the user-facing objective; the child publisher owns only the delegated artifact.
+- Parent/child linkage must be visible in task state, run journals, and produced artifacts.
+- Mutual exclusion rules between book mode and code mode should prevent unrelated operator collisions, not block intentional nested delegation inside one approved plan.
 
 ### Intent-Driven Planning And Option Selection
 - Execution strategy must come from user intent analysis, not fixed flow branching.
 - For each project, generate multiple structured options with tradeoffs (speed, depth, automation, cost).
 - User selects the preferred option before execution proceeds.
 - System role: strategic advisor plus executor; user remains decision-maker.
+
+### Adaptive Quality Curriculum Principle
+- Quality gates should start from conservative completion-safe floors and tighten over time as real output quality improves.
+- Threshold progression must be data-driven, auditable, and bounded (no sudden jumps).
+- Effective gate thresholds should be logged with each run so quality decisions remain explainable.
+- Long-term objective: replace heuristic adaptation with ML policy learning constrained by guardrails.
 
 ### Assistive Intelligence Layer (New Abstraction)
 - Add a conversational mediation layer between user intent and execution runtime.

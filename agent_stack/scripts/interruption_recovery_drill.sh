@@ -14,7 +14,7 @@ SECTION_TITLE="${SECTION_TITLE:-Interruption Path}"
 SECTION_GOAL="${SECTION_GOAL:-Exercise interruption detection and reconcile resume behavior.}"
 
 log() {
-  printf '[drill] %s\n' "$*"
+  printf '[drill] %s\n' "$*" >&2
 }
 
 require_cmd() {
@@ -29,27 +29,28 @@ require_cmd python3
 
 json_get() {
   local expr="$1"
-  python3 - "$expr" <<'PY'
-import json,sys
-expr=sys.argv[1]
-data=json.load(sys.stdin)
-value=data
-for part in expr.split('.'):
-    if not part:
-        continue
-    if isinstance(value, dict):
-        value=value.get(part)
-    else:
-        value=None
-        break
-if isinstance(value,(dict,list)):
-    import json as _json
-    print(_json.dumps(value))
+  python3 -c '
+import json
+import sys
+
+expr = sys.argv[1]
+data = json.load(sys.stdin)
+value = data
+for part in expr.split("."):
+  if not part:
+    continue
+  if isinstance(value, dict):
+    value = value.get(part)
+  else:
+    value = None
+    break
+if isinstance(value, (dict, list)):
+  print(json.dumps(value))
 elif value is None:
-    print("")
+  print("")
 else:
-    print(value)
-PY
+  print(value)
+' "$expr"
 }
 
 wait_for_api() {
@@ -64,6 +65,30 @@ wait_for_api() {
     fi
     sleep "$POLL_SECONDS"
   done
+}
+
+list_active_tasks() {
+  curl -fsS "$API_BASE/api/status" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+for task in data.get("tasks", []):
+    if task.get("status") in {"queued", "running", "paused"}:
+        print("{}|{}|{}|{}".format(task.get("id"), task.get("status"), task.get("profile"), task.get("prompt")))
+'
+}
+
+require_idle_stack() {
+  local active
+  active="$(list_active_tasks)"
+  if [[ -z "$active" ]]; then
+    return 0
+  fi
+
+  log "Refusing to run interruption drill while other tasks are active; the drill restarts the API service."
+  printf '%s\n' "$active" >&2
+  return 1
 }
 
 wait_for_task_state() {
@@ -103,6 +128,7 @@ wait_for_task_state() {
 main() {
   log "Waiting for API readiness"
   wait_for_api
+  require_idle_stack
 
   local create_payload
   create_payload="$(cat <<JSON

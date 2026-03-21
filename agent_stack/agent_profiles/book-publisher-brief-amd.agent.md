@@ -1,10 +1,8 @@
 ---
 name: book-publisher-brief-amd
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 700
 temperature: 0.2
 think: false

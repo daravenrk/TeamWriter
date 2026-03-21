@@ -1,9 +1,8 @@
 ---
 name: amd-writer
-route: ollama_amd
-model: qwen3.5:27b
+runtime_preset: amd-qwen35-27b-49152
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 49152
 num_predict: 1024
 temperature: 0.5
 intent_keywords: write,essay,debate,summary,article,outline

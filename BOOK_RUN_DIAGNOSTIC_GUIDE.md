@@ -46,6 +46,9 @@ This document provides a standard procedure for diagnosing failed book runs in t
 - [ ] Verify stage route/model mapping in `run_journal.jsonl` matches current strategy standard
 - [ ] Verify profile planning output (`route`, `model`) for critical stages before relaunch
 - [ ] Verify fallback events are explicit (`stage_fallback_applied` or `stage_warning`) and not silent stops
+- [ ] Verify adaptive quality events are present (`quality_thresholds_loaded`, `quality_learning_state_updated`)
+- [ ] Verify `run_summary.json` contains `quality_thresholds` (base/effective/snapshot)
+- [ ] Verify per-book `quality_learning_state.json` exists and updates after successful runs
 
 ## 4.1 Strategy Validation Commands
 - Run preflight validator (recommended):
@@ -80,12 +83,20 @@ This document provides a standard procedure for diagnosing failed book runs in t
   ```sh
   rg -n 'stage_attempt_start|stage_fallback_applied|stage_warning|run_success|run_failure' /home/daravenrk/dragonlair/book_project/<book-slug>/runs/<run-name>/run_journal.jsonl
   ```
+- Confirm adaptive quality threshold state:
+  ```sh
+  RUN_DIR=/home/daravenrk/dragonlair/book_project/<book-slug>/runs/<run-name>
+  rg -n 'quality_thresholds_loaded|quality_learning_state_updated' "$RUN_DIR/run_journal.jsonl"
+  jq '.quality_thresholds' "$RUN_DIR/run_summary.json"
+  jq '.' /home/daravenrk/dragonlair/book_project/<book-slug>/quality_learning_state.json
+  ```
 
 ## 5. Common Issues
 - Early failure (empty drafts, short log): Likely input, config, or environment error
 - Agent quarantine: Check orchestrator health report and error details
 - Dependency errors: See API server logs for missing modules or import errors
 - Output file missing: Stage may have failed or not run
+- Quality gate regressions after early stable runs: effective adaptive thresholds may have tightened; compare `run_summary.json` `quality_thresholds.effective` with baseline floors
 
 ## 6. Next Steps
 - Summarize findings and error messages

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+"""Direct NVIDIA endpoint probe.
+
+This utility talks to Ollama `/api/generate` directly and intentionally bypasses
+the orchestrator runtime preset abstraction. Use it to inspect endpoint-level
+GPU compute behavior, not to validate preset-governed book-flow execution.
+"""
+
 from __future__ import annotations
 
 import argparse

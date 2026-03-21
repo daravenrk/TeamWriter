@@ -20,6 +20,7 @@ from pathlib import Path
 from .lock_manager import AgentLockManager, EndpointPolicy
 from .ollama_subagent import OllamaSubagent
 from .profile_loader import load_agent_profiles
+from .runtime_presets import DEFAULT_RUNTIME_PRESETS_PATH, load_runtime_presets
 from .validate_agent_profiles import DEFAULT_MAX_SYSTEM_PROMPT_CHARS, lint_profiles
 from .exceptions import (
     AgentHungError,
@@ -74,11 +75,15 @@ class OrchestratorAgent:
         self.server_mode = str(os.environ.get("AGENT_SERVER_MODE", "standard")).strip().lower()
         self.strict_mode_validation = str(os.environ.get("AGENT_STRICT_MODE_VALIDATION", "true")).lower() in {"1", "true", "yes", "on"}
         self.profile_dir = str(Path(__file__).parent / "agent_profiles")
+        self.runtime_preset_path = Path(
+            os.environ.get("AGENT_RUNTIME_PRESET_PATH", str(DEFAULT_RUNTIME_PRESETS_PATH))
+        )
         self.max_system_prompt_chars = max(
             1,
             int(os.environ.get("AGENT_MAX_SYSTEM_PROMPT_CHARS", str(DEFAULT_MAX_SYSTEM_PROMPT_CHARS))),
         )
         self._validate_profiles_or_raise()
+        self.runtime_presets = load_runtime_presets(self.runtime_preset_path)
         self.profiles = load_agent_profiles(self.profile_dir)
         self._profile_stamp = self._compute_profile_stamp()
         amd_endpoint = os.environ.get("OLLAMA_AMD_ENDPOINT", "http://127.0.0.1:11435")
@@ -165,6 +170,17 @@ class OrchestratorAgent:
         self.force_full_gpu_layers = str(os.environ.get("AGENT_FORCE_FULL_GPU_LAYERS", "true")).lower() in {
             "1", "true", "yes", "on"
         }
+        self.nvidia_max_ctx = max(1024, int(os.environ.get("AGENT_NVIDIA_MAX_CTX", "49152")))
+        self.nvidia_max_ctx_by_model = self._parse_env_json_ctx_map(
+            "AGENT_NVIDIA_MAX_CTX_BY_MODEL",
+            default_raw=json.dumps(
+                {
+                    "qwen3.5:4b": 8192,
+                    "qwen3.5:2b": 65536,
+                    "qwen3.5:0.8b": 162816,
+                }
+            ),
+        )
         self.nvidia_num_gpu_default = max(1, int(os.environ.get("AGENT_NVIDIA_NUM_GPU_DEFAULT", "999")))
         self.amd_num_gpu_default = max(1, int(os.environ.get("AGENT_AMD_NUM_GPU_DEFAULT", "999")))
         self.nvidia_num_gpu_by_model = self._parse_env_json_int_map("AGENT_NVIDIA_NUM_GPU_BY_MODEL")
@@ -202,6 +218,12 @@ class OrchestratorAgent:
         ).lower() in {"1", "true", "yes", "on"}
         self.enable_cross_route_fallback = str(
             os.environ.get("AGENT_ENABLE_CROSS_ROUTE_FALLBACK", "false")
+        ).lower() in {"1", "true", "yes", "on"}
+        self.enforce_route_model_allowlists = str(
+            os.environ.get("AGENT_ENFORCE_ROUTE_MODEL_ALLOWLISTS", "true")
+        ).lower() in {"1", "true", "yes", "on"}
+        self.enforce_nvidia_tiny_models = str(
+            os.environ.get("AGENT_ENFORCE_NVIDIA_TINY_MODELS", "true")
         ).lower() in {"1", "true", "yes", "on"}
         self.quarantine_seconds = 60
         self.heartbeat_timeout_seconds = float(
@@ -275,6 +297,21 @@ class OrchestratorAgent:
             os.environ.get(
                 "AGENT_QUARANTINE_EVENTS_PATH",
                 "/home/daravenrk/dragonlair/book_project/quarantine_events.jsonl",
+            )
+        )
+        self.ml_mode = str(os.environ.get("AGENT_ML_MODE", "shadow")).strip().lower()
+        if self.ml_mode not in {"off", "shadow", "auto"}:
+            self.ml_mode = "shadow"
+        self.ml_enabled = self.ml_mode in {"shadow", "auto"}
+        self.ml_min_confidence = max(
+            0.0,
+            min(1.0, float(os.environ.get("AGENT_ML_MIN_CONFIDENCE", "0.75") or 0.75)),
+        )
+        self.ml_top_k = max(1, int(os.environ.get("AGENT_ML_TOP_K", "3") or 3))
+        self.ml_shadow_events_path = Path(
+            os.environ.get(
+                "AGENT_ML_SHADOW_EVENTS_PATH",
+                "/home/daravenrk/dragonlair/book_project/ml_shadow_events.jsonl",
             )
         )
         self._reward_lock = threading.Lock()
@@ -390,6 +427,98 @@ class OrchestratorAgent:
 
         if updated:
             self._persist_profile_rewards()
+
+    def _build_ml_shadow_recommendations(self, profile, user_input, selected_route, selected_model):
+        if not self.ml_enabled:
+            return {
+                "mode": self.ml_mode,
+                "enabled": False,
+                "confidence": 0.0,
+                "top_k": [],
+                "chosen": None,
+                "note": "ml disabled",
+            }
+
+        profile_name = str((profile or {}).get("name") or "").strip()
+        token_balance = self._get_profile_tokens(profile_name)
+        allowed_routes = [str(route).strip() for route in ((profile or {}).get("allowed_routes") or []) if str(route).strip()]
+        model_allowlist = [str(item).strip() for item in ((profile or {}).get("model_allowlist") or []) if str(item).strip()]
+
+        candidates = []
+
+        def _add_candidate(route_name, model_name, rationale):
+            route_name = self._resolve_route(str(route_name or "").strip() or "ollama_amd")
+            model_name = str(model_name or "").strip()
+            if not model_name:
+                return
+            if self.enforce_route_model_allowlists and allowed_routes and route_name not in allowed_routes:
+                return
+            if self.enforce_route_model_allowlists and model_allowlist and model_name not in model_allowlist:
+                return
+            if self.enforce_nvidia_tiny_models and route_name == "ollama_nvidia" and model_name not in self.nvidia_tiny_models:
+                return
+
+            base = 0.4
+            if route_name == selected_route and model_name == selected_model:
+                base += 0.35
+            if route_name == "ollama_nvidia":
+                base += 0.05
+            if token_balance is not None and int(token_balance) <= 2 and route_name == "ollama_nvidia":
+                base += 0.1
+            if "book-" in profile_name and route_name == "ollama_amd":
+                base += 0.03
+
+            confidence = max(0.05, min(0.99, base))
+            candidates.append(
+                {
+                    "route": route_name,
+                    "model": model_name,
+                    "confidence": round(confidence, 3),
+                    "score": round(confidence, 3),
+                    "rationale": rationale,
+                }
+            )
+
+        _add_candidate(selected_route, selected_model, "current_selected")
+        _add_candidate(selected_route, self.default_route_models.get(selected_route), "route_default_model")
+        default_route = self._resolve_route(str((profile or {}).get("route") or selected_route or "ollama_amd"))
+        _add_candidate(default_route, str((profile or {}).get("model") or selected_model), "profile_default")
+
+        for fallback in self._collect_fallback_routes(selected_route):
+            fallback_model = self.default_route_models.get(fallback)
+            _add_candidate(fallback, fallback_model, "fallback_route_default")
+
+        dedup = {}
+        for row in candidates:
+            key = (row.get("route"), row.get("model"))
+            if key not in dedup or float(row.get("score", 0.0)) > float(dedup[key].get("score", 0.0)):
+                dedup[key] = row
+        ranked = sorted(dedup.values(), key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        ranked = ranked[: self.ml_top_k]
+
+        chosen = ranked[0] if ranked else None
+        return {
+            "mode": self.ml_mode,
+            "enabled": True,
+            "confidence": float(chosen.get("confidence", 0.0)) if isinstance(chosen, dict) else 0.0,
+            "top_k": ranked,
+            "chosen": chosen,
+            "min_confidence": self.ml_min_confidence,
+            "would_apply": bool(self.ml_mode == "auto" and isinstance(chosen, dict) and float(chosen.get("confidence", 0.0)) >= self.ml_min_confidence),
+            "prompt_preview": str(user_input or "")[:180],
+            "token_balance": token_balance,
+        }
+
+    def _emit_ml_shadow_event(self, event_type, payload):
+        if not self.ml_enabled:
+            return
+        body = {
+            "timestamp": time.time(),
+            "event": str(event_type or "ml_shadow"),
+            "payload": payload or {},
+        }
+        self._append_jsonl(self.ml_shadow_events_path, body)
+        self.analytics_log_event("ml_shadow_event", {"event": body["event"], "payload": payload or {}})
 
     def _persist_profile_rewards(self):
         payload = {
@@ -624,7 +753,212 @@ class OrchestratorAgent:
                 parts.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
             except OSError:
                 continue
+        try:
+            stat = self.runtime_preset_path.stat()
+            parts.append(f"{self.runtime_preset_path}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            pass
         return "|".join(parts)
+
+    def _estimate_required_context(self, prompt_chars):
+        chars = max(0, int(prompt_chars or 0))
+        if chars <= 4000:
+            return 8192
+        if chars <= 12000:
+            return 16384
+        if chars <= 25000:
+            return 32768
+        if chars <= 45000:
+            return 49152
+        if chars <= 90000:
+            return 131072
+        return 192000
+
+    def _collect_route_models_from_presets(self):
+        route_models = {}
+        for payload in (self.runtime_presets or {}).values():
+            route = str((payload or {}).get("route") or "").strip()
+            model = str((payload or {}).get("model") or "").strip()
+            if not route or not model:
+                continue
+            route_models.setdefault(route, set()).add(model)
+        return route_models
+
+    def _is_model_approved_for_route(self, route_name, model_name):
+        route = str(route_name or "").strip()
+        model = str(model_name or "").strip()
+        if not route or not model:
+            return False
+        route_models = self._collect_route_models_from_presets()
+        return model in route_models.get(route, set())
+
+    def _resolve_profile_runtime_settings(self, profile, user_input=""):
+        if not profile:
+            return None, None, None, None
+
+        default_preset_name = str(profile.get("runtime_preset") or "").strip()
+        if not default_preset_name:
+            raise AgentProfileError(
+                f"Profile {profile.get('name', 'default')} missing required runtime_preset",
+                details={"profile": profile.get("name")},
+            )
+
+        explicit_preset_allowlist = [
+            str(item).strip()
+            for item in (profile.get("runtime_preset_allowlist") or [])
+            if str(item).strip()
+        ]
+        allowed_routes = [
+            str(route).strip()
+            for route in (profile.get("allowed_routes") or [])
+            if str(route).strip()
+        ]
+        allowed_routes_set = set(allowed_routes)
+        model_allowlist = [
+            str(item).strip()
+            for item in (profile.get("model_allowlist") or [])
+            if str(item).strip()
+        ]
+        model_allowlist_set = set(model_allowlist)
+
+        if explicit_preset_allowlist:
+            candidate_names = [default_preset_name] + explicit_preset_allowlist
+        else:
+            candidate_names = [default_preset_name]
+            default_preset = self.runtime_presets.get(default_preset_name) or {}
+            default_model = str(default_preset.get("model") or "").strip()
+            candidate_models = model_allowlist if model_allowlist else ([default_model] if default_model else [])
+            candidate_model_set = {item for item in candidate_models if item}
+            for preset_name, payload in self.runtime_presets.items():
+                route = str((payload or {}).get("route") or "").strip()
+                model = str((payload or {}).get("model") or "").strip()
+                if not route or not model:
+                    continue
+                if allowed_routes_set and route not in allowed_routes_set:
+                    continue
+                if candidate_model_set and model not in candidate_model_set:
+                    continue
+                candidate_names.append(str(preset_name))
+
+        deduped_names = []
+        seen_names = set()
+        for name in candidate_names:
+            if not name or name in seen_names:
+                continue
+            deduped_names.append(name)
+            seen_names.add(name)
+
+        profile_options = dict(profile.get("options", {}) or {})
+        for protected in ("num_ctx", "num_gpu", "num_gpus"):
+            profile_options.pop(protected, None)
+
+        candidates = []
+        for rank, preset_name in enumerate(deduped_names):
+            preset = copy.deepcopy(self.runtime_presets.get(preset_name) or {})
+            if not preset:
+                continue
+            route = str(preset.get("route") or "").strip() or None
+            model = str(preset.get("model") or "").strip() or None
+            if not route or not model:
+                continue
+            if allowed_routes_set and route not in allowed_routes_set:
+                continue
+            if model_allowlist_set and model not in model_allowlist_set:
+                continue
+
+            options = dict(preset.get("options") or {})
+            options.update(profile_options)
+            if route == "ollama_nvidia" and "num_ctx" in options:
+                try:
+                    ctx = int(options.get("num_ctx"))
+                    max_ctx = int(self.nvidia_max_ctx_by_model.get(model, self.nvidia_max_ctx))
+                    if ctx > max_ctx:
+                        options["num_ctx"] = int(max_ctx)
+                except (TypeError, ValueError):
+                    pass
+
+            candidates.append(
+                {
+                    "preset_name": preset_name,
+                    "route": route,
+                    "model": model,
+                    "options": options,
+                    "rank": rank,
+                }
+            )
+
+        if not candidates:
+            raise AgentProfileError(
+                f"Profile {profile.get('name', 'default')} has no valid runtime preset candidate",
+                details={
+                    "profile": profile.get("name"),
+                    "runtime_preset": default_preset_name,
+                    "runtime_preset_allowlist": explicit_preset_allowlist,
+                    "allowed_routes": allowed_routes,
+                    "model_allowlist": model_allowlist,
+                },
+            )
+
+        prompt_chars = len(str(user_input or ""))
+        target_ctx = self._estimate_required_context(prompt_chars)
+
+        preferred_model_order = []
+        if model_allowlist:
+            preferred_model_order.extend(model_allowlist)
+        for item in candidates:
+            model_name = str(item.get("model") or "").strip()
+            if model_name and model_name not in preferred_model_order:
+                preferred_model_order.append(model_name)
+        model_rank_map = {name: idx for idx, name in enumerate(preferred_model_order)}
+
+        preferred_route_order = []
+        if allowed_routes:
+            preferred_route_order.extend(allowed_routes)
+        default_preset = self.runtime_presets.get(default_preset_name) or {}
+        default_route = str(default_preset.get("route") or "").strip()
+        if default_route and default_route not in preferred_route_order:
+            preferred_route_order.append(default_route)
+        for item in candidates:
+            route_name = str(item.get("route") or "").strip()
+            if route_name and route_name not in preferred_route_order:
+                preferred_route_order.append(route_name)
+        route_rank_map = {name: idx for idx, name in enumerate(preferred_route_order)}
+
+        best = None
+        best_key = None
+        for item in candidates:
+            options = dict(item.get("options") or {})
+            try:
+                ctx = int(options.get("num_ctx") or 8192)
+            except (TypeError, ValueError):
+                ctx = 8192
+
+            meets_target = int(ctx >= target_ctx)
+            if meets_target:
+                ctx_gap = int(ctx - target_ctx)
+            else:
+                # Prefer the closest smaller context when no preset can satisfy required context.
+                ctx_gap = int(target_ctx - ctx)
+
+            model_rank = model_rank_map.get(str(item.get("model") or "").strip(), len(model_rank_map) + 99)
+            route_rank = route_rank_map.get(str(item.get("route") or "").strip(), len(route_rank_map) + 99)
+
+            # Selection order (strict): model, then context, then environment route.
+            # Lower tuple wins.
+            ranking_key = (
+                model_rank,
+                0 if meets_target else 1,
+                ctx_gap,
+                route_rank,
+                0 if item.get("preset_name") == default_preset_name else 1,
+                int(item.get("rank") or 0),
+            )
+
+            if best is None or ranking_key < best_key:
+                best = item
+                best_key = ranking_key
+
+        return best["route"], best["model"], best["options"], best["preset_name"]
 
     def _load_route_aliases(self):
         aliases = {}
@@ -652,11 +986,25 @@ class OrchestratorAgent:
             return route
         return resolved
 
+    def _collect_fallback_routes(self, route):
+        selected = self._resolve_route(str(route or "ollama_amd").strip() or "ollama_amd")
+        if not self.enable_cross_route_fallback:
+            return []
+
+        fallbacks = []
+        for candidate in self.subagents:
+            resolved = self._resolve_route(candidate)
+            if resolved == selected or resolved in fallbacks:
+                continue
+            fallbacks.append(resolved)
+        return fallbacks
+
     def _reload_profiles_if_changed(self):
         current = self._compute_profile_stamp()
         if current == self._profile_stamp:
             return
         self._validate_profiles_or_raise()
+        self.runtime_presets = load_runtime_presets(self.runtime_preset_path)
         self.profiles = load_agent_profiles(self.profile_dir)
         self._profile_stamp = current
         with self._reward_lock:
@@ -666,6 +1014,7 @@ class OrchestratorAgent:
         report = lint_profiles(
             profile_dir=self.profile_dir,
             max_system_prompt_chars=self.max_system_prompt_chars,
+            runtime_preset_path=self.runtime_preset_path,
         )
         if report.get("valid"):
             return
@@ -875,6 +1224,29 @@ class OrchestratorAgent:
             resolved[model_name] = layers if layers == -1 else max(1, layers)
         return resolved
 
+    def _parse_env_json_ctx_map(self, env_key, default_raw=""):
+        raw = str(os.environ.get(env_key, default_raw)).strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        resolved = {}
+        for key, value in parsed.items():
+            model_name = str(key or "").strip()
+            if not model_name:
+                continue
+            try:
+                ctx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if ctx >= 1024:
+                resolved[model_name] = ctx
+        return resolved
+
     def _resolve_amd_tensor_split(self):
         raw = str(os.environ.get("AGENT_AMD_TENSOR_SPLIT", "")).strip()
         if raw:
@@ -937,7 +1309,7 @@ class OrchestratorAgent:
 
         profile_name = str(profile.get("name") or "default")
         allowed_routes = [str(route).strip() for route in (profile.get("allowed_routes") or []) if str(route).strip()]
-        if allowed_routes and route_name not in allowed_routes:
+        if self.enforce_route_model_allowlists and allowed_routes and route_name not in allowed_routes:
             raise AgentProfileError(
                 f"Profile {profile_name} does not allow route {route_name}",
                 details={
@@ -948,7 +1320,7 @@ class OrchestratorAgent:
             )
 
         model_allowlist = [str(item).strip() for item in (profile.get("model_allowlist") or []) if str(item).strip()]
-        if model_allowlist and str(model_name or "").strip() not in model_allowlist:
+        if self.enforce_route_model_allowlists and model_allowlist and str(model_name or "").strip() not in model_allowlist:
             raise AgentProfileError(
                 f"Profile {profile_name} does not allow model {model_name}",
                 details={
@@ -958,8 +1330,20 @@ class OrchestratorAgent:
                 },
             )
 
+        if self.enforce_route_model_allowlists and not self._is_model_approved_for_route(route_name, model_name):
+            route_models = sorted(self._collect_route_models_from_presets().get(str(route_name or "").strip(), set()))
+            raise AgentProfileError(
+                f"Profile {profile_name} requested model {model_name} on route {route_name}, but that model is not approved for that environment",
+                details={
+                    "profile": profile_name,
+                    "route": route_name,
+                    "model": model_name,
+                    "approved_models_for_route": route_models,
+                },
+            )
+
         # NVIDIA route constraint: only tiny models allowed (GPU memory limit)
-        if route_name == "ollama_nvidia" and model_name:
+        if self.enforce_nvidia_tiny_models and route_name == "ollama_nvidia" and model_name:
             model_str = str(model_name).strip()
             if model_str not in self.nvidia_tiny_models:
                 raise AgentProfileError(
@@ -1590,6 +1974,11 @@ class OrchestratorAgent:
             "analytics": {
                 "ollama_run_ledger": str(self.ollama_run_ledger_path),
                 "quarantine_events": str(self.quarantine_events_path),
+                "ml_shadow_events": str(self.ml_shadow_events_path),
+                "ml_mode": self.ml_mode,
+                "ml_enabled": self.ml_enabled,
+                "ml_min_confidence": self.ml_min_confidence,
+                "ml_top_k": self.ml_top_k,
             },
             "agents": health_agents,
         }
@@ -1714,7 +2103,7 @@ class OrchestratorAgent:
         state_running = str(health.get("state") or "") == "running"
         return bool(inflight > 0 or state_running)
 
-    def plan_request(self, user_input, profile_name=None, stream_override=None, model_override=None):
+    def plan_request(self, user_input, profile_name=None, stream_override=None, model_override=None, correlation_id=None):
         with self.lock_manager.edit_lock(name="orchestrator_route"):
             self._reload_profiles_if_changed()
             if profile_name:
@@ -1724,9 +2113,11 @@ class OrchestratorAgent:
             else:
                 profile = self._pick_profile(user_input)
 
-            route = profile.get("route", "ollama_amd") if profile else "ollama_amd"
-            route = self._resolve_route(route)
-            model = profile.get("model") if profile else None
+            route, model, options, selected_runtime_preset = self._resolve_profile_runtime_settings(
+                profile,
+                user_input=user_input,
+            )
+            route = self._resolve_route(route or "ollama_amd")
             model = self._resolve_dynamic_model(profile, user_input, model)
             if model_override and str(model_override).strip():
                 model = str(model_override).strip()
@@ -1734,10 +2125,12 @@ class OrchestratorAgent:
             stream = bool(profile.get("default_stream", False)) if profile else False
             if stream_override is not None:
                 stream = bool(stream_override)
-            options = dict(profile.get("options", {})) if profile else None
             system_prompt = self._build_system_prompt(profile)
             timeout_seconds = self._get_profile_timeout_seconds(profile, route)
             retry_limit = self._get_profile_retry_limit(profile)
+            ml_shadow = self._build_ml_shadow_recommendations(profile, user_input, route, model)
+
+            resolved_correlation_id = str(correlation_id or "").strip() or str(uuid.uuid4())
 
             return {
                 "profile": profile,
@@ -1748,6 +2141,9 @@ class OrchestratorAgent:
                 "system_prompt": system_prompt,
                 "timeout_seconds": timeout_seconds,
                 "retry_limit": retry_limit,
+                "ml_shadow": ml_shadow,
+                "correlation_id": resolved_correlation_id,
+                "runtime_preset": selected_runtime_preset,
             }
 
     def handle_request_with_overrides(
@@ -1758,6 +2154,7 @@ class OrchestratorAgent:
         stream_override=None,
         on_stream=None,
         direction=None,
+        correlation_id=None,
     ):
         # Auto-extract direction if not provided
         if not direction and not profile_name:
@@ -1773,14 +2170,17 @@ class OrchestratorAgent:
                     "Focus on constraints, goals, or style if present.\n\nUSER_REQUEST:\n" + user_input
                 )
                 try:
-                    summary_route = self._resolve_route(nvidia_fast_profile["route"])
+                    summary_route, nvidia_fast_model, nvidia_fast_options, _ = self._resolve_profile_runtime_settings(
+                        nvidia_fast_profile
+                    )
+                    summary_route = self._resolve_route(summary_route or "ollama_nvidia")
                     auto_direction = self._invoke_with_triage(
                         summary_route,
                         summarization_prompt,
-                        model=nvidia_fast_profile.get("model"),
+                        model=nvidia_fast_model,
                         stream=False,
                         system_prompt=self._build_system_prompt(nvidia_fast_profile),
-                        options=nvidia_fast_profile.get("options", {}),
+                        options=nvidia_fast_options or {},
                         on_stream=None,
                         profile_name="nvidia-fast",
                     )
@@ -1798,6 +2198,7 @@ class OrchestratorAgent:
             profile_name=profile_name,
             stream_override=stream_override,
             model_override=model_override,
+            correlation_id=correlation_id,
         )
         preferred = plan["route"]
         model = plan["model"]
@@ -1807,11 +2208,21 @@ class OrchestratorAgent:
         timeout_seconds = float(plan.get("timeout_seconds") or self.call_timeout_seconds)
         retry_limit = max(0, int(plan.get("retry_limit") or 0))
         resolved_profile_name = (plan.get("profile") or {}).get("name")
+        ml_shadow = plan.get("ml_shadow") or {}
+        request_correlation_id = str(plan.get("correlation_id") or "").strip() or str(uuid.uuid4())
+        if self.ml_enabled:
+            self._emit_ml_shadow_event(
+                "plan",
+                {
+                    "correlation_id": request_correlation_id,
+                    "selected_route": preferred,
+                    "ml_shadow": ml_shadow,
+                },
+            )
 
         try:
             attempt = 0
             while True:
-                attempt += 1
                 self.analytics_log_event(
                     "agent_execution_attempt",
                     {
@@ -1832,6 +2243,7 @@ class OrchestratorAgent:
                         options=options,
                         on_stream=on_stream,
                         profile_name=resolved_profile_name,
+                        correlation_id=request_correlation_id,
                         timeout_override=timeout_seconds,
                     )
                     break
@@ -1881,6 +2293,7 @@ class OrchestratorAgent:
                 options=retry_options,
                 on_stream=None,
                 profile_name=resolved_profile_name,
+                correlation_id=request_correlation_id,
                 timeout_override=timeout_seconds,
             )
         except Exception:
@@ -1898,6 +2311,7 @@ class OrchestratorAgent:
                 options=options,
                 on_stream=on_stream,
                 profile_name=resolved_profile_name,
+                correlation_id=request_correlation_id,
                 timeout_override=timeout_seconds,
             )
 

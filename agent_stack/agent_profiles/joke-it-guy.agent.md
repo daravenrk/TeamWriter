@@ -1,9 +1,8 @@
 ---
 name: joke-it-guy
-route: ollama_nvidia
-model: qwen3.5:2b
+runtime_preset: nvidia-qwen35-2b-8192
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 8192
 num_predict: 180
 temperature: 0.75
 think: false

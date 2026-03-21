@@ -24,9 +24,19 @@ services:
       AGENT_ENDPOINT_MAX_INFLIGHT_NVIDIA: "3"
       AGENT_BLOCK_CPU_BACKEND: "true"
       AGENT_FORCE_FULL_GPU_LAYERS: "true"
+      BOOK_QUALITY_MIN_SCORE: "3.0"
+      BOOK_QUALITY_MIN_AVG_SCORE: "3.0"
+      BOOK_QUALITY_MIN_CONTENT_SCORE: "2.5"
+      BOOK_QUALITY_ADAPTIVE_ENABLED: "true"
+      BOOK_QUALITY_ADAPTIVE_ALPHA: "0.2"
+      BOOK_QUALITY_ADAPTIVE_GAIN: "0.5"
+      BOOK_QUALITY_ADAPTIVE_WARMUP_RUNS: "3"
+      BOOK_QUALITY_ADAPTIVE_MAX_SCORE: "4.5"
+      BOOK_QUALITY_ADAPTIVE_MAX_CONTENT_SCORE: "4.0"
       AGENT_NVIDIA_NUM_GPU_DEFAULT: "-1"
       AGENT_AMD_NUM_GPU_DEFAULT: "-1"
       AGENT_NVIDIA_NUM_GPU_BY_MODEL: '{"qwen3.5:4b":-1,"qwen3.5:2b":-1,"qwen3.5:0.8b":-1,"qwen2.5-coder:3b":-1,"qwen2.5-coder:1.5b":-1,"llama3.2:3b":-1,"llama3.2:1b":-1,"codegemma:2b":-1}'
+      AGENT_NVIDIA_MAX_CTX_BY_MODEL: '{"qwen3.5:4b":8192,"qwen3.5:2b":65536,"qwen3.5:0.8b":131072}'
       AGENT_AMD_NUM_GPU_BY_MODEL: '{"qwen3.5:27b":-1,"qwen2.5-coder:14b":-1,"qwen3.5:9b":-1,"llama3.1:8b":-1}'
       AGENT_AMD_GPU_COUNT: "2"
       AGENT_AMD_MAIN_GPU: "0"

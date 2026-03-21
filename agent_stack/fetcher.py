@@ -31,6 +31,8 @@ def scrape_allowed(url: str, user_agent: str) -> bool:
     try:
         parser.set_url(robots_url)
         parser.read()
+        # Do not bypass robots.txt lightly. Overriding this check can create legal
+        # and policy risk even when the target appears operationally under your control.
         return parser.can_fetch(user_agent, url)
     except Exception:
         # If robots cannot be retrieved, default to allow and let caller decide policy.

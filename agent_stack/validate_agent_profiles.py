@@ -4,10 +4,16 @@ import os
 import re
 from pathlib import Path
 
+try:
+    from .runtime_presets import DEFAULT_RUNTIME_PRESETS_PATH, load_runtime_presets
+except ImportError:
+    from runtime_presets import DEFAULT_RUNTIME_PRESETS_PATH, load_runtime_presets
+
 PROFILE_DIR = Path(__file__).parent / "agent_profiles"
 SUPPORTED_ROUTES = {"ollama_amd", "ollama_nvidia"}
 DEFAULT_MAX_SYSTEM_PROMPT_CHARS = max(1, int(os.environ.get("AGENT_MAX_SYSTEM_PROMPT_CHARS", "12000")))
-REQUIRED_FRONTMATTER_KEYS = ("name", "route", "model")
+REQUIRED_FRONTMATTER_KEYS = ("name", "runtime_preset")
+PROTECTED_RUNTIME_KEYS = ("route", "model", "num_ctx", "num_gpu", "num_gpus")
 REQUIRED_SECTION_KEYS = {
     "purpose": "# Purpose",
     "system_behavior": "# System Behavior",
@@ -24,6 +30,7 @@ ALLOWED_FRONTMATTER_KEYS = {
     "num_predict",
     "temperature",
     "think",
+    "num_gpu",
     "num_gpus",
     "timeout_seconds",
     "retry_limit",
@@ -33,6 +40,8 @@ ALLOWED_FRONTMATTER_KEYS = {
     "adaptive_candidates",
     "adaptive_min_ctx",
     "adaptive_max_ctx",
+    "runtime_preset",
+    "runtime_preset_allowlist",
 }
 PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 PLACEHOLDER_PATTERN = re.compile(r"\b(todo|tbd|fixme)\b", re.IGNORECASE)
@@ -131,7 +140,7 @@ def _render_system_prompt(profile_name, sections):
     return "\n".join(blocks).strip()
 
 
-def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHARS):
+def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHARS, runtime_presets=None):
     content = path.read_text(encoding="utf-8")
     frontmatter_text, body, split_errors = _split_profile_document(content)
     report = {
@@ -155,17 +164,45 @@ def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHA
     if unknown_keys:
         report["errors"].append(f"unsupported frontmatter keys: {', '.join(unknown_keys)}")
 
+    runtime_presets = runtime_presets or {}
     for key in REQUIRED_FRONTMATTER_KEYS:
         if not str(frontmatter.get(key) or "").strip():
             report["errors"].append(f"missing required frontmatter key: {key}")
+
+    runtime_preset_name = str(frontmatter.get("runtime_preset") or "").strip()
+    runtime_preset = runtime_presets.get(runtime_preset_name) if runtime_preset_name else None
+    if runtime_preset_name and runtime_preset is None:
+        report["errors"].append(f"runtime_preset not found: {runtime_preset_name}")
+
+    runtime_preset_allowlist = [
+        item.strip()
+        for item in str(frontmatter.get("runtime_preset_allowlist") or "").split(",")
+        if item.strip()
+    ]
+    for preset_name in runtime_preset_allowlist:
+        if preset_name not in runtime_presets:
+            report["errors"].append(f"runtime_preset_allowlist contains unknown preset: {preset_name}")
+
+    # Route/model/context/GPU core runtime fields must come from runtime_preset.
+    for key in PROTECTED_RUNTIME_KEYS:
+        if key in frontmatter:
+            report["errors"].append(
+                f"inline {key} is not allowed when using runtime_preset; move it to runtime_presets.json"
+            )
 
     profile_name = str(frontmatter.get("name") or "").strip()
     if profile_name and not PROFILE_NAME_PATTERN.match(profile_name):
         report["errors"].append("profile name must match ^[a-z0-9][a-z0-9-]*$")
 
-    route = str(frontmatter.get("route") or "").strip()
+    route = str((runtime_preset or {}).get("route") or "").strip()
+    if not route:
+        report["errors"].append("runtime_preset missing required key: route")
     if route and route not in SUPPORTED_ROUTES:
         report["errors"].append(f"unsupported route: {route}")
+
+    model = str((runtime_preset or {}).get("model") or "").strip()
+    if not model:
+        report["errors"].append("runtime_preset missing required key: model")
 
     if "default_stream" in frontmatter:
         try:
@@ -179,7 +216,7 @@ def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHA
         except ValueError as exc:
             report["errors"].append(f"think {exc}")
 
-    for int_key in ("num_ctx", "num_predict", "priority", "num_gpus", "timeout_seconds", "retry_limit"):
+    for int_key in ("num_predict", "priority", "timeout_seconds", "retry_limit"):
         if int_key not in frontmatter:
             continue
         try:
@@ -200,7 +237,7 @@ def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHA
         except ValueError:
             report["errors"].append("temperature must be a float")
 
-    for list_key in ("intent_keywords", "allowed_routes", "model_allowlist"):
+    for list_key in ("intent_keywords", "allowed_routes", "model_allowlist", "runtime_preset_allowlist"):
         if list_key not in frontmatter:
             continue
         values = [item.strip() for item in str(frontmatter[list_key]).split(",") if item.strip()]
@@ -240,12 +277,31 @@ def validate_profile(path, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHA
     return report
 
 
-def lint_profiles(profile_dir=PROFILE_DIR, max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHARS):
+def lint_profiles(
+    profile_dir=PROFILE_DIR,
+    max_system_prompt_chars=DEFAULT_MAX_SYSTEM_PROMPT_CHARS,
+    runtime_preset_path=DEFAULT_RUNTIME_PRESETS_PATH,
+):
     profile_dir = Path(profile_dir)
+    runtime_presets = {}
+    runtime_preset_error = None
+    try:
+        runtime_presets = load_runtime_presets(runtime_preset_path)
+    except ValueError as exc:
+        runtime_preset_error = str(exc)
+
     reports = [
-        validate_profile(path, max_system_prompt_chars=max_system_prompt_chars)
+        validate_profile(
+            path,
+            max_system_prompt_chars=max_system_prompt_chars,
+            runtime_presets=runtime_presets,
+        )
         for path in sorted(profile_dir.glob("*.agent.md"))
     ]
+
+    if runtime_preset_error:
+        for report in reports:
+            report["errors"].append(f"runtime preset registry invalid: {runtime_preset_error}")
 
     paths_by_name = {}
     for report in reports:
@@ -298,12 +354,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Validate Dragonlair markdown agent profiles")
     parser.add_argument("--profile-dir", default=str(PROFILE_DIR))
     parser.add_argument("--max-system-prompt-chars", type=int, default=DEFAULT_MAX_SYSTEM_PROMPT_CHARS)
+    parser.add_argument("--runtime-preset-path", default=str(DEFAULT_RUNTIME_PRESETS_PATH))
     parser.add_argument("--json", action="store_true", help="Emit full JSON report")
     args = parser.parse_args(argv)
 
     report = lint_profiles(
         profile_dir=Path(args.profile_dir),
         max_system_prompt_chars=max(1, int(args.max_system_prompt_chars)),
+        runtime_preset_path=Path(args.runtime_preset_path),
     )
     if args.json:
         print(json.dumps(report, indent=2))

@@ -1,12 +1,10 @@
 ---
 name: book-story-skeleton
-route: ollama_amd
-model: qwen3.5:9b
+runtime_preset: amd-qwen35-9b-192000
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 192000
 num_predict: 4000
 temperature: 0.3
-num_gpus: 2
 intent_keywords: story-skeleton,story skeleton,book skeleton,skeleton,story arc planning,narrative planning,pre-writing,story structure
 priority: 105
 ---

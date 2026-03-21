@@ -39,6 +39,14 @@ def _parse_frontmatter(frontmatter):
         key, value = line.split(":", 1)
         data[key.strip()] = value.strip()
 
+    if "runtime_preset" in data:
+        data["runtime_preset"] = str(data["runtime_preset"]).strip()
+
+    if "runtime_preset_allowlist" in data:
+        data["runtime_preset_allowlist"] = _parse_csv(data["runtime_preset_allowlist"])
+    else:
+        data["runtime_preset_allowlist"] = []
+
     if "intent_keywords" in data:
         data["intent_keywords"] = [w.strip().lower() for w in data["intent_keywords"].split(",") if w.strip()]
     else:
@@ -125,11 +133,13 @@ def _parse_frontmatter(frontmatter):
             options["temperature"] = parsed
     if "think" in data:
         options["think"] = _parse_bool(data["think"])
-    # Add num_gpus to options if present
-    if "num_gpus" in data:
-        parsed = _parse_int(data["num_gpus"])
-        if parsed is not None:
-            options["num_gpus"] = parsed
+    # Add num_gpu to options if present (must match Ollama API key: "num_gpu", singular)
+    for _gpu_key in ("num_gpu", "num_gpus"):
+        if _gpu_key in data:
+            parsed = _parse_int(data[_gpu_key])
+            if parsed is not None:
+                options["num_gpu"] = parsed
+            break
     data["options"] = options
 
     return data
@@ -170,7 +180,8 @@ def load_agent_profiles(profile_dir):
         profile["sections"] = _parse_markdown_sections(body)
         profile["source"] = path
 
-        if "name" in profile and "route" in profile and "model" in profile:
+        has_runtime_source = bool(profile.get("runtime_preset"))
+        if "name" in profile and has_runtime_source:
             profiles.append(profile)
 
     profile_set = str(os.environ.get("AGENT_PROFILE_SET", "all")).strip().lower()
@@ -187,7 +198,7 @@ def validate_agent_profiles(profiles):
     """Validate agent profile collection for syntax/semantic errors.
     
     Checks:
-    - All required fields present and non-empty (name, route, model)
+    - All required fields present and non-empty (name, runtime_preset)
     - No duplicate profile names
     - Valid field types and ranges
     - think field is boolean if present
@@ -205,8 +216,6 @@ def validate_agent_profiles(profiles):
     for profile in profiles:
         source = profile.get("source", "<unknown>")
         name = profile.get("name", "").strip()
-        route = profile.get("route", "").strip()
-        model = profile.get("model", "").strip()
         
         # Check required fields
         if not name:
@@ -216,11 +225,15 @@ def validate_agent_profiles(profiles):
         else:
             seen_names.add(name)
             
-        if not route:
-            errors.append(f"  {source}: missing or empty 'route' field")
-            
-        if not model:
-            errors.append(f"  {source}: missing or empty 'model' field")
+        runtime_preset = str(profile.get("runtime_preset") or "").strip()
+        if not runtime_preset:
+            errors.append(f"  {source}: missing or empty 'runtime_preset' field")
+
+        if profile.get("route"):
+            errors.append(f"  {source} ({name}): inline 'route' is not allowed; use runtime_preset")
+
+        if profile.get("model"):
+            errors.append(f"  {source} ({name}): inline 'model' is not allowed; use runtime_preset")
         
         # Check optional field types
         options = profile.get("options", {})
@@ -243,11 +256,9 @@ def validate_agent_profiles(profiles):
         
         # num_ctx/num_predict validation (positive integers)
         if "num_ctx" in options:
-            ctx = options["num_ctx"]
-            if not isinstance(ctx, int) or ctx <= 0:
-                errors.append(
-                    f"  {source} ({name}): 'num_ctx' must be positive integer, got {ctx}"
-                )
+            errors.append(
+                f"  {source} ({name}): inline 'num_ctx' is not allowed; use runtime_preset options"
+            )
         
         if "num_predict" in options:
             pred = options["num_predict"]
@@ -256,13 +267,11 @@ def validate_agent_profiles(profiles):
                     f"  {source} ({name}): 'num_predict' must be positive integer, got {pred}"
                 )
         
-        # num_gpus validation (non-negative integer)
-        if "num_gpus" in options:
-            gpus = options["num_gpus"]
-            if not isinstance(gpus, int) or gpus < 0:
-                errors.append(
-                    f"  {source} ({name}): 'num_gpus' must be non-negative integer, got {gpus}"
-                )
+        # num_gpu validation: inline override is forbidden in strict preset mode.
+        if "num_gpu" in options:
+            errors.append(
+                f"  {source} ({name}): inline 'num_gpu/num_gpus' is not allowed; use runtime_preset options"
+            )
         
         # priority validation (integer)
         priority = profile.get("priority")

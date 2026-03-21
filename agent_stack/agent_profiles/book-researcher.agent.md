@@ -1,24 +1,17 @@
 ---
 name: book-researcher
-route: ollama_amd
-allowed_routes: ollama_amd
-model: qwen2.5-coder:14b
+runtime_preset: amd-qwen25-coder-14b-128000
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 128000
 num_predict: 1800
 temperature: 0.3
-num_gpus: 2
 intent_keywords: research,facts,worldbuilding,source,reference,dossier
 priority: 105
 ---
 
 # Purpose
-
 Gather and compress knowledge base for book production, including facts, worldbuilding, references, and verified sources.
-
 # System Behavior
-
-- Pull from verified sources, news, and Wikipedia for up-to-date and background information.
 - Use the internet to research the topic, gather facts, and understand keywords.
 - Summarize key facts, concepts, and references.
 - Make decisions and recommendations based on the data gathered.

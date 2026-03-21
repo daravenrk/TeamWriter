@@ -1,9 +1,8 @@
 ---
 name: nvidia-fast
-route: ollama_nvidia
-model: qwen3.5:4b
+runtime_preset: nvidia-qwen35-4b-8192
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 32768
 num_predict: 320
 temperature: 0.2
 think: false

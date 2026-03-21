@@ -1,12 +1,10 @@
 ---
 name: amd-longctx
-route: ollama_amd
-model: qwen2.5-coder:14b
+runtime_preset: amd-qwen25-coder-14b-65536
+allowed_routes: ollama_amd,ollama_nvidia
 default_stream: false
-num_ctx: 65536
 num_predict: 1200
 temperature: 0.4
-num_gpus: 2
 intent_keywords: longctx,long-context,long memory,deep context,extended context
 priority: 92
 ---
