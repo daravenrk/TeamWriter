@@ -94,6 +94,24 @@ This document provides a standard procedure for diagnosing failed book runs in t
   jq '.' /home/daravenrk/dragonlair/book_project/<book-slug>/quality_learning_state.json
   ```
 
+## 4.2 DR Run Consistency Validation
+- Run consistency DR audit over active + historical runs:
+  ```sh
+  cd /home/daravenrk/dragonlair
+  bin/run-consistency-dr --max-runs 50
+  ```
+- JSON output for automation/reporting:
+  ```sh
+  cd /home/daravenrk/dragonlair
+  bin/run-consistency-dr --json > /home/daravenrk/dragonlair/book_project/drill_reports/run_consistency_latest.json
+  ```
+- What this detects:
+  - missing `run_start`
+  - missing terminal event (`run_success|run_failure|forced_completion`) in archived runs
+  - progress events after terminal seal (consistency drift)
+  - stage attempt sequencing anomalies (warning-level)
+
+
 ## 5. Common Issues
 - Early failure (empty drafts, short log): Likely input, config, or environment error
 - `raw_output: null` on research/outline/planner/canon with no direct model exception: likely stale orchestrator runtime missing the `_invoke_with_triage()` return-path fix; rebuild/restart the active runtime and re-run diagnostics
@@ -106,6 +124,7 @@ This document provides a standard procedure for diagnosing failed book runs in t
 - Quality gate regressions after early stable runs: effective adaptive thresholds may have tightened; compare `run_summary.json` `quality_thresholds.effective` with baseline floors
 - Repeated warning `Skipping cli runtime activity update ... Permission denied`: telemetry writes are non-fatal but live status fidelity degrades. Fix file ownership/permissions on `book_project/cli_runtime_activity.json` and its lock file.
 - Repeated `datetime.utcnow()` warnings: non-fatal now, but should be migrated to timezone-aware UTC calls before Python runtime upgrades.
+- DR audit reports `progress events found after terminal event`: run was sealed but stage execution continued; treat as high-severity consistency defect and inspect scheduler/reconcile behavior.
 
 ## 5.1 Research Bootstrap Validation
 - Expected bootstrap result:

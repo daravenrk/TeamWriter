@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run consistency DR validator wrapper.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec python3 ./agent_stack/scripts/run_consistency_dr.py "$@"

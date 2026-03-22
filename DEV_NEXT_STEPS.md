@@ -52,6 +52,51 @@ agentctl ml-retrain        # Retrain from 50+ accumulated outcomes (weekly job)
 4. Normalize file ownership/permissions for `book_project/cli_runtime_activity.json` and lockfile to restore reliable live telemetry updates.
 5. Replace `datetime.utcnow()` usages with timezone-aware UTC calls to remove deprecation noise and future break risk.
 
+### DR Validation Added (2026-03-22)
+
+- Added run consistency DR validator script: `agent_stack/scripts/run_consistency_dr.py`
+- Added wrapper command: `bin/run-consistency-dr`
+- Purpose:
+  - Scan historical and active run journals under `book_project/*/(runs|run_history)`
+  - Enforce terminal-event consistency invariants
+  - Detect sealed-then-progressing runs (events continue after `run_success` / `run_failure`)
+  - Return non-zero exit on invariant violations for cron/automation use
+- Examples:
+  - `bin/run-consistency-dr --max-runs 50`
+  - `bin/run-consistency-dr --json > book_project/drill_reports/run_consistency_latest.json`
+
+### Session Update: Sparse WebUI + DR Findings (2026-03-22)
+
+- WebUI sparse-input hardening is now implemented in API launch path:
+  - `create_book_flow` now normalizes blank request fields via `_normalize_book_flow_request(...)` in `agent_stack/api_server.py`
+  - empty `title/premise/chapter_title/section_title/section_goal/audience/genre/tone` are auto-filled with safe defaults
+  - numeric fields are bounded (`chapter_number >= 1`, `writer_words >= 200`, `max_retries >= 0`)
+  - objective: allow operator to submit minimal prompt context and force the stack to infer missing details from canon/framework
+- Run-consistency DR validator was executed against current artifacts and detected real consistency violations:
+  - `test-book-flight/runs/20260322-021933-ch01-opening`: `run_failure` was followed by further progress events (`stage_attempt_*`, `stage_complete`, `stage_instantiated`)
+  - `test-book-flight/run_history/20260322-015949-ch01-opening`: missing `run_start` and progress events after terminal event
+  - this confirms DR tooling is catching exactly the class of non-deterministic completion drift we want to prevent
+
+### New TODOs From This Session
+
+- [ ] Add hard runtime seal guard after terminal events in `book_flow` and/or API scheduler:
+  - once `run_success|run_failure|forced_completion` is written, reject/ignore any subsequent stage-progress events for that run ID
+  - emit explicit `sealed_run_progress_blocked` journal event when blocked
+- [ ] Add automatic stale-active-run sanitizer on API startup/reconcile:
+  - clear `cli_runtime_activity.active_runs` entries whose process/run dir is no longer valid
+  - ensure task ledger status transitions are idempotent (`running -> cancelled|failed`) with reason field
+- [ ] Add scheduled DR audit + report archiving:
+  - run `bin/run-consistency-dr --json` on a schedule
+  - write timestamped outputs under `book_project/drill_reports/`
+  - include summary status marker file for automation (`pass|fail`)
+- [ ] Add WebUI/API visibility for DR status:
+  - expose latest run-consistency DR result in `/api/status` (or dedicated `/api/dr/run-consistency`)
+  - show failing run count + top issues in Live View
+- [ ] Add CI gate for synthetic run journal invariants:
+  - include fixtures that assert no progress events after terminal events
+  - fail CI when invariant checks regress
+
+
 ---
 
 ## Book Flow Risk Register (2026-03-20)

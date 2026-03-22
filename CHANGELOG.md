@@ -1,6 +1,16 @@
 # Changelog
 
 ## [2026-03-22]
+- Added sparse WebUI book-flow request normalization in API:
+	- `/api/book-flow` now normalizes blank fields via `_normalize_book_flow_request(...)`
+	- empty title/premise/chapter/section metadata now auto-fills to safe defaults
+	- numeric guardrails added for chapter number, writer word target, and retries
+	- allows intentional minimal-input launches where downstream stages infer missing world details
+- Added run consistency DR validator and command wrapper:
+	- new script `agent_stack/scripts/run_consistency_dr.py`
+	- new command `bin/run-consistency-dr`
+	- validates run-journal invariants, including no progress after terminal run events
+	- initial live execution surfaced real inconsistencies (terminal seal followed by stage progress)
 - Fixed writer-bootstrap crash in book flow after canon stage:
 	- added missing `build_section_consistency_sections(...)` in `agent_stack/book_flow.py`
 	- run was previously terminating with `NameError` immediately after `stage_complete canon`

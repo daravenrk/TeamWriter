@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_URL="${DRAGONLAIR_AGENT_API:-http://127.0.0.1:11888}"
+TARGET="${1:-}"
+ALLOW_ACTIVE="${ALLOW_ACTIVE:-false}"
+REMOVE_TASK_RECORDS="${REMOVE_TASK_RECORDS:-true}"
+
+if [[ -z "$TARGET" ]]; then
+  cat <<'USAGE'
+Usage:
+  book-flow-clean <title-or-slug>
+
+Environment:
+  DRAGONLAIR_AGENT_API   API base URL (default: http://127.0.0.1:11888)
+  ALLOW_ACTIVE           true|false (default: false)
+  REMOVE_TASK_RECORDS    true|false (default: true)
+
+Notes:
+- Deletes only the selected book slug directory under book_project.
+- By default, refuses cleanup if active tasks exist for that book.
+USAGE
+  exit 1
+fi
+
+json_escape() {
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+TARGET_JSON=$(json_escape "$TARGET")
+
+curl -fsS -X POST "$API_URL/api/book-flow/cleanup" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\": $TARGET_JSON, \"allow_active\": $ALLOW_ACTIVE, \"remove_task_records\": $REMOVE_TASK_RECORDS}" \
+  | python3 -m json.tool

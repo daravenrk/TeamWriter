@@ -3,6 +3,7 @@ import threading
 import time
 import uuid
 import glob
+import shutil
 import datetime
 import hashlib
 from pathlib import Path
@@ -47,6 +48,22 @@ class BookHoldRequest(BaseModel):
     hold: bool = True
 
 
+class BookProjectHoldRequest(BaseModel):
+    title: Optional[str] = None
+    book_slug: Optional[str] = None
+    hold: bool = True
+    reason: Optional[str] = None
+    actor: str = "operator"
+
+
+class BookProjectCleanupRequest(BaseModel):
+    title: Optional[str] = None
+    book_slug: Optional[str] = None
+    output_dir: str = "/home/daravenrk/dragonlair/book_project"
+    remove_task_records: bool = True
+    allow_active: bool = False
+
+
 class BookReviewActionRequest(BaseModel):
     action: str
     note: Optional[str] = None
@@ -79,6 +96,61 @@ class BookFlowRequest(BaseModel):
     # Attribution / ownership fields
     pen_name: str = "DaRaVeNrK"
     publisher_name: str = "DaRaVeNrK LLC"
+
+
+def _normalize_book_flow_request(req: BookFlowRequest) -> BookFlowRequest:
+    """Coerce blank web inputs into stable defaults for sparse-start book runs."""
+
+    def _clean(value: Any) -> str:
+        return str(value or "").strip()
+
+    title = _clean(req.title) or "Untitled Book"
+    premise = _clean(req.premise) or (
+        "Start from partial intent and infer missing worldbuilding and continuity details "
+        "from canon/framework context while keeping the narrative coherent."
+    )
+    chapter_title = _clean(req.chapter_title) or f"Chapter {int(req.chapter_number or 1)}"
+    section_title = _clean(req.section_title) or "Opening"
+    section_goal = _clean(req.section_goal) or (
+        "Begin from sparse input and infer missing setting, continuity, and character context. "
+        "Prefer concrete assumptions over placeholders."
+    )
+
+    audience = _clean(req.audience) or "adult"
+    genre = _clean(req.genre) or "speculative fiction"
+    tone = _clean(req.tone) or "cinematic and emotionally grounded"
+    pen_name = _clean(req.pen_name) or "DaRaVeNrK"
+    publisher_name = _clean(req.publisher_name) or "DaRaVeNrK LLC"
+
+    chapter_number = int(req.chapter_number or 1)
+    if chapter_number < 1:
+        chapter_number = 1
+
+    writer_words = int(req.writer_words or 1400)
+    if writer_words < 200:
+        writer_words = 200
+
+    max_retries = int(req.max_retries or 2)
+    if max_retries < 0:
+        max_retries = 0
+
+    return req.model_copy(
+        update={
+            "title": title,
+            "premise": premise,
+            "chapter_number": chapter_number,
+            "chapter_title": chapter_title,
+            "section_title": section_title,
+            "section_goal": section_goal,
+            "audience": audience,
+            "genre": genre,
+            "tone": tone,
+            "writer_words": writer_words,
+            "max_retries": max_retries,
+            "pen_name": pen_name,
+            "publisher_name": publisher_name,
+        }
+    )
 
 
 class FeedbackTextRange(BaseModel):
@@ -153,6 +225,7 @@ orchestrator = OrchestratorAgent()
 executor = ThreadPoolExecutor(max_workers=int(os.environ.get("AGENT_MAX_WORKERS", "2")))
 _task_lock = threading.Lock()
 _tasks: Dict[str, TaskRecord] = {}
+_book_flow_holds: Dict[str, dict] = {}
 STRICT_ONE_MODEL_PER_ROUTE = str(os.environ.get("STRICT_ONE_MODEL_PER_ROUTE", "true")).lower() in {
     "1",
     "true",
@@ -217,6 +290,9 @@ ALLOWED_FEEDBACK_ISSUE_TAGS = {
 }
 TASK_LEDGER_PATH = Path(
     os.environ.get("AGENT_TASK_LEDGER_PATH", "/home/daravenrk/dragonlair/book_project/task_ledger.json")
+)
+BOOK_FLOW_HOLDS_PATH = Path(
+    os.environ.get("AGENT_BOOK_FLOW_HOLDS_PATH", "/home/daravenrk/dragonlair/book_project/book_flow_holds.json")
 )
 PRESSURE_ENABLED = str(os.environ.get("AGENT_PRESSURE_ENABLED", "true")).lower() in {"1", "true", "yes", "on"}
 PRESSURE_THRESHOLD = max(1, int(os.environ.get("AGENT_PRESSURE_QUEUE_THRESHOLD", "3")))
@@ -411,6 +487,97 @@ def _load_tasks_from_disk() -> Dict[str, TaskRecord]:
             rec.next_retry_at = None
         loaded[rec.id] = rec
     return loaded
+
+
+def _persist_book_flow_holds_locked(reason: str) -> None:
+    payload = {
+        "generated_at": time.time(),
+        "reason": reason,
+        "holds": _book_flow_holds,
+    }
+    _write_json_atomic(BOOK_FLOW_HOLDS_PATH, payload)
+
+
+def _load_book_flow_holds_from_disk() -> Dict[str, dict]:
+    if not BOOK_FLOW_HOLDS_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(BOOK_FLOW_HOLDS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    holds_raw = raw.get("holds") if isinstance(raw, dict) else None
+    if not isinstance(holds_raw, dict):
+        return {}
+    cleaned: Dict[str, dict] = {}
+    for slug, meta in holds_raw.items():
+        key = str(slug or "").strip().lower()
+        if not key:
+            continue
+        cleaned[key] = meta if isinstance(meta, dict) else {}
+    return cleaned
+
+
+def _book_slug_from_request_payload(book_request: Optional[dict]) -> Optional[str]:
+    if not isinstance(book_request, dict):
+        return None
+    title = str(book_request.get("title") or "").strip()
+    if not title:
+        return None
+    slug = slugify(title)
+    return slug or None
+
+
+def _resolve_book_slug_or_400(book_slug: Optional[str], title: Optional[str]) -> str:
+    slug_candidate = str(book_slug or "").strip().lower()
+    if not slug_candidate:
+        title_candidate = str(title or "").strip()
+        slug_candidate = slugify(title_candidate) if title_candidate else ""
+    slug_candidate = str(slug_candidate or "").strip().lower()
+    if not slug_candidate:
+        raise HTTPException(status_code=400, detail="book_slug or title is required")
+    return slug_candidate
+
+
+def _remove_cli_activity_entries_for_book_slug(book_slug: str) -> int:
+    if not CLI_RUNTIME_ACTIVITY_PATH.exists():
+        return 0
+    try:
+        payload = json.loads(CLI_RUNTIME_ACTIVITY_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return 0
+
+    runs = payload.get("active_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        return 0
+
+    removed = 0
+    kept = []
+    marker = f"/{book_slug}/"
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        run_dir = str(item.get("run_dir") or "")
+        title = str(item.get("title") or "")
+        item_slug = slugify(title) if title else ""
+        if marker in run_dir or item_slug == book_slug:
+            removed += 1
+            continue
+        kept.append(item)
+
+    if removed > 0:
+        _write_json_atomic(CLI_RUNTIME_ACTIVITY_PATH, {"active_runs": kept})
+    return removed
+
+
+def _book_flow_task_ids_for_slug_locked(book_slug: str) -> List[str]:
+    task_ids: List[str] = []
+    for task_id, rec in _tasks.items():
+        if rec.profile != "book-flow":
+            continue
+        rec_slug = _book_slug_from_request_payload(rec.book_request)
+        if rec_slug == book_slug:
+            task_ids.append(task_id)
+    return task_ids
 
 
 def _append_ui_event(event_type: str, payload: dict):
@@ -2946,6 +3113,8 @@ def _run_book_task(task_id: str, req: BookFlowRequest):
 
 
 # Bootstrap persisted tasks only after task runners are defined.
+with _task_lock:
+    _book_flow_holds.update(_load_book_flow_holds_from_disk())
 _bootstrap_task_ledger()
 
 
@@ -3188,6 +3357,146 @@ def clear_history(_request: Request):
     return {"status": "cleared", "removed": removed, "state": payload}
 
 
+@app.get("/api/book-flow/holds")
+def list_book_flow_holds():
+    with _task_lock:
+        holds = dict(_book_flow_holds)
+    return {
+        "status": "ok",
+        "hold_count": len(holds),
+        "holds": holds,
+    }
+
+
+@app.post("/api/book-flow/hold")
+def set_book_flow_hold(req: BookProjectHoldRequest):
+    slug = _resolve_book_slug_or_400(req.book_slug, req.title)
+    now = time.time()
+
+    with _task_lock:
+        if bool(req.hold):
+            _book_flow_holds[slug] = {
+                "book_slug": slug,
+                "title": str(req.title or "").strip() or None,
+                "reason": str(req.reason or "").strip() or None,
+                "held_by": str(req.actor or "operator").strip() or "operator",
+                "held_at": now,
+            }
+            action = "held"
+        else:
+            _book_flow_holds.pop(slug, None)
+            action = "released"
+
+        _persist_book_flow_holds_locked(reason=f"book_flow_hold_{action}")
+        related_task_ids = _book_flow_task_ids_for_slug_locked(slug)
+        active_task_ids = [
+            task_id
+            for task_id in related_task_ids
+            if _tasks.get(task_id) and _tasks[task_id].status in {"queued", "running", "paused"}
+        ]
+
+    _append_ui_event(
+        "book_flow_hold_update",
+        {
+            "book_slug": slug,
+            "action": action,
+            "held": bool(req.hold),
+            "actor": str(req.actor or "operator").strip() or "operator",
+            "reason": str(req.reason or "").strip() or None,
+            "active_task_ids": active_task_ids,
+        },
+    )
+    _refresh_ui_state_snapshot(event_type="book_flow_hold_update")
+
+    return {
+        "status": "ok",
+        "action": action,
+        "book_slug": slug,
+        "hold": _book_flow_holds.get(slug) if req.hold else None,
+        "active_task_ids": active_task_ids,
+    }
+
+
+@app.post("/api/book-flow/cleanup")
+def cleanup_book_flow_project(req: BookProjectCleanupRequest):
+    slug = _resolve_book_slug_or_400(req.book_slug, req.title)
+    book_root = Path(req.output_dir).expanduser() / slug
+
+    with _task_lock:
+        related_task_ids = _book_flow_task_ids_for_slug_locked(slug)
+        active_task_ids = [
+            task_id
+            for task_id in related_task_ids
+            if _tasks.get(task_id) and _tasks[task_id].status in {"queued", "running", "paused"}
+        ]
+
+        if active_task_ids and not req.allow_active:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "book_has_active_tasks",
+                    "book_slug": slug,
+                    "active_task_ids": active_task_ids,
+                    "hint": "Set hold for this book and wait for active runs to finish, or retry with allow_active=true.",
+                },
+            )
+
+        removed_task_ids: List[str] = []
+        skipped_active_task_ids: List[str] = []
+        if req.remove_task_records:
+            for task_id in related_task_ids:
+                record = _tasks.get(task_id)
+                if not record:
+                    continue
+                if record.status in {"queued", "running", "paused"}:
+                    skipped_active_task_ids.append(task_id)
+                    continue
+                _tasks.pop(task_id, None)
+                removed_task_ids.append(task_id)
+
+            if removed_task_ids:
+                _persist_tasks_locked(reason="book_flow_project_cleanup")
+            _update_pressure_state_locked()
+            _write_resource_tracker_locked(reason="book_flow_project_cleanup")
+
+    deleted_paths: List[str] = []
+    delete_errors: List[str] = []
+    if book_root.exists():
+        try:
+            shutil.rmtree(book_root)
+            deleted_paths.append(str(book_root))
+        except OSError as exc:
+            delete_errors.append(f"{book_root}: {exc}")
+
+    removed_activity_entries = _remove_cli_activity_entries_for_book_slug(slug)
+
+    _append_ui_event(
+        "book_flow_cleanup",
+        {
+            "book_slug": slug,
+            "book_root": str(book_root),
+            "deleted_paths": deleted_paths,
+            "delete_errors": delete_errors,
+            "removed_task_ids": removed_task_ids,
+            "skipped_active_task_ids": skipped_active_task_ids,
+            "removed_activity_entries": removed_activity_entries,
+        },
+    )
+    _refresh_ui_state_snapshot(event_type="book_flow_cleanup")
+
+    return {
+        "status": "ok" if not delete_errors else "partial",
+        "book_slug": slug,
+        "book_root": str(book_root),
+        "deleted_paths": deleted_paths,
+        "delete_errors": delete_errors,
+        "active_task_ids": active_task_ids,
+        "removed_task_ids": removed_task_ids,
+        "skipped_active_task_ids": skipped_active_task_ids,
+        "removed_activity_entries": removed_activity_entries,
+    }
+
+
 @app.post("/api/tasks")
 def create_task(req: SteerRequest):
     merged_prompt = _compose_prompt(req.direction, req.prompt)
@@ -3251,9 +3560,22 @@ def create_task(req: SteerRequest):
 
 @app.post("/api/book-flow")
 def create_book_flow(req: BookFlowRequest):
+    req = _normalize_book_flow_request(req)
+    book_slug = slugify(req.title)
     _pressure_guard("book-flow", context="/api/book-flow")
     # Backend mutual exclusion: block book mode if coding is active
     with _task_lock:
+        hold_meta = _book_flow_holds.get(book_slug)
+        if hold_meta:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "book_flow_held",
+                    "book_slug": book_slug,
+                    "hold": hold_meta,
+                    "hint": "Release hold for this book before creating new runs.",
+                },
+            )
         for t in _tasks.values():
             if t.profile in {"amd-coder", "nvidia-fast", "nvidia-lowlatency"} and t.status in {"queued", "running"}:
                 raise HTTPException(status_code=409, detail="Coding mode is active. Book mode is blocked until coding tasks complete or are cancelled.")

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_URL="${DRAGONLAIR_AGENT_API:-http://127.0.0.1:11888}"
+ACTION="${1:-}"
+TARGET="${2:-}"
+REASON="${3:-}"
+ACTOR="${BOOK_FLOW_ACTOR:-operator}"
+
+if [[ -z "$ACTION" || -z "$TARGET" ]]; then
+  cat <<'USAGE'
+Usage:
+  book-flow-hold hold <title-or-slug> [reason]
+  book-flow-hold release <title-or-slug> [reason]
+
+Environment:
+  DRAGONLAIR_AGENT_API   API base URL (default: http://127.0.0.1:11888)
+  BOOK_FLOW_ACTOR        actor name to record (default: operator)
+USAGE
+  exit 1
+fi
+
+HOLD_VALUE="false"
+case "$ACTION" in
+  hold) HOLD_VALUE="true" ;;
+  release) HOLD_VALUE="false" ;;
+  *)
+    echo "Invalid action: $ACTION (must be hold|release)" >&2
+    exit 1
+    ;;
+esac
+
+json_escape() {
+  printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
+}
+
+TARGET_JSON=$(json_escape "$TARGET")
+REASON_JSON=$(json_escape "$REASON")
+ACTOR_JSON=$(json_escape "$ACTOR")
+
+curl -fsS -X POST "$API_URL/api/book-flow/hold" \
+  -H 'Content-Type: application/json' \
+  -d "{\"title\": $TARGET_JSON, \"hold\": $HOLD_VALUE, \"reason\": $REASON_JSON, \"actor\": $ACTOR_JSON}" \
+  | python3 -m json.tool

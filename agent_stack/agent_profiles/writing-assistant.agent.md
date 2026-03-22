@@ -2,6 +2,8 @@
 
 name: writing-assistant
 runtime_preset: nvidia-qwen35-4b-8192
+runtime_preset_allowlist: nvidia-qwen35-4b-8192, nvidia-qwen35-4b-16384, nvidia-qwen35-4b-32768, nvidia-qwen35-4b-49152
+model_allowlist: qwen3.5:4b
 allowed_routes: ollama_nvidia
 num_predict: 1200
 default_stream: false
