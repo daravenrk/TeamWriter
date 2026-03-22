@@ -90,6 +90,9 @@
     .review-gate-meta { display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px; color:#c6d4f5; }
     .review-gate-actions { display:flex; gap:8px; flex-wrap:wrap; }
     .review-gate-actions button { min-width:110px; }
+    .book-ops { margin-top:10px; border:1px solid #2f4674; border-radius:10px; padding:10px; background:#0b1430; display:grid; gap:8px; }
+    .book-ops-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .book-ops-row input { flex:1; min-width:240px; }
     .view-switch { display:flex; gap:8px; margin:6px 0 14px; flex-wrap:wrap; }
     .view-switch button { background:#1e293b; border:1px solid #334155; }
     .view-switch button.active { background:#0f766e; }
@@ -228,6 +231,16 @@
         <button id="refreshStatus" class="secondary">Refresh</button>
         <button id="clearHistory" class="danger">Clear History</button>
         <span id="clearHistoryResult" style="font-size:12px;color:var(--muted);"></span>
+      </div>
+      <div class="book-ops">
+        <div class="book-ops-row">
+          <input id="bookOpsTarget" placeholder="Book title or slug (for hold/release/cleanup)" />
+          <button id="holdBookFlow" class="secondary" type="button">Hold</button>
+          <button id="releaseBookFlow" class="secondary" type="button">Release</button>
+          <button id="cleanupBookFlow" class="danger" type="button">Cleanup</button>
+        </div>
+        <div id="bookOpsResult" class="muted">Per-book controls: hold blocks new runs until released; cleanup removes only that book project data.</div>
+        <div id="bookOpsHolds" class="muted">Loading held books...</div>
       </div>
       <div id="counts"></div>
       <table>
@@ -652,6 +665,116 @@ async function submitWritingFeedback() {
 
 function pill(st) {
   return `<span class="pill ${st}">${st}</span>`;
+}
+
+function formatApiErrorDetail(detail) {
+  if (typeof detail === 'string') return detail;
+  if (!detail) return 'request failed';
+  if (typeof detail === 'object') {
+    if (detail.error) return String(detail.error);
+    try {
+      return JSON.stringify(detail);
+    } catch (_err) {
+      return 'request failed';
+    }
+  }
+  return String(detail);
+}
+
+function getBookOpsTarget() {
+  const value = (document.getElementById('bookOpsTarget').value || '').trim();
+  if (!value) {
+    const fallback = (document.getElementById('bookTitle').value || '').trim();
+    return fallback;
+  }
+  return value;
+}
+
+async function fetchBookFlowHolds() {
+  const holdsEl = document.getElementById('bookOpsHolds');
+  if (!holdsEl) return;
+  try {
+    const res = await fetch('/api/book-flow/holds');
+    const data = await res.json();
+    if (!res.ok) {
+      holdsEl.textContent = `Held books unavailable: ${formatApiErrorDetail(data.detail || res.status)}`;
+      return;
+    }
+    const holds = data.holds || {};
+    const entries = Object.entries(holds);
+    if (entries.length === 0) {
+      holdsEl.textContent = 'Held books: none';
+      return;
+    }
+    holdsEl.innerHTML = `Held books (${entries.length}): ` + entries
+      .map(([slug, meta]) => {
+        const reason = (meta && meta.reason) ? ` reason=${escapeHtml(meta.reason)}` : '';
+        return `<span class="pill paused" style="margin-right:6px;">${escapeHtml(slug)}${reason}</span>`;
+      })
+      .join('');
+  } catch (err) {
+    holdsEl.textContent = `Held books unavailable: ${err}`;
+  }
+}
+
+async function setBookFlowHold(hold) {
+  const result = document.getElementById('bookOpsResult');
+  const target = getBookOpsTarget();
+  if (!target) {
+    result.textContent = 'Enter a book title or slug first.';
+    return;
+  }
+  result.textContent = hold ? `Holding ${target}...` : `Releasing ${target}...`;
+  try {
+    const res = await fetch('/api/book-flow/hold', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: target, hold, actor: 'webui'}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.textContent = `Hold update failed: ${formatApiErrorDetail(data.detail || res.status)}`;
+      return;
+    }
+    result.textContent = hold
+      ? `Held book flow for ${data.book_slug}. Active runs continue, new runs are blocked.`
+      : `Released hold for ${data.book_slug}. New runs are allowed.`;
+    await fetchBookFlowHolds();
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Hold update failed: ${err}`;
+  }
+}
+
+async function cleanupBookFlowProject() {
+  const result = document.getElementById('bookOpsResult');
+  const target = getBookOpsTarget();
+  if (!target) {
+    result.textContent = 'Enter a book title or slug first.';
+    return;
+  }
+
+  const ok = window.confirm(`Cleanup book project for '${target}'? This deletes only that book's generated data.`);
+  if (!ok) return;
+
+  result.textContent = `Cleaning ${target}...`;
+  try {
+    const res = await fetch('/api/book-flow/cleanup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title: target, allow_active: false, remove_task_records: true}),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      result.textContent = `Cleanup failed: ${formatApiErrorDetail(data.detail || res.status)}`;
+      return;
+    }
+    result.textContent = `Cleanup ${data.status}: slug=${data.book_slug} removed_paths=${(data.deleted_paths || []).length} removed_task_ids=${(data.removed_task_ids || []).length}`;
+    await fetchBookFlowHolds();
+    await refreshStatus();
+  } catch (err) {
+    result.textContent = `Cleanup failed: ${err}`;
+  }
 }
 
 function setBookMode(active) {
@@ -1382,6 +1505,7 @@ async function refreshStatus() {
   }
   setBookMode(bookMode);
   setCodingMode(codingMode);
+  await fetchBookFlowHolds();
 }
 
 async function queueTask() {
@@ -1540,6 +1664,11 @@ setViewMode('control');
 window.requestAnimationFrame(liveFlowTick);
 refreshStatus();
 setInterval(refreshStatus, 2000);
+fetchBookFlowHolds();
+
+document.getElementById('holdBookFlow').addEventListener('click', () => setBookFlowHold(true));
+document.getElementById('releaseBookFlow').addEventListener('click', () => setBookFlowHold(false));
+document.getElementById('cleanupBookFlow').addEventListener('click', cleanupBookFlowProject);
 </script>
 </body>
 </html>

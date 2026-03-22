@@ -1,24 +1,24 @@
 {
   "active_runs": [
     {
-      "run_id": "20260322-023022-ch01-opening",
+      "run_id": "20260322-024232-ch01-opening",
       "source": "cli-book-flow",
       "state": "running",
       "title": "Test Book Flight",
       "chapter_number": 1,
       "chapter_title": "Chapter One",
       "section_title": "Opening",
-      "run_dir": "/home/daravenrk/dragonlair/book_project/test-book-flight/runs/20260322-023022-ch01-opening",
-      "started_at_epoch": 1774146622.0232441,
-      "status_detail": "stage attempt 3: canon",
-      "updated_at_epoch": 1774147025.0564826,
-      "stage": "canon",
-      "agent": "book-canon",
-      "profile": "book-canon",
+      "run_dir": "/home/daravenrk/dragonlair/book_project/test-book-flight/runs/20260322-024232-ch01-opening",
+      "started_at_epoch": 1774147352.006066,
+      "status_detail": "stage attempt 1: architect_outline",
+      "updated_at_epoch": 1774147499.4595933,
+      "stage": "architect_outline",
+      "agent": "book-architect",
+      "profile": "book-architect",
       "route": "ollama_nvidia",
       "model": "qwen3.5:4b",
-      "attempt": 3,
-      "correlation_id": "6777336f-512a-4a3b-ad7d-831fe7d30e25"
+      "attempt": 1,
+      "correlation_id": "ad105df2-2197-48cd-9fa4-e2f9cfeef8d1"
     }
   ]
 }
