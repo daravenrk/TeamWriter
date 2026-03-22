@@ -32,6 +32,14 @@
         "num_gpu": 99
       }
     },
+    "nvidia-qwen35-2b-65536": {
+      "route": "ollama_nvidia",
+      "model": "qwen3.5:2b",
+      "options": {
+        "num_ctx": 65536,
+        "num_gpu": 99
+      }
+    },
     "nvidia-qwen35-2b-49152": {
       "route": "ollama_nvidia",
       "model": "qwen3.5:2b",
@@ -208,12 +216,12 @@
         "num_gpu": 99
       }
     },
-    "amd-qwen25-coder-14b-128000": {
+    "amd-qwen25-coder-14b-32768": {
       "route": "ollama_amd",
       "model": "qwen2.5-coder:14b",
       "options": {
-        "num_ctx": 128000,
-        "num_gpu": 2
+        "num_ctx": 32768,
+        "num_gpu": -1
       }
     },
     "amd-qwen25-coder-14b-65536": {
@@ -221,7 +229,7 @@
       "model": "qwen2.5-coder:14b",
       "options": {
         "num_ctx": 65536,
-        "num_gpu": 2
+        "num_gpu": -1
       }
     },
     "amd-qwen35-27b-49152": {
@@ -229,7 +237,7 @@
       "model": "qwen3.5:27b",
       "options": {
         "num_ctx": 49152,
-        "num_gpu": 2
+        "num_gpu": -1
       }
     },
     "amd-qwen35-9b-49152": {
@@ -237,7 +245,7 @@
       "model": "qwen3.5:9b",
       "options": {
         "num_ctx": 49152,
-        "num_gpu": 2
+        "num_gpu": -1
       }
     },
     "amd-qwen35-9b-131072": {
@@ -245,7 +253,7 @@
       "model": "qwen3.5:9b",
       "options": {
         "num_ctx": 131072,
-        "num_gpu": 2
+        "num_gpu": -1
       }
     },
     "amd-qwen35-9b-192000": {
@@ -253,7 +261,7 @@
       "model": "qwen3.5:9b",
       "options": {
         "num_ctx": 192000,
-        "num_gpu": 2
+        "num_gpu": -1
       }
     }
   }

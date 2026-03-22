@@ -15,6 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 from fcntl import LOCK_EX, LOCK_NB, LOCK_UN, flock
+from urllib.error import URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from .lock_manager import AgentLockManager
 from .exceptions import AgentStackError, AgentUnexpectedError, BookExportError, ChapterSpecValidationError, FrameworkIntegrityError, StageQualityGateError
@@ -950,7 +953,7 @@ def gate_research_dossier(text):
     return False, "research output missing facts section"
 
 
-def build_fallback_research_dossier(brief: dict, chapter: dict, premise: str) -> str:
+def build_fallback_research_dossier(brief: dict, chapter: dict, premise: str, source_packets: list[dict] | None = None) -> str:
     title = str((chapter or {}).get("title") or "Untitled Chapter")
     section = str((chapter or {}).get("section_title") or "Untitled Section")
     goal = str((chapter or {}).get("section_goal") or "")
@@ -962,31 +965,42 @@ def build_fallback_research_dossier(brief: dict, chapter: dict, premise: str) ->
 
     constraint_lines = "\n".join(f"- {item}" for item in (constraints[:5] or ["Maintain internal consistency."]))
     acceptance_lines = "\n".join(f"- {item}" for item in (acceptance[:5] or ["Keep outputs stage-ready."]))
+    packet_lines = []
+    for packet in source_packets or []:
+        packet_id = str(packet.get("id") or "source:unknown")
+        facts = packet.get("facts") if isinstance(packet.get("facts"), list) else []
+        first_fact = str(facts[0] or "").strip() if facts else ""
+        if first_fact:
+            packet_lines.append(f"- [{packet_id}] {first_fact}")
+    packet_block = "\n".join(packet_lines) if packet_lines else "- No external packets available for this run."
 
+    chapter_number = (chapter or {}).get("chapter_number") or (chapter or {}).get("number") or 1
     return (
         f"# Overview\n"
-        f"This is an operator-generated fallback research dossier for chapter '{title}' / section '{section}'. "
-        f"It is intended to preserve pipeline continuity when the research agent returns empty output. "
-        f"The narrative should remain in {genre} mode for an {audience} audience with a {tone} tone.\n\n"
+        f"This is an operator-generated fallback research dossier for chapter {chapter_number}: '{title}' / '{section}'. "
+        f"It preserves pipeline continuity when the research agent returns empty output. "
+        f"The narrative must remain in {genre} mode for an {audience} audience with a {tone} tone.\n\n"
         f"Section goal: {goal}\n\n"
         f"Premise anchor: {premise}\n\n"
         f"# Facts\n"
-        f"- The protagonist is a signal-processing engineer working on a deep-space telescope array.\n"
-        f"- The observed anomaly appears inside background noise and presents structured, non-random traits.\n"
-        f"- The chapter must establish baseline system behavior before introducing the anomaly.\n"
-        f"- The section should end with clear evidence that the signal pattern is repeatable enough to justify deeper investigation.\n"
-        f"- Operational constraints from the brief remain binding and should drive scene-level decisions.\n\n"
+        f"- This is a {genre} story with a {tone} tone written for a {audience} audience.\n"
+        f"- Chapter goal: {goal or 'Advance the narrative and develop characters as described in the chapter spec.'}\n"
+        f"- The chapter must establish scene, characters, and conflict relevant to the chapter goal before moving to action.\n"
+        f"- Maintain internal consistency with the book premise throughout the chapter.\n"
+        f"- Operational constraints from the publishing brief remain binding and must drive scene-level decisions.\n"
+        f"- Evidence anchors from bootstrap source packets:\n"
+        f"{packet_block}\n\n"
         f"# Worldbuilding Notes\n"
-        f"- Prioritize procedural realism: instrument calibration, noise floor analysis, and verification loops.\n"
-        f"- Keep terminology precise but readable; avoid unexplained jargon clusters.\n"
-        f"- Emphasize environmental pressure (time windows, instrumentation limits, review scrutiny) to sustain urgency.\n"
-        f"- Preserve continuity hooks for downstream outline and canon stages.\n"
+        f"- Ground the scene in concrete, specific details that match the {genre} genre and {tone} tone.\n"
+        f"- Avoid exposition dumps; reveal world details through character action and dialogue.\n"
+        f"- Maintain consistency with any established character traits, setting details, or prior canon.\n"
+        f"- Leave continuity hooks for downstream outline and canon stages to build upon.\n"
         f"- Brief constraints to enforce:\n"
         f"{constraint_lines}\n\n"
         f"# Do-Not-Claim-Without-Review\n"
-        f"- Do not assert extraterrestrial origin as confirmed fact.\n"
-        f"- Do not introduce irreversible canon changes without evidence in-scene.\n"
+        f"- Do not introduce irreversible canon changes without evidence established in the scene.\n"
         f"- Do not contradict explicit acceptance criteria from the publishing brief.\n"
+        f"- Do not drift from the premise anchor or chapter goal without deliberate narrative cause.\n"
         f"- Required acceptance anchors for downstream stages:\n"
         f"{acceptance_lines}\n"
     )
@@ -1632,71 +1646,292 @@ def _keyword_signals(text: str, max_items: int = 8) -> list[str]:
     return tokens
 
 
-def _dedupe_items(items: list[str], max_items: int = 12) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        text = str(item or "").strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(text)
-        if len(out) >= max_items:
+# ─────────────────────────────────────────────────────────────────────────────
+# Research bootstrap: gather real source material before LLM synthesis.
+# Uses Wikipedia OpenSearch + summaries, DuckDuckGo HTML snippets, and the
+# Free Dictionary API via stdlib urllib. BeautifulSoup4 is used when available
+# for DuckDuckGo HTML parsing; falls back gracefully without it.
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from bs4 import BeautifulSoup as _BS4
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+_RESEARCH_UA = "DragonLairResearch/1.0 (book-pipeline; github.com/daravenrk)"
+_RESEARCH_STOP = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "chapter",
+    "section", "story", "book", "about", "around", "must", "should", "have",
+    "will", "your", "their", "there", "when", "where", "which", "what", "how",
+    "who", "but", "not", "are", "its", "was", "has", "had", "can", "may",
+    "one", "two", "all", "more", "than", "been", "just", "very", "some",
+}
+
+
+def _http_json_get(url: str, timeout_seconds: int = 8) -> dict | list | None:
+    request = Request(url, headers={"User-Agent": _RESEARCH_UA, "Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            charset = getattr(response.headers, "get_content_charset", lambda: None)() or "utf-8"
+            payload = response.read().decode(charset, errors="replace")
+        parsed = json.loads(payload)
+        return parsed if isinstance(parsed, (dict, list)) else None
+    except (URLError, TimeoutError, ValueError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _http_html_get(url: str, timeout_seconds: int = 12) -> str | None:
+    request = Request(url, headers={
+        "User-Agent": _RESEARCH_UA,
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            charset = getattr(response.headers, "get_content_charset", lambda: None)() or "utf-8"
+            return response.read().decode(charset, errors="replace")
+    except (URLError, TimeoutError, OSError):
+        return None
+
+
+def _build_research_query_terms(brief: dict, chapter: dict, premise: str) -> list[str]:
+    text = " ".join([
+        str((brief or {}).get("title_working") or ""),
+        str((chapter or {}).get("chapter_title") or (chapter or {}).get("title") or ""),
+        str((chapter or {}).get("section_title") or ""),
+        str((chapter or {}).get("purpose") or (chapter or {}).get("section_goal") or ""),
+        str(premise or ""),
+    ])
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9'-]{2,}", text.lower())
+    unique: list[str] = []
+    for token in raw:
+        if token not in _RESEARCH_STOP and token not in unique:
+            unique.append(token)
+        if len(unique) >= 12:
             break
-    return out
+    return unique
 
 
-def _extract_character_targets(canon_payload: dict, previous_next_writer_notes: dict, max_items: int = 10) -> list[str]:
-    results: list[str] = []
-    bible = (canon_payload or {}).get("character_bible")
-    if isinstance(bible, dict):
-        for key in bible.keys():
-            if str(key).strip():
-                results.append(str(key).strip())
-        for value in bible.values():
-            if isinstance(value, dict):
-                name = str(value.get("name") or "").strip()
-                if name:
-                    results.append(name)
-            elif isinstance(value, list):
-                for entry in value:
-                    if isinstance(entry, dict):
-                        name = str(entry.get("name") or "").strip()
-                        if name:
-                            results.append(name)
-                    else:
-                        text = str(entry or "").strip()
-                        if text:
-                            results.append(text)
-    elif isinstance(bible, list):
-        for entry in bible:
-            if isinstance(entry, dict):
-                name = str(entry.get("name") or "").strip()
-                if name:
-                    results.append(name)
-            else:
-                text = str(entry or "").strip()
-                if text:
-                    results.append(text)
+def _build_wikipedia_search_queries(brief: dict, chapter: dict, premise: str) -> list[str]:
+    """Build up to 5 search queries optimised for Wikipedia OpenSearch."""
+    queries: list[str] = []
 
-    updates = _normalize_list((previous_next_writer_notes or {}).get("character_state_updates"))
-    results.extend(updates)
-    return _dedupe_items(results, max_items=max_items)
+    # Chapter purpose is usually the best thematic query
+    chapter_purpose = str(
+        (chapter or {}).get("purpose") or (chapter or {}).get("section_goal") or ""
+    ).strip()
+    if len(chapter_purpose) > 8:
+        queries.append(" ".join(chapter_purpose.split()[:6]))
+
+    chapter_title = str(
+        (chapter or {}).get("chapter_title") or (chapter or {}).get("title") or ""
+    ).strip()
+    if chapter_title and chapter_title not in queries:
+        queries.append(chapter_title)
+
+    book_title = str((brief or {}).get("title_working") or "").strip()
+    if book_title and book_title not in queries:
+        queries.append(book_title)
+
+    # Compound from meaningful terms
+    terms = _build_research_query_terms(brief, chapter, premise)
+    real_words = [t for t in terms if t.isalpha() and len(t) >= 4]
+    if len(real_words) >= 2:
+        queries.append(f"{real_words[0]} {real_words[1]}")
+    elif real_words:
+        queries.append(real_words[0])
+
+    genre = str((brief or {}).get("genre") or "").strip()
+    tone = str((brief or {}).get("tone") or "").strip()
+    if genre and tone and f"{genre} {tone}" not in queries:
+        queries.append(f"{genre} {tone}")
+
+    return queries[:5]
 
 
-def _extract_element_targets(chapter_spec: dict, canon_payload: dict, previous_next_writer_notes: dict, max_items: int = 10) -> list[str]:
-    results: list[str] = []
-    results.extend(_normalize_list((chapter_spec or {}).get("must_include")))
-    results.extend(_normalize_list((previous_next_writer_notes or {}).get("must_carry_forward")))
-    canon_obj = (canon_payload or {}).get("canon")
-    if isinstance(canon_obj, dict):
-        for key in canon_obj.keys():
-            if str(key).strip():
-                results.append(str(key).strip())
-    return _dedupe_items(results, max_items=max_items)
+def _wikipedia_search_and_fetch(query: str, max_articles: int = 2) -> list[dict]:
+    """OpenSearch Wikipedia for query, then fetch summaries for the top hits."""
+    packets: list[dict] = []
+    search_url = (
+        f"https://en.wikipedia.org/w/api.php"
+        f"?action=opensearch&search={quote(query)}&limit={max_articles + 2}&format=json"
+    )
+    search_data = _http_json_get(search_url)
+    if not isinstance(search_data, list) or len(search_data) < 2:
+        return packets
+    titles: list[str] = search_data[1] if isinstance(search_data[1], list) else []
+    for title in titles[:max_articles]:
+        title_slug = title.replace(" ", "_")
+        summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(title_slug)}"
+        summary_data = _http_json_get(summary_url)
+        if not isinstance(summary_data, dict):
+            continue
+        extract = str(summary_data.get("extract") or "").strip()
+        if not extract or len(extract) < 50:
+            continue
+        if len(extract) > 1400:
+            extract = extract[:1400] + "…"
+        packet_id = f"wikipedia:{slugify(title)}"
+        if not any(p.get("id") == packet_id for p in packets):
+            packets.append({
+                "id": packet_id,
+                "source_type": "wikipedia_summary",
+                "url": summary_url,
+                "title": str(summary_data.get("title") or title),
+                "facts": [extract],
+            })
+    return packets
+
+
+def _duckduckgo_snippets(query: str, max_snippets: int = 5) -> list[str]:
+    """Scrape DuckDuckGo HTML Lite for search result snippets (requires bs4)."""
+    if not _BS4_AVAILABLE:
+        return []
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+    html = _http_html_get(url)
+    if not html:
+        return []
+    soup = _BS4(html, "html.parser")
+    snippets: list[str] = []
+    for el in soup.select(".result__snippet"):
+        text = el.get_text(separator=" ", strip=True)
+        if text and len(text) > 20:
+            snippets.append(text)
+        if len(snippets) >= max_snippets:
+            break
+    return snippets
+
+
+def _dictionary_packet(term: str) -> dict | None:
+    """Fetch a Free Dictionary API entry for a single real word."""
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(term)}"
+    data = _http_json_get(url)
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    definitions: list[str] = []
+    for meaning in (data[0].get("meanings") or [])[:3]:
+        if not isinstance(meaning, dict):
+            continue
+        for defn in (meaning.get("definitions") or [])[:2]:
+            text = str((defn or {}).get("definition") or "").strip()
+            if text:
+                definitions.append(text)
+        if len(definitions) >= 4:
+            break
+    if not definitions:
+        return None
+    return {
+        "id": f"dictionary:{term}",
+        "source_type": "dictionary_api",
+        "url": url,
+        "title": f"Dictionary: '{term}'",
+        "facts": definitions,
+    }
+
+
+def bootstrap_simple_research_packets(brief: dict, chapter: dict, premise: str) -> dict:
+    """
+    Gather real source material for the research stage before calling the LLM.
+    Tries (in order): Wikipedia via OpenSearch + summaries, DuckDuckGo snippets,
+    Free Dictionary API, then always appends the book premise anchor.
+    Targets 4–8 non-empty source packets.
+    """
+    terms = _build_research_query_terms(brief, chapter, premise)
+    wiki_queries = _build_wikipedia_search_queries(brief, chapter, premise)
+    collected_ids: set[str] = set()
+    packets: list[dict] = []
+
+    def _add(p: dict | None) -> None:
+        if not p or not p.get("facts"):
+            return
+        pid = str(p.get("id") or "")
+        if pid and pid in collected_ids:
+            return
+        collected_ids.add(pid)
+        packets.append(p)
+
+    # Stage 1: Wikipedia – OpenSearch then fetch summary for each query
+    for query in wiki_queries:
+        if len(packets) >= 6:
+            break
+        for wiki_packet in _wikipedia_search_and_fetch(query, max_articles=2):
+            _add(wiki_packet)
+            if len(packets) >= 6:
+                break
+
+    # Stage 2: DuckDuckGo search snippets for the primary thematic query
+    primary_query = wiki_queries[0] if wiki_queries else " ".join(terms[:3])
+    ddg_snippets = _duckduckgo_snippets(primary_query, max_snippets=5)
+    if len(ddg_snippets) >= 2:
+        _add({
+            "id": f"web:ddg:{slugify(primary_query[:40])}",
+            "source_type": "web_search_snippets",
+            "url": f"https://html.duckduckgo.com/html/?q={quote(primary_query)}",
+            "title": f"Web search snippets: {primary_query}",
+            "facts": ddg_snippets,
+        })
+
+    # Stage 3: Dictionary definitions for real thematic words (≥5 chars)
+    real_words = [t for t in terms if t.isalpha() and len(t) >= 5]
+    for word in real_words[:4]:
+        if len(packets) >= 8:
+            break
+        _add(_dictionary_packet(word))
+
+    # Stage 4: Always include the book premise and chapter goal as an anchor
+    chapter_goal = str(
+        (chapter or {}).get("purpose") or (chapter or {}).get("section_goal") or ""
+    ).strip()
+    premise_text = str(premise or "").strip()
+    anchor_facts = [f for f in [premise_text, chapter_goal] if f]
+    if anchor_facts:
+        _add({
+            "id": "book:premise_anchor",
+            "source_type": "book_context",
+            "url": "local://book_context",
+            "title": "Book premise and chapter goal",
+            "facts": anchor_facts,
+        })
+
+    return {
+        "query_terms": terms,
+        "wikipedia_queries": wiki_queries,
+        "packets": packets,
+    }
+
+
+def render_research_source_packets_markdown(source_packets: list[dict]) -> str:
+    if not source_packets:
+        return ""
+    lines = ["# Source Packets", ""]
+    for packet in source_packets:
+        packet_id = str(packet.get("id") or "source:unknown")
+        title = str(packet.get("title") or packet_id)
+        source_url = str(packet.get("url") or "")
+        lines.append(f"## {packet_id}")
+        lines.append(f"- Title: {title}")
+        if source_url and not source_url.startswith("local://"):
+            lines.append(f"- URL: {source_url}")
+        facts = packet.get("facts") if isinstance(packet.get("facts"), list) else []
+        for fact in facts[:5]:
+            text = str(fact or "").strip()
+            if text:
+                lines.append(f"- {text[:600]}")
+        lines.append("")
+    return "\n".join(lines).strip()
+def _match_targets_in_blob(targets: list[str], blob: str, max_key: int = 48) -> tuple[list[str], list[str]]:
+    normalized = str(blob or "").lower()
+    matched: list[str] = []
+    missing: list[str] = []
+    for item in targets:
+        key = str(item or "").strip().lower()[:max_key]
+        if not key:
+            continue
+        if key in normalized:
+            matched.append(str(item))
+        else:
+            missing.append(str(item))
+    return matched, missing
 
 
 def build_section_consistency_sections(
@@ -1706,16 +1941,85 @@ def build_section_consistency_sections(
     chapter_spec: dict,
     canon_payload: dict,
     previous_next_writer_notes: dict,
-):
-    sections = (chapter_spec or {}).get("sections") or []
-    carry_forward = _normalize_list((previous_next_writer_notes or {}).get("must_carry_forward"))
-    continuity_watch = _normalize_list((previous_next_writer_notes or {}).get("continuity_watch"))
-    open_loops = _normalize_list((canon_payload or {}).get("open_loops"))
-    character_targets = _extract_character_targets(canon_payload, previous_next_writer_notes)
-    element_targets = _extract_element_targets(chapter_spec, canon_payload, previous_next_writer_notes)
+) -> dict:
+    """Build per-section continuity checkpoints used by writer/reviewer stages."""
 
-    checkpoints = []
-    for idx, section_item in enumerate(sections, start=1):
+    def _dedupe(items: list[str], max_items: int = 10) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in items:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+            if len(out) >= max_items:
+                break
+        return out
+
+    def _normalize_signal_items(value) -> list[str]:
+        if isinstance(value, list):
+            signals: list[str] = []
+            for entry in value:
+                if isinstance(entry, dict):
+                    for key in ("loop", "title", "name", "item", "description", "summary"):
+                        if key in entry and str(entry.get(key) or "").strip():
+                            signals.append(str(entry.get(key)))
+                            break
+                else:
+                    signals.append(str(entry))
+            return _dedupe(signals)
+        if isinstance(value, dict):
+            signals = []
+            for key, entry in value.items():
+                key_text = str(key or "").strip()
+                if key_text:
+                    signals.append(key_text)
+                if isinstance(entry, dict):
+                    for cand in ("name", "summary", "description"):
+                        if str(entry.get(cand) or "").strip():
+                            signals.append(str(entry.get(cand)))
+                            break
+            return _dedupe(signals)
+        return _normalize_list(value)
+
+    chapter_sections = chapter_spec.get("sections") if isinstance(chapter_spec, dict) else []
+    if not isinstance(chapter_sections, list):
+        chapter_sections = []
+
+    canon = canon_payload.get("canon") if isinstance(canon_payload.get("canon"), dict) else {}
+    open_loops = _normalize_signal_items(canon_payload.get("open_loops"))
+    if not open_loops:
+        open_loops = _normalize_signal_items(canon.get("open_loops"))
+
+    character_bible = canon_payload.get("character_bible") if isinstance(canon_payload.get("character_bible"), dict) else {}
+    character_targets = _normalize_signal_items(character_bible)
+    if not character_targets:
+        character_targets = _normalize_signal_items(previous_next_writer_notes.get("character_arcs") if isinstance(previous_next_writer_notes, dict) else None)
+    if not character_targets:
+        character_targets = [
+            "Character details pending downstream continuity/editorial refinement.",
+        ]
+
+    important_elements: list[str] = []
+    important_elements.extend(_normalize_signal_items((chapter_spec or {}).get("must_include")))
+    important_elements.extend(_normalize_signal_items((chapter_spec or {}).get("must_avoid")))
+    important_elements.extend(_normalize_signal_items((canon or {}).get("constraints")))
+    important_elements.extend(_normalize_signal_items((canon or {}).get("acceptance_criteria")))
+    if isinstance(previous_next_writer_notes, dict):
+        important_elements.extend(_normalize_signal_items(previous_next_writer_notes.get("must_retain")))
+        important_elements.extend(_normalize_signal_items(previous_next_writer_notes.get("revision_focus")))
+    important_elements = _dedupe(important_elements, max_items=12)
+    if not important_elements:
+        important_elements = [
+            "Preserve canon consistency for named characters and key elements.",
+        ]
+
+    sections_payload = []
+    for idx, section_item in enumerate(chapter_sections, start=1):
         if isinstance(section_item, dict):
             section_title = str(section_item.get("title") or section_item.get("name") or f"Section {idx}")
             section_goal = str(section_item.get("objective") or section_item.get("goal") or "Advance chapter objective")
@@ -1723,30 +2027,24 @@ def build_section_consistency_sections(
             section_title = str(section_item or f"Section {idx}")
             section_goal = "Advance chapter objective"
 
+        situations = _keyword_signals(f"{section_title} {section_goal}", max_items=6)
         expectations = [
             f"Advance this section goal: {section_goal}",
             "Maintain continuity with prior accepted sections in this chapter.",
             "Preserve canon consistency for named characters and key elements.",
         ]
-        for item in (carry_forward[:2] + continuity_watch[:2]):
-            expectations.append(f"Carry forward expectation: {item}")
 
-        situations = _keyword_signals(section_goal, max_items=6)
-        for marker in continuity_watch[:4]:
-            situations.extend(_keyword_signals(marker, max_items=2))
-        situations = _dedupe_items(situations, max_items=10)
-
-        checkpoints.append(
+        sections_payload.append(
             {
                 "section_index": idx,
                 "section_title": section_title,
                 "section_goal": section_goal,
-                "expectations": _dedupe_items(expectations, max_items=8),
+                "expectations": expectations,
                 "situations": situations,
                 "tracking_targets": {
-                    "open_loops": open_loops[:8],
-                    "character_arcs": character_targets[:8],
-                    "important_elements": element_targets[:8],
+                    "open_loops": _dedupe(open_loops, max_items=8),
+                    "character_arcs": _dedupe(character_targets, max_items=8),
+                    "important_elements": _dedupe(important_elements, max_items=10),
                 },
                 "status": "pending",
                 "coverage": {
@@ -1766,28 +2064,13 @@ def build_section_consistency_sections(
         )
 
     return {
-        "chapter_number": chapter_number,
-        "chapter_title": chapter_title,
+        "chapter_number": int(chapter_number or 0),
+        "chapter_title": str(chapter_title or ""),
         "generated_at": datetime.utcnow().isoformat(),
-        "active_section_index": 1 if checkpoints else 0,
-        "sections": checkpoints,
+        "active_section_index": 1,
+        "sections": sections_payload,
         "ledger": [],
     }
-
-
-def _match_targets_in_blob(targets: list[str], blob: str, max_key: int = 48) -> tuple[list[str], list[str]]:
-    normalized = str(blob or "").lower()
-    matched: list[str] = []
-    missing: list[str] = []
-    for item in targets:
-        key = str(item or "").strip().lower()[:max_key]
-        if not key:
-            continue
-        if key in normalized:
-            matched.append(str(item))
-        else:
-            missing.append(str(item))
-    return matched, missing
 
 
 def update_section_consistency_after_review(
@@ -2114,6 +2397,8 @@ def run_stage(
     diagnostics_path=None,
     verbose=False,
     debug=False,
+    recovery_mode=None,
+    support_profile_name=None,
 ):
     stage_instantiated_at = datetime.utcnow().isoformat()
     run_journal_path = context_store.get("_run_journal_path") if isinstance(context_store, dict) else None
@@ -2149,6 +2434,14 @@ def run_stage(
     last_feedback = None
     parsed = None
     recovery_attempts = 1
+    smart_recovery_default_stages = {"research", "architect_outline", "chapter_planner", "canon"}
+    effective_recovery_mode = str(recovery_mode or ("smart" if stage_id in smart_recovery_default_stages else "simple")).strip().lower()
+    if effective_recovery_mode not in {"simple", "smart"}:
+        effective_recovery_mode = "simple"
+    effective_support_profile = str(support_profile_name or "").strip() or None
+    if effective_recovery_mode == "smart" and effective_support_profile is None and stage_id != "research":
+        # Use the research-oriented profile as a helper model to infer missing data.
+        effective_support_profile = "book-researcher"
 
     def persist_output(payload):
         if output_path is None:
@@ -2265,21 +2558,106 @@ def run_stage(
         )
         return payload
 
-    def build_recovery_prompt(current_prompt):
+    def _trim_text(value, limit=1600):
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text if len(text) <= limit else text[:limit] + "..."
+
+    def _build_recovery_context_guidance():
+        if not isinstance(context_store, dict):
+            return ""
+
+        guidance = {
+            "book": context_store.get("book") if isinstance(context_store.get("book"), dict) else {},
+            "chapter": context_store.get("chapter") if isinstance(context_store.get("chapter"), dict) else {},
+            "brief": ((context_store.get("permanent_memory") or {}).get("book_brief") or {}),
+            "rolling_memory_recent": _normalize_list(context_store.get("rolling_memory"))[-4:],
+        }
+
+        text_blocks = []
+        research_hint = context_store.get("research")
+        if isinstance(research_hint, str):
+            text_blocks.append({"research_excerpt": _trim_text(research_hint, 2200)})
+        elif isinstance(research_hint, dict):
+            text_blocks.append({"research_context": research_hint})
+
+        if text_blocks:
+            guidance["additional"] = text_blocks
+
+        try:
+            return json.dumps(guidance, ensure_ascii=True, indent=2)
+        except Exception:
+            return str(guidance)
+
+    def _fetch_support_guidance(current_prompt):
+        if effective_recovery_mode != "smart" or not effective_support_profile:
+            return ""
+
+        schema_hint = ""
+        if parse_json and output_schema:
+            schema_hint = f"\nRequired output schema id: {output_schema}."
+        elif parse_json:
+            schema_hint = "\nRequired output type: JSON object."
+
+        support_prompt = (
+            "You are a recovery support model.\n"
+            f"Stage: {stage_id}\n"
+            f"Failure reason: {last_error or 'unknown'}\n"
+            + schema_hint
+            + "\nGiven the failed output, current prompt, and context guidance, identify the missing or weak elements that must be present to pass quality gates."
+            "\nReturn concise completion guidance with specific required fields/content."
+            "\nDo not return the final stage output; return only helper guidance."
+            "\n\nCURRENT PROMPT:\n"
+            + _trim_text(current_prompt, 4000)
+            + "\n\nLAST OUTPUT:\n"
+            + _trim_text(last_feedback if last_feedback is not None else last_raw, 3000)
+            + "\n\nCONTEXT GUIDANCE:\n"
+            + _trim_text(_build_recovery_context_guidance(), 5000)
+        )
+
+        try:
+            support_raw = orchestrator.handle_request_with_overrides(
+                support_prompt,
+                profile_name=effective_support_profile,
+                stream_override=False,
+            )
+        except Exception:
+            return ""
+        return _trim_text(support_raw, 2500)
+
+    def build_recovery_prompt(current_prompt, support_guidance=""):
         feedback_block = ""
         if isinstance(last_feedback, dict) and last_feedback:
             feedback_block = "\n\nLAST STRUCTURED OUTPUT:\n" + json.dumps(last_feedback, indent=2)
         elif last_feedback is not None:
             feedback_block = "\n\nLAST OUTPUT:\n" + str(last_feedback)
         raw_block = f"\n\nLAST RAW OUTPUT:\n{last_raw}" if last_raw else ""
+        if effective_recovery_mode == "simple":
+            return (
+                current_prompt
+                + feedback_block
+                + raw_block
+                + "\n\nRECOVERY INSTRUCTION:\n"
+                + "Your last attempt failed. Repair the output so it fully satisfies the required format and all quality constraints."
+                + f"\nFailure reason: {last_error or 'unknown failure'}"
+                + "\nDo not explain the failure. Return only the corrected final output."
+            )
+
+        context_guidance = _build_recovery_context_guidance()
+        support_block = f"\n\nSUPPORT MODEL GUIDANCE:\n{support_guidance}" if support_guidance else ""
         return (
             current_prompt
             + feedback_block
             + raw_block
-            + "\n\nRECOVERY INSTRUCTION:\n"
-            + "Your last attempt failed. Repair the output so it fully satisfies the required format and all quality constraints."
+            + "\n\nCONTEXT GUIDANCE:\n"
+            + context_guidance
+            + support_block
+            + "\n\nINTELLIGENT RECOVERY INSTRUCTION:\n"
+            + "Your previous attempt failed quality checks. Infer and synthesize any missing required information using the available context guidance and support model hints."
             + f"\nFailure reason: {last_error or 'unknown failure'}"
-            + "\nDo not explain the failure. Return only the corrected final output."
+            + "\nReturn a complete output that satisfies all schema fields and quality constraints."
+            + "\nDo not ask questions. Do not include explanations. Return only the corrected final output."
         )
 
     def apply_quarantine_backoff(*, error_code, error_details, attempt_index, route_hint, phase):
@@ -2678,7 +3056,8 @@ def run_stage(
             )
     recovery_profile_name = profile_name
     for recovery_attempt in range(1, recovery_attempts + 1):
-        recovery_prompt = build_recovery_prompt(prompt)
+        support_guidance = _fetch_support_guidance(prompt)
+        recovery_prompt = build_recovery_prompt(prompt, support_guidance=support_guidance)
         recovery_started_at = datetime.utcnow().isoformat()
         append_run_event(
             run_journal_path,
@@ -2689,6 +3068,8 @@ def run_stage(
                 "profile": recovery_profile_name,
                 "attempt": recovery_attempt,
                 "failure_reason": last_error,
+                "recovery_mode": effective_recovery_mode,
+                "support_profile": effective_support_profile,
             },
         )
         lock_manager.log_agent_change(
@@ -2700,6 +3081,8 @@ def run_stage(
                 "attempt": recovery_attempt,
                 "profile": recovery_profile_name,
                 "failure_reason": last_error,
+                "recovery_mode": effective_recovery_mode,
+                "support_profile": effective_support_profile,
             },
         )
         try:
@@ -3351,14 +3734,45 @@ def run_flow(args):
     )
 
     # 2) Research
+    research_bootstrap = bootstrap_simple_research_packets(
+        brief=brief,
+        chapter=context_store.get("chapter") or {},
+        premise=str(args.premise),
+    )
+    research_source_packets = research_bootstrap.get("packets") if isinstance(research_bootstrap, dict) else []
+    research_source_packets = research_source_packets if isinstance(research_source_packets, list) else []
+    write_json(dirs["research"] / "source_packets.json", research_bootstrap)
+    source_packets_markdown = render_research_source_packets_markdown(research_source_packets)
+    append_run_event(
+        run_journal,
+        "research_bootstrap_complete",
+        {
+            "stage": "research",
+            "query_terms": research_bootstrap.get("query_terms") if isinstance(research_bootstrap, dict) else [],
+            "source_packet_count": len(research_source_packets),
+            "source_packets_path": str(dirs["research"] / "source_packets.json"),
+        },
+    )
+
     research_contract = build_contract(
         role="Research Agent",
         objective="Produce research dossier and facts for chapter drafting.",
-        constraints=["Return markdown only", "Include source caveats", "Separate facts from assumptions"],
-        inputs={"book_brief": brief, "chapter": context_store["chapter"]},
-        output_format="Markdown with headings: Overview, Facts, Worldbuilding Notes, Do-Not-Claim-Without-Review",
+        constraints=[
+            "Return markdown only",
+            "Include source caveats",
+            "Separate facts from assumptions",
+            "Use source packet ids (for example [dictionary:term]) when grounding factual claims",
+        ],
+        inputs={
+            "book_brief": brief,
+            "chapter": context_store["chapter"],
+            "source_packets": research_source_packets,
+        },
+        output_format="Markdown with headings: Overview, Facts, Worldbuilding Notes, Source Caveats, Do-Not-Claim-Without-Review",
         failure_conditions=["missing facts", "no caveats", "not actionable"],
     )
+    if source_packets_markdown:
+        research_contract = f"{research_contract}\n\n{source_packets_markdown}"
     try:
         research_md = run_stage(
             orchestrator=orchestrator,
@@ -3384,6 +3798,7 @@ def run_flow(args):
             brief=brief,
             chapter=context_store.get("chapter") or {},
             premise=str(args.premise),
+            source_packets=research_source_packets,
         )
         write_text(dirs["research"] / "research_dossier.md", research_md)
         context_store["research"] = {

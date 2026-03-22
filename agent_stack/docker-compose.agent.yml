@@ -38,6 +38,7 @@ services:
       AGENT_NVIDIA_NUM_GPU_BY_MODEL: '{"qwen3.5:4b":-1,"qwen3.5:2b":-1,"qwen3.5:0.8b":-1,"qwen2.5-coder:3b":-1,"qwen2.5-coder:1.5b":-1,"llama3.2:3b":-1,"llama3.2:1b":-1,"codegemma:2b":-1}'
       AGENT_NVIDIA_MAX_CTX_BY_MODEL: '{"qwen3.5:4b":8192,"qwen3.5:2b":65536,"qwen3.5:0.8b":131072}'
       AGENT_AMD_NUM_GPU_BY_MODEL: '{"qwen3.5:27b":-1,"qwen2.5-coder:14b":-1,"qwen3.5:9b":-1,"llama3.1:8b":-1}'
+      AGENT_AMD_MAX_CTX_BY_MODEL: '{"qwen2.5-coder:14b":32768,"qwen3.5:27b":49152,"qwen3.5:9b":49152}'
       AGENT_AMD_GPU_COUNT: "2"
       AGENT_AMD_MAIN_GPU: "0"
       AGENT_AMD_TENSOR_SPLIT: "0.5,0.5"
@@ -47,10 +48,11 @@ services:
       AGENT_NVIDIA_TINY_MODELS: "qwen3.5:4b,qwen3.5:2b,qwen3.5:0.8b,qwen2.5-coder:3b,qwen2.5-coder:1.5b,llama3.2:3b,llama3.2:1b,codegemma:2b"
       AGENT_DEFAULT_MODEL_OLLAMA_AMD: "qwen3.5:27b"
       AGENT_DEFAULT_MODEL_OLLAMA_NVIDIA: "qwen3.5:4b"
-      AGENT_PROFILE_QUALITY_FALLBACKS: '{"book-proofreader":{"fallback_route":"ollama_nvidia","fallback_model":"qwen3.5:4b","min_chars":250,"min_ratio":0.3,"suspicious_phrases":["please provide","share the text","need the text","i need the chapter","as an ai"]},"book-copy-editor":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":300,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-line-editor":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":350,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-publisher":{"fallback_route":"ollama_amd","fallback_model":"qwen3.5:27b","min_chars":180,"required_terms":["APPROVE","REVISE"],"suspicious_phrases":["please provide","share the text","need the text","as an ai"]}}'
+      AGENT_PROFILE_QUALITY_FALLBACKS: '{"book-proofreader":{"fallback_preset":"nvidia-qwen35-4b-8192","fallback_route":"ollama_nvidia","fallback_model":"qwen3.5:4b","min_chars":250,"min_ratio":0.3,"suspicious_phrases":["please provide","share the text","need the text","i need the chapter","as an ai"]},"book-copy-editor":{"fallback_preset":"amd-qwen35-9b-49152","fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":300,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-line-editor":{"fallback_preset":"amd-qwen35-9b-49152","fallback_route":"ollama_amd","fallback_model":"qwen3.5:9b","min_chars":350,"min_ratio":0.33,"suspicious_phrases":["please provide","share the text","need the text","as an ai"]},"book-publisher":{"fallback_preset":"amd-qwen35-27b-49152","fallback_route":"ollama_amd","fallback_model":"qwen3.5:27b","min_chars":180,"required_terms":["APPROVE","REVISE"],"suspicious_phrases":["please provide","share the text","need the text","as an ai"]}}'
       AGENT_AMD_EPHEMERAL_OVERRIDE_ENABLED: "true"
       AGENT_AMD_EPHEMERAL_OVERRIDE_MODELS: "qwen2.5-coder:14b,qwen3.5:9b"
       AGENT_ENABLE_CROSS_ROUTE_FALLBACK: "false"
+      AGENT_STRICT_RUNTIME_PRESET: "true"
       OPENCLAW_FAST_PROFILE: "nvidia-fast"
       OPENCLAW_DEEP_PROFILE: "amd-writer"
       OPENCLAW_TOOL_PROFILE: "nvidia-lowlatency"

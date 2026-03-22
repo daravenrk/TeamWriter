@@ -1,7 +1,8 @@
 ---
+
 name: amd-coder
 runtime_preset: amd-qwen35-9b-192000
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 512
 temperature: 0.2

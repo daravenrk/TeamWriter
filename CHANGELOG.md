@@ -1,6 +1,28 @@
 # Changelog
 
+## [2026-03-22]
+- Fixed writer-bootstrap crash in book flow after canon stage:
+	- added missing `build_section_consistency_sections(...)` in `agent_stack/book_flow.py`
+	- run was previously terminating with `NameError` immediately after `stage_complete canon`
+	- helper now emits deterministic `consistency_sections` payload used by writer/reviewer stages
+	- validated with `python3 -m py_compile agent_stack/book_flow.py`
+- Documented live-run incident findings and operational recommendations:
+	- recorded stage retry behavior (`architect_outline` and `canon` retries before success)
+	- recorded non-fatal telemetry permission warnings on `cli_runtime_activity.json`
+	- recorded `datetime.utcnow()` deprecation warning as follow-up hardening item
+
 ## [2026-03-21]
+- Stabilized early book-flow stages after a control-flow failure in the orchestrator:
+	- fixed `OrchestratorAgent._invoke_with_triage()` so successful agent calls return their actual model output instead of falling through to `None`
+	- fixed retry-loop progression in `handle_request_with_overrides()` by incrementing `attempt`
+	- repaired `_build_ml_shadow_recommendations()` after a bad auto-patch corrupted its early-return path
+	- validated `agent_stack/orchestrator.py` with `python3 -m py_compile`
+- Reworked research-stage bootstrap so the researcher can produce grounded input before synthesis:
+	- `book_flow.py` now gathers `source_packets.json` before the research LLM call
+	- sources now include Wikipedia OpenSearch + summary fetches, Free Dictionary API lookups, DuckDuckGo HTML snippet scraping when `beautifulsoup4` is available, and a local premise anchor
+	- research prompt now includes structured source packets and rendered source-packet markdown for grounding
+	- fallback research dossier was corrected to remove stale hardcoded sci-fi content and now reflects the actual book brief, chapter goal, and gathered source packet anchors
+	- smoke test for `bootstrap_simple_research_packets()` returned 7 non-empty packets for the Chapter 1 Mokeys Pay Day sample input
 - Added adaptive, machine-learnable quality curriculum baseline for book flow:
 	- quality gates now support effective thresholds that can tighten over time per book run history
 	- persisted learning state in `quality_learning_state.json` (EMA-based baseline)

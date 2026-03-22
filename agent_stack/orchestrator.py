@@ -6,6 +6,7 @@
 
 import time
 import os
+import logging
 import threading
 import json
 import copy
@@ -17,11 +18,15 @@ from contextlib import nullcontext, contextmanager
 from glob import glob
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from .lock_manager import AgentLockManager, EndpointPolicy
 from .ollama_subagent import OllamaSubagent
 from .profile_loader import load_agent_profiles
 from .runtime_presets import DEFAULT_RUNTIME_PRESETS_PATH, load_runtime_presets
 from .validate_agent_profiles import DEFAULT_MAX_SYSTEM_PROMPT_CHARS, lint_profiles
+from .ml_model_selector import create_ml_selector
+from .ml_outcome_tracker import MLOutcomeTracker
 from .exceptions import (
     AgentHungError,
     AgentProfileError,
@@ -181,6 +186,17 @@ class OrchestratorAgent:
                 }
             ),
         )
+        self.amd_max_ctx = max(1024, int(os.environ.get("AGENT_AMD_MAX_CTX", "131072")))
+        self.amd_max_ctx_by_model = self._parse_env_json_ctx_map(
+            "AGENT_AMD_MAX_CTX_BY_MODEL",
+            default_raw=json.dumps(
+                {
+                    "qwen2.5-coder:14b": 32768,
+                    "qwen3.5:27b": 49152,
+                    "qwen3.5:9b": 49152,
+                }
+            ),
+        )
         self.nvidia_num_gpu_default = max(1, int(os.environ.get("AGENT_NVIDIA_NUM_GPU_DEFAULT", "999")))
         self.amd_num_gpu_default = max(1, int(os.environ.get("AGENT_AMD_NUM_GPU_DEFAULT", "999")))
         self.nvidia_num_gpu_by_model = self._parse_env_json_int_map("AGENT_NVIDIA_NUM_GPU_BY_MODEL")
@@ -218,6 +234,9 @@ class OrchestratorAgent:
         ).lower() in {"1", "true", "yes", "on"}
         self.enable_cross_route_fallback = str(
             os.environ.get("AGENT_ENABLE_CROSS_ROUTE_FALLBACK", "false")
+        ).lower() in {"1", "true", "yes", "on"}
+        self.strict_runtime_preset = str(
+            os.environ.get("AGENT_STRICT_RUNTIME_PRESET", "true")
         ).lower() in {"1", "true", "yes", "on"}
         self.enforce_route_model_allowlists = str(
             os.environ.get("AGENT_ENFORCE_ROUTE_MODEL_ALLOWLISTS", "true")
@@ -313,6 +332,14 @@ class OrchestratorAgent:
                 "AGENT_ML_SHADOW_EVENTS_PATH",
                 "/home/daravenrk/dragonlair/book_project/ml_shadow_events.jsonl",
             )
+        )
+        # ML Model Selector: learns optimal (model, context) per profile
+        self.ml_selector = create_ml_selector(str(self.runtime_preset_path))
+        self.ml_selector_enabled = self.ml_selector is not None and self.ml_enabled
+        # ML Outcome tracking: records execution results for training data
+        self.ml_outcome_tracker = MLOutcomeTracker(
+            ml_shadow_events_path=str(self.ml_shadow_events_path),
+            reward_events_path=str(self.agent_reward_events_path),
         )
         self._reward_lock = threading.Lock()
         self._profile_rewards = self._load_profile_rewards()
@@ -606,6 +633,50 @@ class OrchestratorAgent:
                 details=payload,
             )
 
+    def record_ml_outcome(
+        self,
+        profile_name: str,
+        preset_name: str,
+        route: str,
+        model: str,
+        context_used: int,
+        task_content: str,
+        approval_status: str = "draft",
+        stage: str = "default",
+        quality_gate_pass: bool = True,
+        confidence_score: float = None,
+        duration_seconds: float = None,
+        output_preview: str = None,
+        correlation_id: str = None,
+    ):
+        """
+        Record task execution outcome for ML model training.
+        
+        Integrates with reward ledger and feeds ML retraining pipeline.
+        Call this after task execution to update both outcome tracking and training data.
+        """
+        if not self.ml_outcome_tracker:
+            return
+
+        try:
+            self.ml_outcome_tracker.record_ml_execution_outcome(
+                profile_name=profile_name,
+                preset_name=preset_name,
+                route=route,
+                model=model,
+                context_used=int(context_used),
+                task_content=task_content,
+                approval_status=approval_status,
+                stage=stage,
+                quality_gate_pass=bool(quality_gate_pass),
+                confidence_score=float(confidence_score) if confidence_score is not None else None,
+                duration_seconds=float(duration_seconds) if duration_seconds is not None else None,
+                output_preview=output_preview,
+                correlation_id=correlation_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record ML outcome: {e}")
+
     def _unload_route_model(self, agent_name, model_name):
         if not model_name:
             return
@@ -823,6 +894,8 @@ class OrchestratorAgent:
 
         if explicit_preset_allowlist:
             candidate_names = [default_preset_name] + explicit_preset_allowlist
+        elif self.strict_runtime_preset:
+            candidate_names = [default_preset_name]
         else:
             candidate_names = [default_preset_name]
             default_preset = self.runtime_presets.get(default_preset_name) or {}
@@ -872,6 +945,14 @@ class OrchestratorAgent:
                 try:
                     ctx = int(options.get("num_ctx"))
                     max_ctx = int(self.nvidia_max_ctx_by_model.get(model, self.nvidia_max_ctx))
+                    if ctx > max_ctx:
+                        options["num_ctx"] = int(max_ctx)
+                except (TypeError, ValueError):
+                    pass
+            elif route == "ollama_amd" and "num_ctx" in options:
+                try:
+                    ctx = int(options.get("num_ctx"))
+                    max_ctx = int(self.amd_max_ctx_by_model.get(model, self.amd_max_ctx))
                     if ctx > max_ctx:
                         options["num_ctx"] = int(max_ctx)
                 except (TypeError, ValueError):
@@ -1276,7 +1357,8 @@ class OrchestratorAgent:
         else:
             return None
 
-        resolved = max(1, int(configured))
+        parsed = int(configured)
+        resolved = -1 if parsed == -1 else max(1, parsed)
         if self.force_full_gpu_layers:
             # -1 is Ollama's sentinel for "offload all layers" — safe for any GPU
             return -1
@@ -1286,6 +1368,23 @@ class OrchestratorAgent:
         options = dict(request_options or {})
         if not self.block_cpu_backend:
             return options
+
+        # Clamp context on every invocation path (including retries/fallbacks/model overrides),
+        # not only at profile planning time.
+        if "num_ctx" in options:
+            try:
+                ctx = int(options.get("num_ctx"))
+                model = str(model_name or "").strip()
+                if agent_name == "ollama_nvidia":
+                    max_ctx = int(self.nvidia_max_ctx_by_model.get(model, self.nvidia_max_ctx))
+                    if ctx > max_ctx:
+                        options["num_ctx"] = int(max_ctx)
+                elif agent_name == "ollama_amd":
+                    max_ctx = int(self.amd_max_ctx_by_model.get(model, self.amd_max_ctx))
+                    if ctx > max_ctx:
+                        options["num_ctx"] = int(max_ctx)
+            except (TypeError, ValueError):
+                pass
 
         num_gpu = self._resolve_model_num_gpu_layers(model_name, agent_name)
         if num_gpu is not None:
@@ -1432,8 +1531,21 @@ class OrchestratorAgent:
         if not isinstance(policy, dict):
             return None
 
-        fallback_model = str(policy.get("fallback_model") or "").strip()
-        fallback_route = self._resolve_route(str(policy.get("fallback_route") or "").strip())
+        fallback_preset = str(policy.get("fallback_preset") or "").strip()
+        fallback_preset_payload = self.runtime_presets.get(fallback_preset) if fallback_preset else None
+
+        if fallback_preset and not isinstance(fallback_preset_payload, dict):
+            return None
+
+        if fallback_preset_payload:
+            fallback_route = self._resolve_route(str(fallback_preset_payload.get("route") or "").strip())
+            fallback_model = str(fallback_preset_payload.get("model") or "").strip()
+            fallback_options = copy.deepcopy(fallback_preset_payload.get("options") or {})
+        else:
+            fallback_options = None
+            fallback_model = str(policy.get("fallback_model") or "").strip()
+            fallback_route = self._resolve_route(str(policy.get("fallback_route") or "").strip())
+
         if not fallback_model or fallback_model == str(model or "").strip():
             return None
         if fallback_route and fallback_route not in self.subagents:
@@ -1453,6 +1565,8 @@ class OrchestratorAgent:
                 "reason": f"response_too_short<{min_expected}",
                 "fallback_route": fallback_route or None,
                 "fallback_model": fallback_model,
+                "fallback_preset": fallback_preset or None,
+                "fallback_options": fallback_options,
             }
 
         for phrase in policy.get("suspicious_phrases", []) or []:
@@ -1462,6 +1576,8 @@ class OrchestratorAgent:
                     "reason": f"suspicious_phrase:{phrase_text}",
                     "fallback_route": fallback_route or None,
                     "fallback_model": fallback_model,
+                    "fallback_preset": fallback_preset or None,
+                    "fallback_options": fallback_options,
                 }
 
         required_terms = [str(term or "").strip() for term in (policy.get("required_terms") or []) if str(term or "").strip()]
@@ -1470,6 +1586,8 @@ class OrchestratorAgent:
                 "reason": "missing_required_terms",
                 "fallback_route": fallback_route or None,
                 "fallback_model": fallback_model,
+                "fallback_preset": fallback_preset or None,
+                "fallback_options": fallback_options,
             }
 
         return None
@@ -1887,7 +2005,7 @@ class OrchestratorAgent:
                         "timestamp": time.time(),
                     }) + "\n")
             raise wrapped
-
+        else:
             self._triage_mark_success(agent_name, started_at)
             if isinstance(result, str):
                 self._heartbeat(agent_name, last_response_preview=result[:400])
@@ -2120,6 +2238,15 @@ class OrchestratorAgent:
             route = self._resolve_route(route or "ollama_amd")
             model = self._resolve_dynamic_model(profile, user_input, model)
             if model_override and str(model_override).strip():
+                if self.strict_runtime_preset:
+                    raise AgentProfileError(
+                        "model_override is disabled while AGENT_STRICT_RUNTIME_PRESET is enabled",
+                        details={
+                            "profile": profile.get("name") if profile else None,
+                            "runtime_preset": selected_runtime_preset,
+                            "attempted_model_override": str(model_override).strip(),
+                        },
+                    )
                 model = str(model_override).strip()
             self._enforce_profile_policy(profile, route, model)
             stream = bool(profile.get("default_stream", False)) if profile else False
@@ -2129,6 +2256,38 @@ class OrchestratorAgent:
             timeout_seconds = self._get_profile_timeout_seconds(profile, route)
             retry_limit = self._get_profile_retry_limit(profile)
             ml_shadow = self._build_ml_shadow_recommendations(profile, user_input, route, model)
+
+            # ML preset ranking: optional learned recommendation (shadow mode)
+            ml_candidates = None
+            if self.ml_selector_enabled and self.ml_mode == "shadow":
+                try:
+                    profile_name = str(profile.get("name") or "")
+                    allowed_presets = [
+                        str(p).strip()
+                        for p in (profile.get("runtime_preset_allowlist") or [])
+                        if str(p).strip()
+                    ]
+                    if not allowed_presets:
+                        allowed_presets = [selected_runtime_preset]
+
+                    ml_candidates = self.ml_selector.predict_preset_ranking(
+                        text=user_input,
+                        profile_name=profile_name,
+                        approval_status="draft",  # Default; extracted from book_project in book_flow.py
+                        stage="default",  # Extracted from book stage in book_flow.py
+                        allowed_presets=allowed_presets,
+                        top_k=3,
+                    )
+
+                    self._emit_ml_shadow_event("plan_request_ml_candidates", {
+                        "profile": profile_name,
+                        "default_preset": selected_runtime_preset,
+                        "ml_candidates": [(p, float(c)) for p, c in (ml_candidates or [])],
+                        "prompt_chars": len(user_input),
+                    })
+                except Exception as e:
+                    logger.warning(f"ML selector error (shadow mode): {e}")
+                    ml_candidates = None
 
             resolved_correlation_id = str(correlation_id or "").strip() or str(uuid.uuid4())
 
@@ -2142,6 +2301,7 @@ class OrchestratorAgent:
                 "timeout_seconds": timeout_seconds,
                 "retry_limit": retry_limit,
                 "ml_shadow": ml_shadow,
+                "ml_candidates": ml_candidates,
                 "correlation_id": resolved_correlation_id,
                 "runtime_preset": selected_runtime_preset,
             }
@@ -2261,6 +2421,7 @@ class OrchestratorAgent:
                             "error_code": err.code,
                         },
                     )
+                    attempt += 1
             if stream or on_stream or model_override:
                 return result
 
@@ -2275,6 +2436,7 @@ class OrchestratorAgent:
 
             fallback_route = retry_policy.get("fallback_route") or preferred
             fallback_model = retry_policy["fallback_model"]
+            fallback_preset = str(retry_policy.get("fallback_preset") or "").strip() or None
             self._log_quality_retry(
                 resolved_profile_name,
                 preferred,
@@ -2283,7 +2445,8 @@ class OrchestratorAgent:
                 fallback_model,
                 retry_policy.get("reason"),
             )
-            retry_options = copy.deepcopy(options) if options else None
+            fallback_options = retry_policy.get("fallback_options")
+            retry_options = copy.deepcopy(fallback_options) if isinstance(fallback_options, dict) else (copy.deepcopy(options) if options else None)
             return self._invoke_with_triage(
                 fallback_route,
                 merged_prompt,

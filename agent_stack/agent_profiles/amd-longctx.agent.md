@@ -1,7 +1,8 @@
 ---
+
 name: amd-longctx
 runtime_preset: amd-qwen25-coder-14b-65536
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 1200
 temperature: 0.4

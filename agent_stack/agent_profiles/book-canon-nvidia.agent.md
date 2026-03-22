@@ -1,7 +1,8 @@
 ---
+
 name: book-canon-nvidia
 runtime_preset: nvidia-qwen35-4b-8192
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_nvidia
 default_stream: false
 num_predict: 1800
 temperature: 0.2

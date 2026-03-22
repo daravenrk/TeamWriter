@@ -90,6 +90,30 @@
     .review-gate-meta { display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px; color:#c6d4f5; }
     .review-gate-actions { display:flex; gap:8px; flex-wrap:wrap; }
     .review-gate-actions button { min-width:110px; }
+    .view-switch { display:flex; gap:8px; margin:6px 0 14px; flex-wrap:wrap; }
+    .view-switch button { background:#1e293b; border:1px solid #334155; }
+    .view-switch button.active { background:#0f766e; }
+    .live-flow-screen { display:block; border:1px solid #2a3962; border-radius:16px; overflow:hidden; background: radial-gradient(ellipse at top, #172554, #091226 70%); position:relative; min-height:640px; }
+    .live-flow-canvas { width:100%; height:640px; display:block; }
+    .live-flow-hud { position:absolute; left:14px; top:12px; right:14px; display:flex; justify-content:space-between; align-items:flex-start; pointer-events:none; }
+    .live-flow-chip { background:rgba(13,22,48,0.82); border:1px solid #2f4674; border-radius:12px; padding:8px 10px; font-size:12px; color:#dbe8ff; backdrop-filter: blur(2px); }
+    .live-flow-ticker { position:absolute; left:14px; right:14px; bottom:12px; display:grid; gap:6px; }
+    .live-flow-event { background:rgba(11,20,48,0.86); border:1px solid #2f4674; border-left:4px solid #22d3ee; border-radius:10px; padding:8px 10px; font-size:12px; color:#dbe8ff; animation:liveSlide 300ms ease-out; }
+    .live-flow-event.warn { border-left-color:#f59e0b; }
+    .live-flow-event.bad { border-left-color:#f87171; }
+    .live-flow-event.good { border-left-color:#34d399; }
+    .live-flow-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#9fb0d0; font-size:14px; pointer-events:none; }
+    body.live-flow-mode .grid,
+    body.live-flow-mode .card:not(.live-flow-card),
+    body.live-flow-mode #bookModeBanner,
+    body.live-flow-mode #codingModeBanner,
+    body.live-flow-mode #footer {
+      display:none !important;
+    }
+    @keyframes liveSlide {
+      from { transform:translateY(6px); opacity:0; }
+      to { transform:translateY(0); opacity:1; }
+    }
     @keyframes pulse {
       0% { box-shadow:0 0 0 1px rgba(45,212,191,0.2), 0 0 8px rgba(45,212,191,0.15); }
       50% { box-shadow:0 0 0 1px rgba(45,212,191,0.4), 0 0 18px rgba(45,212,191,0.28); }
@@ -107,6 +131,23 @@
 <body>
   <div class="wrap">
     <h1>Dragonlair Agent Control</h1>
+    <div id="viewSwitcher" class="view-switch">
+      <button id="viewControl" class="active" type="button">Control View</button>
+      <button id="viewLive" type="button">Live Flow View</button>
+    </div>
+
+    <div id="liveFlowCard" class="card live-flow-card" style="display:none;">
+      <h2>Live Book Flow</h2>
+      <div id="liveFlowScreen" class="live-flow-screen">
+        <canvas id="liveFlowCanvas" class="live-flow-canvas" width="1400" height="640"></canvas>
+        <div id="liveFlowEmpty" class="live-flow-empty">Waiting for live run data...</div>
+        <div class="live-flow-hud">
+          <div id="liveFlowSummary" class="live-flow-chip">No data yet.</div>
+          <div id="liveFlowLegend" class="live-flow-chip">Agents orbit • Runs float • Pages print • Reviews pulse</div>
+        </div>
+        <div id="liveFlowTicker" class="live-flow-ticker"></div>
+      </div>
+    </div>
 
     <div class="grid">
       <div class="card">
@@ -998,6 +1039,238 @@ function renderAgentVoyeur(data) {
   root.appendChild(wrap);
 }
 
+const liveFlowState = {
+  mode: 'control',
+  agents: [],
+  runs: [],
+  particles: [],
+  pageStack: 0,
+  lastCompleted: 0,
+  lastFailed: 0,
+  lastTickAt: 0,
+  eventCounter: 0,
+  eventSeen: new Set(),
+};
+
+function setViewMode(mode) {
+  const nextMode = mode === 'live' ? 'live' : 'control';
+  liveFlowState.mode = nextMode;
+  const isLive = nextMode === 'live';
+  document.body.classList.toggle('live-flow-mode', isLive);
+  document.getElementById('viewControl').classList.toggle('active', !isLive);
+  document.getElementById('viewLive').classList.toggle('active', isLive);
+  document.getElementById('liveFlowCard').style.display = isLive ? 'block' : 'none';
+}
+
+function emitLiveEvent(message, tone = 'good') {
+  const ticker = document.getElementById('liveFlowTicker');
+  if (!ticker || !message) return;
+  const item = document.createElement('div');
+  item.className = `live-flow-event ${tone}`;
+  item.textContent = message;
+  ticker.prepend(item);
+  while (ticker.children.length > 6) {
+    ticker.removeChild(ticker.lastChild);
+  }
+}
+
+function seedFlowParticles(kind, count) {
+  for (let i = 0; i < count; i += 1) {
+    const x = 120 + Math.random() * 1160;
+    const y = -20 - Math.random() * 80;
+    const vx = (Math.random() - 0.5) * 0.4;
+    const vy = 0.9 + Math.random() * 1.6;
+    const life = 220 + Math.random() * 100;
+    liveFlowState.particles.push({ x, y, vx, vy, life, kind });
+  }
+}
+
+function updateLiveFlowData(data) {
+  const tasks = data.tasks || [];
+  const agentsObj = (data.health && data.health.agents) || {};
+  const agents = Object.entries(agentsObj).map(([name, info], idx) => ({
+    name,
+    state: agentDisplayState(info),
+    profile: info.current_profile || '',
+    model: info.current_model || '',
+    idx,
+  }));
+  const runs = tasks
+    .filter((t) => t.profile === 'book-flow')
+    .slice(0, 10)
+    .map((t, idx) => ({
+      id: (t.id || '').slice(0, 8),
+      status: String(t.status || 'queued'),
+      stage: t.runtime_stage || '',
+      route: t.route || '',
+      model: t.model || '',
+      idx,
+    }));
+
+  const completedNow = runs.filter((r) => r.status === 'completed').length;
+  const failedNow = runs.filter((r) => r.status === 'failed').length;
+
+  if (completedNow > liveFlowState.lastCompleted) {
+    const delta = completedNow - liveFlowState.lastCompleted;
+    seedFlowParticles('page', delta * 10);
+    liveFlowState.pageStack += delta;
+    emitLiveEvent(`Printed ${delta} new page batch${delta > 1 ? 'es' : ''} from completed run(s).`, 'good');
+  }
+  if (failedNow > liveFlowState.lastFailed) {
+    const delta = failedNow - liveFlowState.lastFailed;
+    seedFlowParticles('review', delta * 8);
+    emitLiveEvent(`Review pulse: ${delta} run failure${delta > 1 ? 's' : ''} detected.`, 'bad');
+  }
+
+  for (const run of runs) {
+    const eventKey = `${run.id}:${run.status}:${run.stage}`;
+    if (liveFlowState.eventSeen.has(eventKey)) continue;
+    liveFlowState.eventSeen.add(eventKey);
+    if (run.status === 'running') {
+      emitLiveEvent(`Run ${run.id} is building ${run.stage || 'stage'} on ${run.route || 'route'}.`, 'warn');
+    } else if (run.status === 'completed') {
+      emitLiveEvent(`Run ${run.id} completed successfully.`, 'good');
+    } else if (run.status === 'failed') {
+      emitLiveEvent(`Run ${run.id} failed at ${run.stage || 'unknown stage'}.`, 'bad');
+    }
+  }
+
+  liveFlowState.lastCompleted = completedNow;
+  liveFlowState.lastFailed = failedNow;
+  liveFlowState.agents = agents;
+  liveFlowState.runs = runs;
+
+  const empty = document.getElementById('liveFlowEmpty');
+  if (empty) {
+    empty.style.display = (runs.length || agents.length) ? 'none' : 'flex';
+  }
+  const summary = document.getElementById('liveFlowSummary');
+  if (summary) {
+    summary.textContent = `agents=${agents.length} running_runs=${runs.filter((r) => r.status === 'running').length} completed_runs=${completedNow} failed_runs=${failedNow} printed_pages=${liveFlowState.pageStack}`;
+  }
+}
+
+function drawLiveFlowScene(ts) {
+  const canvas = document.getElementById('liveFlowCanvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const targetW = Math.max(800, Math.floor(rect.width));
+  const targetH = Math.max(520, Math.floor(rect.height));
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const dt = liveFlowState.lastTickAt ? Math.min(33, ts - liveFlowState.lastTickAt) : 16;
+  liveFlowState.lastTickAt = ts;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, '#0f172a');
+  grad.addColorStop(0.5, '#11213f');
+  grad.addColorStop(1, '#081021');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.fillStyle = 'rgba(110, 130, 190, 0.14)';
+  for (let i = 0; i < 55; i += 1) {
+    const x = (i * 193 + (ts * 0.03)) % w;
+    const y = (i * 97) % h;
+    ctx.fillRect(x, y, 2, 2);
+  }
+
+  const centerX = w * 0.5;
+  const centerY = h * 0.34;
+  const radius = Math.min(w, h) * 0.22;
+  ctx.strokeStyle = 'rgba(45,212,191,0.2)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const agents = liveFlowState.agents;
+  agents.forEach((agent, idx) => {
+    const angle = (ts * 0.00035) + ((Math.PI * 2 * idx) / Math.max(1, agents.length));
+    const ax = centerX + Math.cos(angle) * radius;
+    const ay = centerY + Math.sin(angle) * radius;
+    const state = String(agent.state || 'idle');
+    let color = '#64748b';
+    if (state === 'running') color = '#22d3ee';
+    else if (state === 'healthy') color = '#34d399';
+    else if (state === 'failed' || state === 'quarantined') color = '#f87171';
+    else if (state === 'hung') color = '#f59e0b';
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(ax, ay, state === 'running' ? 8 : 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#dbe8ff';
+    ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(agent.name, ax + 10, ay + 4);
+  });
+
+  const runs = liveFlowState.runs;
+  runs.forEach((run, idx) => {
+    const rowY = h * 0.60 + idx * 30;
+    const sway = Math.sin(ts * 0.001 + idx) * 16;
+    const x = 120 + sway;
+    let fill = 'rgba(71,85,105,0.76)';
+    if (run.status === 'running') fill = 'rgba(29,78,216,0.78)';
+    if (run.status === 'completed') fill = 'rgba(15,118,110,0.78)';
+    if (run.status === 'failed') fill = 'rgba(153,27,27,0.78)';
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, rowY - 14, 430, 24);
+    ctx.strokeStyle = 'rgba(219,232,255,0.25)';
+    ctx.strokeRect(x, rowY - 14, 430, 24);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+    ctx.fillText(`run ${run.id}  ${run.status}  ${run.stage || 'stage pending'}`, x + 10, rowY + 2);
+  });
+
+  // Printed pages stack visualization.
+  const stackCount = Math.min(32, liveFlowState.pageStack);
+  for (let i = 0; i < stackCount; i += 1) {
+    const px = w - 240 + (i % 3) * 8;
+    const py = h - 26 - i * 3;
+    ctx.fillStyle = 'rgba(248,250,252,0.85)';
+    ctx.fillRect(px, py, 90, 12);
+    ctx.strokeStyle = 'rgba(15,23,42,0.28)';
+    ctx.strokeRect(px, py, 90, 12);
+  }
+  ctx.fillStyle = '#dbe8ff';
+  ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillText('Printed Pages', w - 238, h - 36 - stackCount * 3);
+
+  const gravity = 0.0023 * dt;
+  const nextParticles = [];
+  for (const p of liveFlowState.particles) {
+    p.life -= dt;
+    p.vy += gravity;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.kind === 'page') {
+      ctx.fillStyle = 'rgba(248,250,252,0.88)';
+      ctx.fillRect(p.x, p.y, 10, 12);
+      ctx.strokeStyle = 'rgba(100,116,139,0.55)';
+      ctx.strokeRect(p.x, p.y, 10, 12);
+    } else {
+      ctx.fillStyle = 'rgba(248,113,113,0.85)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (p.life > 0 && p.y < h + 20) nextParticles.push(p);
+  }
+  liveFlowState.particles = nextParticles;
+}
+
+function liveFlowTick(ts) {
+  drawLiveFlowScene(ts || performance.now());
+  window.requestAnimationFrame(liveFlowTick);
+}
+
 async function refreshStatus() {
   let res = await fetch('/api/ui-state');
   if (!res.ok) {
@@ -1054,6 +1327,7 @@ async function refreshStatus() {
   renderCrontabTimer(data.crontab_next_execution || null);
   renderAgentVoyeur(data);
   renderQuarantineDiagnostics(data);
+  updateLiveFlowData(data);
 
   const agentBody = document.getElementById('agents');
   agentBody.innerHTML = '';
@@ -1246,6 +1520,8 @@ document.getElementById('submitCorrection').addEventListener('click', async () =
   }
 });
 
+document.getElementById('viewControl').addEventListener('click', () => setViewMode('control'));
+document.getElementById('viewLive').addEventListener('click', () => setViewMode('live'));
 document.getElementById('submitTask').addEventListener('click', queueTask);
 document.getElementById('streamTask').addEventListener('click', runStream);
 document.getElementById('refreshStatus').addEventListener('click', refreshStatus);
@@ -1260,6 +1536,8 @@ document.getElementById('reviewGateRewrite').addEventListener('click', () => sub
 document.getElementById('reviewGateDefer').addEventListener('click', () => submitReviewGateAction('defer'));
 setFeedbackDecision('up');
 syncModePanels();
+setViewMode('control');
+window.requestAnimationFrame(liveFlowTick);
 refreshStatus();
 setInterval(refreshStatus, 2000);
 </script>

@@ -1,7 +1,8 @@
 ---
+
 name: book-proofreader
-runtime_preset: nvidia-qwen35-2b-49152
-allowed_routes: ollama_amd,ollama_nvidia
+runtime_preset: nvidia-qwen35-2b-65536
+allowed_routes: ollama_nvidia
 default_stream: false
 num_predict: 1200
 temperature: 0.1

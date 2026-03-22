@@ -1,7 +1,8 @@
 ---
+
 name: writing-assistant
 runtime_preset: nvidia-qwen35-4b-8192
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_nvidia
 num_predict: 1200
 default_stream: false
 temperature: 0.7

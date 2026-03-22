@@ -261,6 +261,69 @@ def cmd_cancel(api_url, task_id):
     resp = _api_post(api_url, f"/api/tasks/{task_id}/cancel", {})
     print(f"Cancelled task {task_id}: status={resp.get('status')}")
 
+
+def cmd_ml_retrain(orchestrator, min_samples):
+    """Retrain ML model from accumulated execution outcomes."""
+    if not orchestrator.ml_selector:
+        print("ML selector not available", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Starting ML model retraining (min_samples={min_samples})...")
+    try:
+        orchestrator.ml_selector.retrain_from_outcomes(
+            outcomes_path=str(orchestrator.agent_reward_events_path),
+            reward_ledger_path=str(orchestrator.agent_rewards_path),
+            min_samples=int(min_samples),
+        )
+        print("✅ ML model retrained successfully")
+        print(f"   Cached model: /tmp/ml_selector_model.pkl")
+        print(f"   Training data: {orchestrator.agent_reward_events_path}")
+        print(f"   Ready for deployment (AGENT_ML_MODE=shadow or auto)")
+    except Exception as e:
+        print(f"❌ Retraining failed: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_ml_status(orchestrator):
+    """Show ML selector status and shadow event statistics."""
+    status = {
+        "ml_enabled": orchestrator.ml_enabled,
+        "ml_mode": orchestrator.ml_mode,
+        "ml_selector_initialized": orchestrator.ml_selector is not None,
+        "ml_selector_enabled": orchestrator.ml_selector_enabled,
+        "ml_top_k": orchestrator.ml_top_k,
+        "ml_min_confidence": orchestrator.ml_min_confidence,
+    }
+
+    # Count shadow events
+    shadow_events_count = 0
+    if orchestrator.ml_shadow_events_path.exists():
+        try:
+            with open(orchestrator.ml_shadow_events_path, "r") as f:
+                shadow_events_count = sum(1 for _ in f)
+        except Exception:
+            pass
+
+    # Count reward events (training data)
+    training_samples = 0
+    if orchestrator.agent_reward_events_path.exists():
+        try:
+            with open(orchestrator.agent_reward_events_path, "r") as f:
+                training_samples = sum(1 for _ in f)
+        except Exception:
+            pass
+
+    status["shadow_events_recorded"] = shadow_events_count
+    status["training_samples_available"] = training_samples
+    status["ready_to_retrain"] = training_samples >= 50
+    status["ml_shadow_events_path"] = str(orchestrator.ml_shadow_events_path)
+    status["reward_events_path"] = str(orchestrator.agent_reward_events_path)
+
+    print(json.dumps(status, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dragonlair agent CLI")
     parser.add_argument("--profile", default=None, help="Profile override, e.g. amd-coder")
@@ -297,6 +360,11 @@ def main():
 
     cancel_parser = sub.add_parser("cancel", help="Cancel a running or queued task by task_id")
     cancel_parser.add_argument("task_id", help="Task ID to cancel")
+
+    ml_retrain_p = sub.add_parser("ml-retrain", help="Retrain ML model from accumulated outcomes")
+    ml_retrain_p.add_argument("--min-samples", type=int, default=50, help="Minimum outcomes required to retrain (default 50)")
+
+    sub.add_parser("ml-status", help="Show ML selector status and training data statistics")
 
     args = parser.parse_args()
 
@@ -342,6 +410,14 @@ def main():
     elif args.command == "chat":
         orchestrator = OrchestratorAgent()
         cmd_chat(orchestrator, args.profile, stream)
+        return
+    elif args.command == "ml-retrain":
+        orchestrator = OrchestratorAgent()
+        cmd_ml_retrain(orchestrator, args.min_samples)
+        return
+    elif args.command == "ml-status":
+        orchestrator = OrchestratorAgent()
+        cmd_ml_status(orchestrator)
         return
     raise SystemExit(f"Unknown command: {args.command}")
 

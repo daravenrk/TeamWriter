@@ -1,7 +1,8 @@
 ---
+
 name: amd-writer
 runtime_preset: amd-qwen35-27b-49152
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 1024
 temperature: 0.5

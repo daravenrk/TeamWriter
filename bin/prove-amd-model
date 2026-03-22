@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL="${1:-qwen3.5:27b}"
+CTX="${2:-8192}"
+PROMPT="${3:-Reply with exactly OK.}"
+AMD_API="${AMD_API:-http://127.0.0.1:11435}"
+
+JSON_PAYLOAD="$(jq -cn \
+  --arg model "$MODEL" \
+  --arg prompt "$PROMPT" \
+  --argjson ctx "$CTX" \
+  '{model:$model,prompt:$prompt,stream:false,options:{num_ctx:$ctx,num_gpu:-1,num_predict:24}}')"
+
+echo "Running AMD proof: model=$MODEL ctx=$CTX"
+RESPONSE="$(curl -sS "$AMD_API/api/generate" -H "Content-Type: application/json" -d "$JSON_PAYLOAD")"
+
+DONE="$(echo "$RESPONSE" | jq -r '.done // false')"
+TEXT="$(echo "$RESPONSE" | jq -r '.response // ""')"
+EVAL="$(echo "$RESPONSE" | jq -r '.eval_count // 0')"
+
+if [[ "$DONE" != "true" ]]; then
+  echo "Inference did not finish successfully"
+  echo "$RESPONSE" | jq .
+  exit 2
+fi
+
+echo "Inference OK: done=$DONE eval_count=$EVAL response='$(echo "$TEXT" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-120)'"
+
+echo "Recent AMD load/offload evidence:"
+docker logs --since 5m ollama_amd 2>&1 | rg -n "qwen3\.5:27b|num_ctx|offloaded|layers|CPU|ROCm|memory" | tail -n 30 || true

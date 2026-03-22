@@ -49,10 +49,14 @@ def _normalize_options(options, preset_name):
     for key, value in options.items():
         if key in {"num_ctx", "num_predict", "num_gpu", "num_gpus"}:
             parsed = _parse_int(value)
-            if parsed <= 0 and key not in {"num_gpu", "num_gpus"}:
+            if key in {"num_ctx", "num_predict"} and parsed <= 0:
                 raise ValueError(f"runtime preset '{preset_name}' option {key} must be > 0")
-            if parsed < 0 and key in {"num_gpu", "num_gpus"}:
-                raise ValueError(f"runtime preset '{preset_name}' option {key} must be >= 0")
+            if key == "num_gpu" and parsed < -1:
+                raise ValueError(f"runtime preset '{preset_name}' option {key} must be >= -1")
+            if key == "num_gpu" and parsed == 0:
+                raise ValueError(f"runtime preset '{preset_name}' option {key} must not be 0")
+            if key == "num_gpus" and parsed < 1:
+                raise ValueError(f"runtime preset '{preset_name}' option {key} must be >= 1")
             normalized[key] = parsed
         elif key == "temperature":
             parsed = _parse_float(value)

@@ -1,7 +1,8 @@
 ---
+
 name: book-publisher
 runtime_preset: amd-qwen35-9b-49152
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 1400
 temperature: 0.2

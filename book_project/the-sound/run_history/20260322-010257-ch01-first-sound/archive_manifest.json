@@ -1,0 +1,10 @@
+{
+  "archived_at": "2026-03-22T01:06:10.052434",
+  "source_run_dir": "/home/daravenrk/dragonlair/book_project/the-sound/runs/20260322-010257-ch01-first-sound",
+  "cleanup_reason": "pre_run_cleanup",
+  "archived_files": [
+    "run_journal.jsonl",
+    "changes.log",
+    "diagnostics/agent_diagnostics.jsonl"
+  ]
+}

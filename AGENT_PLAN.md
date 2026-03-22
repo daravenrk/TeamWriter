@@ -126,7 +126,7 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 ## Operator CLI Deliverables
 
 ## March 2026: Research Agent Update
-- book-researcher: qwen3.5:14b, 128k context, internet/news/Wikipedia research, structured output
+- book-researcher: qwen2.5-coder:14b, large-context research stage with grounded source-packet bootstrap, structured output, and web/dictionary/Wikipedia inputs
 - [x] `agentctl profiles`
 - [x] `agentctl plan "..."`
 - [x] `agentctl once "..."`
@@ -136,8 +136,8 @@ Build a fully autonomous backend agent control system for Dragonlair using md-de
 - [ ] `agentctl queue` and `agentctl dashboard`
 
 ## Near-Term Execution Order
-1. Implement profile lint + guardrails.
-2. Implement persistent queue worker mode.
-3. Implement watchdog + circuit breaker.
-4. Add queue/dashboard CLI subcommands.
-5. Run full backup/restore drill and document sign-off.
+1. Run a fresh end-to-end Chapter 1 validation and confirm early-stage outputs are no longer `null` after the 2026-03-21 orchestrator repair.
+2. Rebuild/redeploy the active agent runtime so the research bootstrap changes are present in the executing environment, not just the host workspace.
+3. Finalize the researcher scraping path by either keeping inline HTML snippet extraction with dependency parity or routing scraping through the existing fetcher service.
+4. Re-run backup/restore and interruption drills after the above stabilization changes.
+5. Resume persistent queue worker mode and watchdog/circuit-breaker roadmap work once the book flow is stable again.

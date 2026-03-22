@@ -1,7 +1,8 @@
 ---
+
 name: book-skeleton-updater
 runtime_preset: amd-qwen35-9b-131072
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 intent_keywords: skeleton-updater,skeleton update,canonical extraction,law extraction,canon extraction,chapter acceptance,living skeleton,canonical record
 priority: 110

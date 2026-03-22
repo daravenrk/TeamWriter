@@ -2,11 +2,63 @@
 
 ---
 
+## 🎯 ML Model Selector Implementation (2026-03-22)
+
+**COMPLETE**: Full ML infrastructure for learning optimal (model, context) assignments per profile.
+
+**See**: [ML_IMPLEMENTATION_SUMMARY.md](ML_IMPLEMENTATION_SUMMARY.md) and [AGENT_ML_SELECTOR_GUIDE.md](AGENT_ML_SELECTOR_GUIDE.md)
+
+**Status**: ✅ Core integration done; ⏳ Awaiting book_flow.py to call `orchestrator.record_ml_outcome()`
+
+**Available Commands**:
+```bash
+agentctl ml-status         # Show training data count + readiness
+agentctl ml-retrain        # Retrain from 50+ accumulated outcomes (weekly job)
+```
+
+**Next**: Add outcome recording to book_flow.py after each task execution. After 50+ tasks, run weekly retraining.
+
+---
+
+## 🚨 Book Run Incident + Correction Start (2026-03-22)
+
+### Discoveries from live run (`the-sound`, `20260322-010610-ch01-first-sound`)
+
+- Run progressed through `publisher_brief`, `research`, `architect_outline`, `chapter_planner`, and `canon`.
+- `architect_outline` required one retry (missing `master_outline_markdown` on attempt 1, passed on attempt 2).
+- `canon` required two retries for schema conformance (`open_loops` type mismatch, then `style_guide` type mismatch), then passed on attempt 3.
+- After canon completion, run terminated with hard runtime exception:
+  - `NameError: name 'build_section_consistency_sections' is not defined`
+  - Call site: writer bootstrap section consistency initialization in `book_flow.py`.
+- Non-fatal warnings observed:
+  - Repeated permission-denied warnings for `book_project/cli_runtime_activity.json` updates.
+  - `datetime.utcnow()` deprecation warnings.
+  - `worldbuilding_enrichment` warning when model override is blocked by strict runtime preset mode.
+
+### Correction started (implemented)
+
+- Added missing helper `build_section_consistency_sections(...)` to `agent_stack/book_flow.py`.
+- Function now builds deterministic `consistency_sections` payload with expected fields:
+  - `chapter_number`, `chapter_title`, `generated_at`, `active_section_index`, `sections[]`, `ledger[]`
+  - per-section expectations, situations, tracking targets, coverage placeholders, and timestamps
+- Output shape aligns with previously successful historical artifact format.
+- Validation: `python3 -m py_compile agent_stack/book_flow.py` passed.
+
+### Suggested follow-up hardening
+
+1. Add static lint gate (`ruff`/`pyflakes`) in CI to catch undefined names before runtime.
+2. Add a focused preflight smoke test that executes run flow through writer bootstrap (post-canon) with mocked stage outputs.
+3. Add run-level terminal event emission (`run_failure`) for uncaught exceptions in direct CLI runs so failures are always explicit in `run_journal.jsonl`.
+4. Normalize file ownership/permissions for `book_project/cli_runtime_activity.json` and lockfile to restore reliable live telemetry updates.
+5. Replace `datetime.utcnow()` usages with timezone-aware UTC calls to remove deprecation noise and future break risk.
+
+---
+
 ## Book Flow Risk Register (2026-03-20)
 
 Full pipeline audit conducted. Issues ranked by severity.
 
-### 🔴 FIXED — 3 bugs patched in this session
+### 🔴 FIXED — 13 tracked fixes applied across recent stabilization work
 
 | # | Location | Fix Applied |
 |---|----------|-------------|
@@ -19,6 +71,10 @@ Full pipeline audit conducted. Issues ranked by severity.
 | F7 | NVIDIA route profiles — GPU layer 33/33 100% GPU achievement (book stages) | **FIXED (2026-03-20 COMPLETE)**: Root cause confirmed as VRAM overcommit from large context + output layer footprint. Final validated config: `qwen3.5:4b`, `num_ctx: 8192`, `num_gpu: 99` on GTX 1660 SUPER (6 GiB). Verified in Ollama logs: `offloaded 33/33 layers to GPU`. Peak observed VRAM: ~5596 MiB used, ~152 MiB free. |
 | F8 | Profile GPU option drift (`num_gpus` vs `num_gpu`) + validator mismatch | **FIXED (2026-03-20)**: Standardized all profiles to `num_gpu` (singular, Ollama API key). Removed stale `num_gpus` entries. Updated validator allowlist + loader compatibility path. Profile lint now passes (`26 profiles, 0 errors`). |
 | F9 | NVIDIA context cap enforcement — KvSize 16384 leak on architect/writer stages | **FIXED (2026-03-21)**: Missing `AGENT_NVIDIA_MAX_CTX_BY_MODEL` env var in `docker-compose.agent.yml` allowed context estimator to select higher-context presets without cap enforcement, causing `qwen3.5:4b` to load at `num_ctx=16384` (violates GPU-only policy: `32/33` layers on GPU). Root cause: when a preset lacks explicit `num_ctx`, clamping in `_resolve_profile_runtime_settings()` doesn't trigger. Added explicit env var: `AGENT_NVIDIA_MAX_CTX_BY_MODEL: '{"qwen3.5:4b":8192,"qwen3.5:2b":65536,"qwen3.5:0.8b":131072}'` with validated ceilings from matrix calibration. Rebuilt container (2026-03-21). |
+| F10 | `orchestrator.py` — `_invoke_with_triage()` success path | **FIXED (2026-03-21)**: success return path was unreachable after `raise wrapped`, so successful model calls returned `None`. This caused early stages like research, architect outline, chapter planner, and canon to log `raw_output: null` and fail downstream schema gates. Added a proper `else:` success branch and validated compile. |
+| F11 | `orchestrator.py` — retry progression + ML shadow corruption | **FIXED (2026-03-21)**: retry loop in `handle_request_with_overrides()` now increments `attempt`; `_build_ml_shadow_recommendations()` was restored after a malformed patch injected exception/retry lines into the method body and broke its `ml_enabled` early exit. |
+| F12 | `book_flow.py` — research bootstrap grounding | **FIXED (2026-03-21)**: researcher now builds `source_packets.json` before the LLM call using Wikipedia OpenSearch + summaries, Free Dictionary API, DuckDuckGo HTML snippets when `beautifulsoup4` is available, and the local premise/chapter anchor. Prompt grounding improved from effectively empty packets to a validated smoke-test result of 7 non-empty packets for the Chapter 1 Mokeys Pay Day sample. |
+| F13 | `book_flow.py` — fallback research dossier contamination | **FIXED (2026-03-21)**: removed stale hardcoded sci-fi fallback text (`signal-processing engineer`, `deep-space telescope array`) and replaced it with book-brief-driven fallback language plus evidence anchors from gathered source packets. |
 
 ### 🟠 KNOWN RISKS — Not yet fixed, monitor in next run
 
@@ -33,29 +89,72 @@ Full pipeline audit conducted. Issues ranked by severity.
 | R7 | INFO | `book-researcher` profile | Uses `qwen2.5-coder:14b` (a code model) for book research. Not broken but not ideal — coder training doesn't match research output format. | Occasional structured output failures from the research stage |
 | R8 | HIGH | Task ledger reload / cancellation persistence | Previously cancelled long-running `book-flow` tasks reappeared as running after API restart, causing unexpected concurrent load and VRAM pressure. | Hidden background runs can trigger fallback, route starvation, and false diagnostics |
 | R9 | HIGH | API image/runtime drift | Editing host files without image rebuild can leave container running stale validator/loader code. | Startup loops, profile validation regressions, and inconsistent route behavior |
+| R10 | MEDIUM | Research bootstrap runtime parity | DuckDuckGo snippet scraping now works when `beautifulsoup4` is available in the executing Python environment. Host smoke tests pass, but containerized runs will only get DDG snippets after dependency parity or fetcher-service integration is completed. Wikipedia + dictionary fallback still works without it. | Host-only success can mask weaker container research grounding |
+| R11 | FIXED (2026-03-21) | AMD context ceiling missing enforcement | `qwen2.5-coder:14b` has `n_ctx_train=32768`. Researcher profile was requesting 128000 which Ollama silently capped to 32768. Added `AGENT_AMD_MAX_CTX_BY_MODEL` env var + AMD ctx clamping in orchestrator (parallel to NVIDIA). Updated researcher preset to `amd-qwen25-coder-14b-32768`. Proofreader preset updated from 49152 → 65536 (validated ceiling for qwen3.5:2b). |
+
+### Immediate Next Steps (2026-03-21 book-flow stabilization)
+
+1. Run a full Chapter 1 end-to-end book flow and verify that `research`, `architect_outline`, `chapter_planner`, and `canon` all produce non-null `raw_output` and pass their stage gates.
+2. Rebuild and redeploy the agent runtime image so research bootstrap dependencies match the code path actually used by API-triggered runs.
+3. Decide between two durable scraping paths for the researcher:
+  - add `beautifulsoup4` to the main runtime image and keep inline DDG snippet gathering in `book_flow.py`
+  - or call the existing fetcher service from the research bootstrap so scraping stays isolated in its own service
+4. Add a relevance filter for bootstrap packets so obviously off-topic Wikipedia summaries are dropped before they enter the research prompt.
+5. Measure prompt growth from `source_packets` and trim packet count or packet text if the research prompt starts approaching prompt-size or context caps.
+
+### Follow-up TODOs (Evaluation Queue)
+
+- [ ] Add a hard-fail preset conformance check in orchestrator execution path:
+  - verify final `(route, model, num_ctx, num_gpu)` matches an approved runtime preset tuple
+  - reject request if any field drifts from approved tuple
+- [ ] Add a post-run policy audit artifact for each book run:
+  - write `policy_runtime_audit.json` under run directory with stage-by-stage resolved route/model/options
+  - include pass/fail for GPU-only and context cap compliance
+- [ ] Build a deterministic routing regression test suite:
+  - fixed prompts (small/medium/large) per profile
+  - assert selected `runtime_preset` is unchanged across prompt sizes
+- [ ] Add a startup guard that compares profile `runtime_preset` names against runtime preset registry and fails fast with a concise diff report.
+- [ ] Add AMD/NVIDIA option semantics checks:
+  - enforce `num_gpu=-1` compatibility in preset loader and profile lint
+  - flag `num_gpu=2` on AMD as invalid for full-offload policy
+- [ ] Add a one-command verification script for approved matrix conformance:
+  - runs smoke calls for critical profiles
+  - captures offload lines from both Ollama logs
+  - exits non-zero if any stage is not fully offloaded
+- [ ] Update docs for semantic consistency:
+  - replace stale references that imply AMD `num_gpu=2` means two cards
+  - document that `num_gpu` is layer offload count/sentinel in Ollama
+- [ ] Evaluate whether profile quality fallback should be constrained to approved preset tuples only (not just approved route/model).
+- [ ] Add CI gate:
+  - run profile lint + runtime preset load + deterministic planner check in pipeline
+  - block merge on any preset drift or missing preset references
+- [ ] Add weekly drift review task:
+  - sample latest successful runs
+  - compare observed route/model/options against standardized matrix
+  - log deltas and corrective actions in this file
 
 ### 🔵 PIPELINE STAGE → ROUTE MAP (STANDARDIZED)
 
 | Stage | Profile | Route | Model | num_ctx | num_gpu | num_predict |
 |-------|---------|-------|-------|---------|---------|-------------|
 | publisher_brief | book-publisher-brief | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
-| research | book-researcher | AMD | qwen2.5-coder:14b | 128000 | 2 | 1800 |
+| research | book-researcher | AMD | qwen2.5-coder:14b | 32768 | -1 | 1800 |
 | architect_outline | book-architect | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
 | chapter_planner | book-chapter-planner | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
 | canon | book-canon | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
 | canon failover | book-canon-nvidia | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
-| writer_section_N | book-writer | NVIDIA | qwen3.5:4b | 8192 | 99 | varies |
-| section_review_N | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| writer_section_N | book-writer | NVIDIA | qwen3.5:4b | 8192 | 99 | 2200 |
+| section_review_N | book-continuity | AMD | qwen3.5:27b | 49152 | -1 | 1800 |
 | story_architect_review | book-architect | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
 | assembler | book-assembler | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
-| assembly_review | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
-| developmental_editor | book-developmental-editor | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
+| assembly_review | book-continuity | AMD | qwen3.5:27b | 49152 | -1 | 1800 |
+| developmental_editor | book-developmental-editor | AMD | qwen3.5:27b | 49152 | -1 | 1800 |
 | line_editor | book-line-editor | NVIDIA | qwen3.5:4b | 8192 | 99 | 1800 |
 | copy_editor | book-copy-editor | NVIDIA | qwen3.5:4b | 8192 | 99 | 1400 |
 | proofreader | book-proofreader | NVIDIA | qwen3.5:2b | 65536 | 99 | 1200 |
-| session_reviewer | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
-| continuity | book-continuity | AMD | qwen3.5:27b | 49152 | 2 | 1800 |
-| publisher_qa | book-publisher | AMD | qwen3.5:9b | 49152 | 2 | 1400 |
+| session_reviewer | book-continuity | AMD | qwen3.5:27b | 49152 | -1 | 1800 |
+| continuity | book-continuity | AMD | qwen3.5:27b | 49152 | -1 | 1800 |
+| publisher_qa | book-publisher | AMD | qwen3.5:9b | 49152 | -1 | 1400 |
 
 ### 🔵 GPU-Only Standardization Plan (All Available Models)
 
@@ -64,7 +163,7 @@ Hardware baseline:
 - AMD: 2x Navi 21, 17163091968 B each (~16 GiB each)
 
 Global policy:
-- Enforce explicit `num_gpu` on every profile (`99` on NVIDIA, `2` on AMD).
+- Enforce explicit full-offload `num_gpu` on every profile/runtime preset (`-1` sentinel in Ollama for all GPU layers).
 - Keep `num_ctx` as high as possible while preserving full layer offload.
 - Never accept CPU fallback silently.
 - Promote only validated `(model, num_ctx)` pairs into production profiles.
@@ -124,7 +223,7 @@ Latest NVIDIA calibration evidence:
 
 **Last Updated:** March 21, 2026
 **Project:** Dragonlair Agent Stack — Multi-agent orchestration for book writing and code generation  
-**Current Focus:** GPU 100% enforcement validation and context cap hardening
+**Current Focus:** book-flow stabilization validation after orchestrator return-path repair, research grounding bootstrap, and GPU/context policy hardening
 
 ### Validation Snapshot (2026-03-21) — E2E Software-Path GPU Audit
 

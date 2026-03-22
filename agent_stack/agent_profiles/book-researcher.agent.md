@@ -1,7 +1,8 @@
 ---
+
 name: book-researcher
-runtime_preset: amd-qwen25-coder-14b-128000
-allowed_routes: ollama_amd,ollama_nvidia
+runtime_preset: amd-qwen25-coder-14b-32768
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 1800
 temperature: 0.3

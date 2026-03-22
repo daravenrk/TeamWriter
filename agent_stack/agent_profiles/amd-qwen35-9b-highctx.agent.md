@@ -1,7 +1,8 @@
 ---
+
 name: amd-qwen35-9b-highctx
 runtime_preset: amd-qwen35-9b-192000
-allowed_routes: ollama_amd,ollama_nvidia
+allowed_routes: ollama_amd
 default_stream: false
 num_predict: 1800
 temperature: 0.4
